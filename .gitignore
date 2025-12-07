@@ -1,0 +1,112 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# Environment Variables
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.temp
+temp/
+tmp/
+
+# Output files
+output/
+results/
+exports/
+*.csv
+*.xlsx
+
+# Test output and development artifacts
+test_output.json
+*_test_results.json
+*_extraction_results.json
+*_extraction_output.txt
+dev_panel_response*.json
+*_response*.json
+
+# Sample data directories (may contain sensitive information)
+sample prd/
+sample rfc/
+sample*/
+
+# Exported data files
+*_export_*.csv
+*_export_*.json
+jira_descriptions_export_*.csv
+
+# Team templates with real names
+*team*.csv
+*Team*.csv
+*team*.xlsx
+*Team*.xlsx
+
+# Backup and temporary files
+*_backup.py
+*_fixed.py
+*_new.py
+*_old.py
+*.bak
+*.backup
+*.swp
+*.swo
+
+# Keep .env.example but ignore all other .env files
+.env
+.env.*
+!.env.example
+
+# Database files (auto-created on first use)
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+openapi.json

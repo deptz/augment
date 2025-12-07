@@ -1,0 +1,208 @@
+# JIRA Configuration
+# All values are loaded from environment variables for security
+jira:
+  server_url: ${JIRA_SERVER_URL}  # Your JIRA instance URL (e.g., https://company.atlassian.net)
+  username: ${JIRA_USERNAME}  # Your JIRA email/username
+  api_token: ${JIRA_API_TOKEN}  # JIRA API token (create at: https://id.atlassian.com/manage-profile/security/api-tokens)
+  prd_custom_field: ${JIRA_PRD_CUSTOM_FIELD:customfield_10001}  # Custom field ID for PRD links
+  rfc_custom_field: ${JIRA_RFC_CUSTOM_FIELD:}  # Custom field ID for RFC links (optional)
+  test_case_custom_field: ${JIRA_TEST_CASE_CUSTOM_FIELD:}  # Custom field ID for test cases (optional)
+  mandays_custom_field: ${JIRA_MANDAYS_CUSTOM_FIELD:}  # Custom field ID for mandays estimation (optional)
+
+# Bitbucket Configuration (Optional)
+# Used for fetching pull requests and commit information
+bitbucket:
+  workspace: ${BITBUCKET_WORKSPACE}  # Your Bitbucket workspace name
+  email: ${BITBUCKET_EMAIL}  # Your Atlassian account email
+  api_token: ${BITBUCKET_API_TOKEN}  # Atlassian API token (same as JIRA token works)
+
+# Confluence Configuration (Optional)
+# Used for fetching PRD/RFC content from Confluence pages
+confluence:
+  server_url: ${CONFLUENCE_SERVER_URL}  # Confluence URL (must include /wiki suffix)
+  username: ${CONFLUENCE_USERNAME}  # Your Atlassian account email
+  api_token: ${CONFLUENCE_API_TOKEN}  # Atlassian API token (same as JIRA token works)
+
+# LLM Configuration
+# Choose one provider: openai, claude (anthropic), gemini (google), or kimi (moonshot)
+# Only the API key for your chosen provider is required
+llm:
+  provider: ${LLM_PROVIDER:openai}  # LLM provider: openai, claude, gemini, or kimi
+  system_prompt: ${LLM_SYSTEM_PROMPT:You are a technical documentation assistant specializing in creating structured Jira ticket descriptions from historical development artifacts.}
+  temperature: ${LLM_TEMPERATURE:0.7}  # LLM temperature (0.0-1.0, higher = more creative)
+  max_tokens: ${LLM_MAX_TOKENS:}  # Global max_tokens override (empty = use provider defaults)
+  # OpenAI Configuration
+  openai_api_key: ${OPENAI_API_KEY}  # Get from: https://platform.openai.com/api-keys
+  openai_model: ${OPENAI_MODEL:gpt-5-mini}
+  # Anthropic (Claude) Configuration
+  anthropic_api_key: ${ANTHROPIC_API_KEY}  # Get from: https://console.anthropic.com/
+  anthropic_model: ${ANTHROPIC_MODEL:claude-sonnet-4-5}
+  # Google (Gemini) Configuration
+  google_api_key: ${GOOGLE_API_KEY}  # Get from: https://makersuite.google.com/app/apikey
+  google_model: ${GOOGLE_MODEL:gemini-2.5-flash}
+  # Moonshot AI (KIMI) Configuration
+  moonshot_api_key: ${MOONSHOT_API_KEY}  # Get from: https://platform.moonshot.cn/
+  moonshot_model: ${MOONSHOT_MODEL:moonshot-v1-8k}
+  
+  # Model configurations (deprecated - use individual model env vars above)
+  models:
+    openai: "gpt-5-mini"
+    claude: "claude-sonnet-4-5"
+    gemini: "gemini-2.5-flash"
+    kimi: "moonshot-v1-8k"
+
+# Processing Configuration
+processing:
+  max_concurrent_requests: ${MAX_CONCURRENT_REQUESTS:5}  # Max parallel API requests
+  request_timeout: ${REQUEST_TIMEOUT:30}  # Request timeout in seconds
+  batch_size: ${BATCH_SIZE:10}  # Number of tickets to process per batch
+  include_code_analysis: ${INCLUDE_CODE_ANALYSIS:true}  # Analyze code diffs from PRs
+  story_description_max_length: ${STORY_DESCRIPTION_MAX_LENGTH:800}  # Max story description length
+  story_description_summary_threshold: ${STORY_DESCRIPTION_SUMMARY_THRESHOLD:1200}  # Threshold for summarization
+
+# Authentication Configuration (Optional)
+# Enable HTTP Basic Authentication for API endpoints
+# Use generate_password_hash.py script to create password hash
+auth:
+  enabled: ${AUTH_ENABLED:false}  # Set to true to enable API authentication
+  username: ${AUTH_USERNAME:admin}  # Username for API authentication
+  password_hash: ${AUTH_PASSWORD_HASH:}  # SHA-256 hash of password (use generate_password_hash.py)
+
+# Redis Configuration
+# Used for ARQ background job queue
+redis:
+  host: ${REDIS_HOST:localhost}  # Redis server host
+  port: ${REDIS_PORT:6379}  # Redis server port
+  password: ${REDIS_PASSWORD:}  # Redis password (optional, leave empty if no password)
+  database: ${REDIS_DB:0}  # Redis database number (0-15)
+
+# Sprint Planning Configuration
+sprint_planning:
+  default_sprint_duration_days: ${SPRINT_DURATION_DAYS:14}  # Default sprint length in days
+  default_team_capacity_days: ${TEAM_CAPACITY_DAYS:10.0}  # Default team capacity per sprint in days
+  auto_create_sprints: ${AUTO_CREATE_SPRINTS:false}  # Auto-create sprints if needed
+
+prompts:
+  description_template: |
+    You are an archival assistant tasked with generating a structured Jira ticket description by analyzing the specific implementation details of this ticket and combining them with broader context from design documents and linked stories.
+
+    **PRIORITIZATION ORDER:**
+    1. Focus primarily on what THIS SPECIFIC TICKET accomplished (title, existing description, file changes, PR details)
+    2. Use story context to understand the broader business requirements and user journey
+    3. Use design document context (PRD/RFC) to understand the overall goals and expected outcomes
+
+    **Primary Context Documents:**
+    - PRD Title: {{prd_title}}
+    - PRD Goals/Objectives: {{prd_goals}}
+    - PRD Summary: {{prd_summary}}
+
+    **RFC Technical Context:**
+    {{rfc_technical_summary}}
+
+    **RFC Implementation Context:**
+    {{rfc_implementation_summary}}
+
+    **RFC Security & Performance Context:**
+    {{rfc_security_performance_summary}}
+
+    **THIS TICKET'S SPECIFIC IMPLEMENTATION:**
+    - Ticket: {{ticket_key}} - {{ticket_title}}
+    - Current Description: {{ticket_description}}
+    - Code Changes Summary: {{code_changes_summary}}
+    - Pull Request Details: {{pull_request_details}}
+    - Commit Messages: {{commit_messages}}
+    - Changed Files: {{changed_files}}
+
+    **Broader Story Context:**
+    {{story_information}}
+
+    **Parent Context:**
+    - Parent Story: {{parent_summary}}
+
+    **Additional Context:**
+    {{additional_context}}
+
+    Based on the provided information, generate a description that captures what THIS SPECIFIC TICKET accomplished. 
+
+    For PRD-based tickets: Focus on user requirements, business value, and feature implementation.
+    For RFC-based tickets: Focus on technical architecture, implementation details, security considerations, and system design.
+
+    The "Purpose" should explain why THIS TICKET was needed within the broader context. The "Scopes" should describe exactly what THIS TICKET implemented (derived primarily from the ticket title, PR details, commits, and file changes). The "Expected Outcome" should describe the specific result of THIS TICKET's work.
+
+    Use the Story and document context to understand WHY this work was needed and how it fits into the overall design, but focus the description on what THIS SPECIFIC TICKET delivered.
+
+    STRICT REQUIREMENTS:
+    - Generate ONLY the ticket description in the specified format
+    - Do NOT include suggestions, recommendations, or follow-up actions
+    - Do NOT offer to provide additional information or assistance
+    - Do NOT ask questions or make proposals
+    - Focus solely on documenting what was accomplished
+
+    Output in this exact format:
+
+    **Purpose:**
+    <A 1-2 sentence summary of *why* THIS SPECIFIC TICKET was necessary, based on the ticket title, story context, and design document goals.>
+
+    **Scopes:**
+    - <A bulleted list of the concrete work that was done IN THIS TICKET, derived primarily from PR details, commit messages, changed files, and ticket title.>
+    - <Another scope item specific to this ticket.>
+
+    **Expected Outcome:**
+    - <A bulleted list describing the final state or result of THIS TICKET's work, based on what was actually implemented.>
+
+  story_coverage_analysis: |
+    Analyze whether the following task tickets adequately cover ALL requirements from the story.
+
+    **Story: {story_key}**
+    **Summary:** {story_summary}
+
+    **Story Description:**
+    {story_description}
+
+    **Story Test Cases:**
+    {story_test_cases}
+
+    **Existing Tasks ({tasks_count} tasks):**
+    {tasks_summary}
+
+    **Task Details with Test Cases:**
+    {tasks_details}
+
+    **Analysis Required:**
+    1. Identify which story requirements are covered by existing tasks
+    2. Identify which story requirements are NOT covered (gaps)
+    3. Rate severity of each gap (critical/important/minor)
+    4. Provide ready-to-copy suggestions for:
+       - Updates to existing tasks (if task partially covers requirement but needs enhancement)
+       - New tasks to create (if requirement completely missing)
+    5. Calculate coverage percentage (0-100)
+
+    **IMPORTANT:** Return ONLY valid JSON in this exact format:
+    {{{{
+      "coverage_percentage": <float 0-100>,
+      "overall_assessment": "<brief summary of coverage>",
+      "covered_requirements": ["<requirement 1>", "<requirement 2>"],
+      "gaps": [
+        {{{{
+          "requirement": "<missing requirement description>",
+          "severity": "critical|important|minor",
+          "suggestion": "<what needs to be done>"
+        }}}}
+      ],
+      "suggestions_for_updates": {{{{
+        "<TASK-KEY>": {{{{
+          "description": "**Purpose:**\\n<purpose>\\n\\n**Scopes:**\\n- <scope 1>\\n- <scope 2>\\n\\n**Expected Outcome:**\\n- <outcome>",
+          "test_cases": "**Test Case 1:**\\n<test case details>"
+        }}}}
+      }}}},
+      "suggestions_for_new_tasks": [
+        {{{{
+          "summary": "<task summary>",
+          "description": "**Purpose:**\\n<purpose>\\n\\n**Scopes:**\\n- <scope>\\n\\n**Expected Outcome:**\\n- <outcome>",
+          "test_cases": "**Test Case 1:**\\n<test case details>",
+          "gap_addressed": "<which gap this addresses>"
+        }}}}
+      ]
+    }}}}
+
+    Return ONLY the JSON object, no additional text or explanation.

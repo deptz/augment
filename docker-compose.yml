@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  augment-api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./config.yaml:/app/config.yaml:ro
+      - ./exports:/app/exports
+      - ./.env:/app/.env:ro  # Optional: if using .env file
+    environment:
+      - PYTHONPATH=/app
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
