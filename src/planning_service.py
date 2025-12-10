@@ -36,7 +36,7 @@ class PlanningService:
         self.confluence_client = confluence_client
         self.llm_client = llm_client
         self.analysis_engine = EpicAnalysisEngine(jira_client, confluence_client)
-        self.bulk_creator = BulkTicketCreator(jira_client)
+        self.bulk_creator = BulkTicketCreator(jira_client, confluence_client)
         self.prompt_engine = PlanningPromptEngine()
         # Enhanced test generator with full context access
         self.test_generator = EnhancedTestGenerator(
@@ -2563,3 +2563,11 @@ class PlanningService:
         
         self.jira_client.jira.update_issue(story.key, update_data)
         logger.info(f"Updated story ticket {story.key}")
+        
+        # Handle image attachments if description contains images
+        # Pass Confluence server URL for image attachment support
+        confluence_server_url = None
+        if self.confluence_client:
+            confluence_server_url = self.confluence_client.server_url
+        
+        self.jira_client._attach_images_from_description(story.key, story.description, confluence_server_url)

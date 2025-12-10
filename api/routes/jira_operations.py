@@ -384,12 +384,19 @@ async def create_story_ticket(
 ):
     """Create a new JIRA Story ticket"""
     jira_client = get_jira_client()
+    from ..dependencies import get_confluence_client
     
     try:
         logger.info(f"User {current_user} creating story ticket (create_ticket={request.create_ticket})")
         
         if not jira_client:
             raise HTTPException(status_code=503, detail="JIRA client not initialized")
+        
+        # Get Confluence server URL if available
+        confluence_client = get_confluence_client()
+        confluence_server_url = None
+        if confluence_client:
+            confluence_server_url = confluence_client.server_url
         
         # Get project key from parent epic
         project_key = jira_client.get_project_key_from_epic(request.parent_key)
@@ -493,7 +500,8 @@ async def create_story_ticket(
         # Create the story ticket
         story_key = jira_client.create_story_ticket(
             story_plan=story_plan,
-            project_key=project_key
+            project_key=project_key,
+            confluence_server_url=confluence_server_url
         )
         
         if not story_key:
@@ -634,6 +642,19 @@ async def update_story_ticket(
             updates_applied["description"] = description_updated
             if not description_updated:
                 logger.warning(f"Failed to update description for {request.story_key}")
+            else:
+                # Handle image attachments if description contains images
+                from ..dependencies import get_confluence_client
+                confluence_client = get_confluence_client()
+                confluence_server_url = None
+                if confluence_client:
+                    confluence_server_url = confluence_client.server_url
+                
+                jira_client._attach_images_from_description(
+                    request.story_key, 
+                    request.description, 
+                    confluence_server_url
+                )
         
         # Update test cases if provided
         if request.test_cases:

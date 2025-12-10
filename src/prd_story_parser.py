@@ -256,7 +256,9 @@ class PRDStoryParser:
             number = self._clean_text(cell(idx_number)) or None
             story_cell = cell(idx_story)
             importance = self._clean_text(cell(idx_importance)) or None
-            mockup_raw = self._clean_text(cell(idx_mockup)) or None
+            # Use _extract_cell_text for mockup column to handle images
+            mockup_cell = cell(idx_mockup)
+            mockup_raw = self._extract_cell_text(mockup_cell) if mockup_cell else None
             
             # Story / description: use _clean_text (joins with spaces, matching simulation)
             story_text = self._clean_text(story_cell) if story_cell else ""
@@ -374,8 +376,64 @@ class PRDStoryParser:
             
             tag_name = elem.name.lower() if elem.name else None
             
+            # Handle images (both <img> tags and Confluence ac:image macros)
+            if tag_name == 'img':
+                src = elem.get('src', '')
+                if src:
+                    # Check if it's a Confluence attachment URL
+                    if '/download/attachments/' in src or '/wiki/download/attachments/' in src:
+                        alt = elem.get('alt', '')
+                        # Try to extract filename from URL
+                        if not alt and '/attachments/' in src:
+                            url_parts = src.split('/')
+                            if len(url_parts) > 0:
+                                potential_filename = url_parts[-1]
+                                if '.' in potential_filename:
+                                    alt = potential_filename
+                        if alt:
+                            lines.append(f"[Image: {alt}]({src})")
+                        else:
+                            lines.append(f"[Image]({src})")
+                    else:
+                        # External image
+                        alt = elem.get('alt', '')
+                        if alt:
+                            lines.append(f"[Image: {alt}]({src})")
+                        else:
+                            lines.append(f"[Image]({src})")
+            elif tag_name == 'ac:image':
+                # Handle Confluence ac:image macros
+                filename = None
+                # Try to find attachment reference
+                ac_link = elem.find('ac:link')
+                if ac_link:
+                    ri_attachment = ac_link.find('ri:attachment')
+                    if ri_attachment:
+                        filename = ri_attachment.get('ri:filename', '')
+                
+                # Also check for ac:image with direct ri:attachment
+                if not filename:
+                    ri_attachment_direct = elem.find('ri:attachment')
+                    if ri_attachment_direct:
+                        filename = ri_attachment_direct.get('ri:filename', '')
+                
+                # Check for ac:parameter with image data as fallback
+                if not filename:
+                    ac_parameter = elem.find('ac:parameter', {'ac:name': 'alt'})
+                    if ac_parameter:
+                        filename = ac_parameter.get_text(strip=True)
+                
+                if filename:
+                    # Try to construct Confluence attachment URL if we have page context
+                    if hasattr(self, '_page_id') and self._page_id:
+                        # Construct attachment URL: /wiki/download/attachments/{pageId}/{filename}
+                        attachment_url = f"/wiki/download/attachments/{self._page_id}/{filename}"
+                        lines.append(f"[Image: {filename}]({attachment_url})")
+                    else:
+                        # Just filename if no page context
+                        lines.append(f"[Image: {filename}]")
             # Handle styling elements
-            if tag_name in ['strong', 'b']:
+            elif tag_name in ['strong', 'b']:
                 for child in elem.children:
                     process_element(child, in_bold=True, in_italic=in_italic, in_code=in_code)
             elif tag_name in ['em', 'i']:

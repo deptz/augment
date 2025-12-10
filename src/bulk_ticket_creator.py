@@ -17,8 +17,9 @@ logger = logging.getLogger(__name__)
 class BulkTicketCreator:
     """Service for creating multiple JIRA tickets with proper relationships"""
     
-    def __init__(self, jira_client: JiraClient):
+    def __init__(self, jira_client: JiraClient, confluence_client=None):
         self.jira_client = jira_client
+        self.confluence_client = confluence_client
     
     def create_epic_structure(self, epic_plan: EpicPlan, dry_run: bool = True) -> Dict[str, Any]:
         """
@@ -328,9 +329,18 @@ class BulkTicketCreator:
     
     def _create_story_with_retry(self, story_plan: StoryPlan, project_key: str, max_retries: int = 3) -> Optional[str]:
         """Create story ticket with retry logic"""
+        # Get Confluence server URL if available
+        confluence_server_url = None
+        if self.confluence_client:
+            confluence_server_url = self.confluence_client.server_url
+        
         for attempt in range(max_retries):
             try:
-                story_key = self.jira_client.create_story_ticket(story_plan, project_key)
+                story_key = self.jira_client.create_story_ticket(
+                    story_plan, 
+                    project_key,
+                    confluence_server_url=confluence_server_url
+                )
                 if story_key:
                     return story_key
                 
