@@ -550,6 +550,11 @@ A 1-2 sentence summary of why this task was necessary, based on PRD/RFC goals.
 - `POST /plan/tasks/bulk-create` - Create multiple JIRA tickets with dependencies
 - All task generation endpoints return `task_id` (UUID) for stable dependency resolution
 
+**Bulk Creation:**
+- `POST /plan/epic/create` - Execute complete planning workflow and create tickets (supports async_mode)
+- `POST /plan/stories/create` - Generate and create story tickets for an epic (supports async_mode)
+- `POST /plan/tasks/create` - Generate and create task tickets for stories (supports async_mode)
+
 **Story Sync from PRD:**
 - `POST /plan/stories/sync-from-prd` - Sync story tickets from PRD table to JIRA (supports async_mode)
 
@@ -730,6 +735,9 @@ curl -X DELETE "http://localhost:8000/jobs/{job_id}"
 - `POST /plan/stories/sync-from-prd` - PRD story sync
 - `POST /plan/tasks/generate` - Task generation
 - `POST /plan/tests/comprehensive` - Comprehensive test generation
+- `POST /plan/epic/create` - Epic planning and ticket creation
+- `POST /plan/stories/create` - Story creation for epic
+- `POST /plan/tasks/create` - Task creation for stories
 - `POST /sprint/plan/epic` - Sprint planning
 - `POST /sprint/timeline` - Timeline creation
 - `POST /jira/bulk-update-stories` - Bulk story updates

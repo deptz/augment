@@ -316,6 +316,9 @@ All these endpoints support `async_mode: true` parameter:
 - `POST /plan/stories/sync-from-prd` - PRD story sync
 - `POST /plan/tasks/generate` - Task generation
 - `POST /plan/tests/comprehensive` - Comprehensive test generation
+- `POST /plan/epic/create` - Epic planning and ticket creation
+- `POST /plan/stories/create` - Story creation for epic
+- `POST /plan/tasks/create` - Task creation for stories
 - `POST /sprint/plan/epic` - Sprint planning
 - `POST /sprint/timeline` - Timeline creation
 
@@ -327,6 +330,9 @@ All these endpoints support `async_mode: true` parameter:
 - `prd_story_sync`: PRD story sync operations
 - `task_generation`: Task generation for stories
 - `test_generation`: Test case generation
+- `epic_creation`: Epic planning and ticket creation
+- `story_creation`: Story creation for epics
+- `task_creation`: Task creation for stories
 - `sprint_planning`: Sprint planning for epic tasks
 - `timeline_planning`: Timeline schedule creation
 

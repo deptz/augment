@@ -481,6 +481,9 @@ All these endpoints support `async_mode: true` parameter:
 - `POST /plan/stories/generate` - Story generation
 - `POST /plan/stories/sync-from-prd` - Sync story tickets from PRD table
 - `POST /plan/tasks/generate` - Task generation
+- `POST /plan/epic/create` - Epic planning and ticket creation
+- `POST /plan/stories/create` - Story creation for epic
+- `POST /plan/tasks/create` - Task creation for stories
 - `POST /plan/tests/comprehensive` - Comprehensive test generation
 - `POST /sprint/plan/epic` - Sprint planning for epic tasks
 - `POST /sprint/timeline` - Timeline schedule creation
@@ -734,6 +737,22 @@ Results format depends on job type:
   "created_tickets": ["STORY-1", "STORY-2"],
   "story_details": [...],
   "task_details": [...]
+}
+```
+
+**Bulk Creation (`epic_creation`, `story_creation`, `task_creation`):**
+```json
+{
+  "epic_key": "EPIC-100",
+  "success": true,
+  "creation_results": {
+    "created_tickets": {
+      "stories": ["STORY-1", "STORY-2"],
+      "tasks": ["TASK-1", "TASK-2", "TASK-3"]
+    },
+    "success": true
+  },
+  "planning_results": {...}
 }
 ```
 
@@ -1318,6 +1337,164 @@ curl "http://localhost:8000/jobs/{job_id}"
 - Preview mode shows what would be updated for each story
 - Async mode is recommended for large batches (>10 stories)
 - All story keys are validated before processing begins
+
+### Bulk Creation
+
+Bulk creation endpoints allow you to generate and create multiple JIRA tickets (stories and tasks) in a single operation. All endpoints support `async_mode` for background processing of long-running operations.
+
+#### `POST /plan/epic/create`
+
+Execute complete planning workflow and optionally create JIRA tickets. This endpoint performs gap analysis, story generation, task breakdown, and ticket creation in one operation.
+
+**Request Body:**
+```json
+{
+  "epic_key": "EPIC-100",
+  "create_tickets": false,
+  "operation_mode": "hybrid",
+  "async_mode": false
+}
+```
+
+**Parameters:**
+- `epic_key` (required): JIRA epic key to plan and create tickets for
+- `create_tickets` (default: false): Set to true to actually create tickets in JIRA
+- `operation_mode` (default: "hybrid"): Planning mode - "documentation", "planning", or "hybrid"
+- `async_mode` (default: false): Process in background. If true, returns job_id for status tracking
+
+**Response (Synchronous):**
+```json
+{
+  "epic_key": "EPIC-100",
+  "create_tickets": false,
+  "success": true,
+  "planning_results": {...},
+  "creation_results": {
+    "created_tickets": {
+      "stories": ["STORY-1", "STORY-2"],
+      "tasks": ["TASK-1", "TASK-2", "TASK-3"]
+    },
+    "success": true
+  },
+  "errors": [],
+  "execution_time_seconds": 45.2
+}
+```
+
+**Response (Asynchronous):**
+```json
+{
+  "job_id": "abc-123-def-456",
+  "status": "started",
+  "message": "Epic planning and creation queued for EPIC-100",
+  "status_url": "/jobs/abc-123-def-456",
+  "update_jira": false
+}
+```
+
+**Notes:**
+- Preview mode by default (`create_tickets=false`)
+- Includes validation and error recovery
+- Created ticket keys are available in `job.results.creation_results.created_tickets` when job completes
+- Async mode recommended for large epics (>5 stories)
+
+#### `POST /plan/stories/create`
+
+Generate and optionally create story tickets for an epic with acceptance criteria.
+
+**Request Body:**
+```json
+{
+  "epic_key": "EPIC-100",
+  "story_count": 5,
+  "create_tickets": false,
+  "async_mode": false
+}
+```
+
+**Parameters:**
+- `epic_key` (required): Parent epic key
+- `story_count` (default: 5): Number of stories to generate
+- `create_tickets` (default: false): Set to true to create tickets in JIRA
+- `async_mode` (default: false): Process in background
+
+**Response (Synchronous):**
+```json
+{
+  "epic_key": "EPIC-100",
+  "planning_results": {...},
+  "creation_results": {
+    "created_tickets": {
+      "stories": ["STORY-1", "STORY-2", "STORY-3"]
+    },
+    "success": true
+  },
+  "success": true
+}
+```
+
+**Response (Asynchronous):**
+```json
+{
+  "job_id": "abc-123-def-456",
+  "status": "started",
+  "message": "Story creation queued for epic EPIC-100",
+  "status_url": "/jobs/abc-123-def-456",
+  "epic_key": "EPIC-100"
+}
+```
+
+#### `POST /plan/tasks/create`
+
+Generate and optionally create task tickets for stories with cycle time estimates. Validates cycle time constraints.
+
+**Request Body:**
+```json
+{
+  "story_keys": ["STORY-1", "STORY-2", "STORY-3"],
+  "tasks_per_story": 3,
+  "create_tickets": false,
+  "async_mode": false
+}
+```
+
+**Parameters:**
+- `story_keys` (required): List of story keys to create tasks for
+- `tasks_per_story` (default: 3): Number of tasks to generate per story
+- `create_tickets` (default: false): Set to true to create tickets in JIRA
+- `async_mode` (default: false): Process in background
+
+**Response (Synchronous):**
+```json
+{
+  "story_keys": ["STORY-1", "STORY-2", "STORY-3"],
+  "planning_results": {...},
+  "creation_results": {
+    "created_tickets": {
+      "tasks": ["TASK-1", "TASK-2", "TASK-3", "TASK-4", "TASK-5"]
+    },
+    "success": true
+  },
+  "success": true
+}
+```
+
+**Response (Asynchronous):**
+```json
+{
+  "job_id": "abc-123-def-456",
+  "status": "started",
+  "message": "Task creation queued for 3 stories",
+  "status_url": "/jobs/abc-123-def-456",
+  "story_keys": ["STORY-1", "STORY-2", "STORY-3"]
+}
+```
+
+**Notes:**
+- All bulk creation endpoints support async_mode for long-running operations
+- Created JIRA ticket keys are returned in `job.results.creation_results.created_tickets` when jobs complete
+- Duplicate prevention: checks for active jobs before starting new ones
+- Preview mode by default - set `create_tickets=true` to actually create tickets
 
 ### Test Generation
 
