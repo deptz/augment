@@ -177,3 +177,4 @@ def _add_jira_ticket_column(table, rows) -> Optional[int]:
     except Exception as e:
         logger.error(f"Error adding JIRA ticket column: {e}")
         return None
+
