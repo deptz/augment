@@ -258,6 +258,35 @@ def extract_story_details_with_tests(planning_result) -> List[StoryDetail]:
                     except Exception as e:
                         logger.error(f"Error processing task '{task.summary}': {str(e)}")
                 
+                # Get story metadata if available
+                story_key = getattr(story, 'key', None)
+                story_meta = None
+                if story_key and hasattr(planning_result, 'story_metadata') and planning_result.story_metadata:
+                    story_meta = planning_result.story_metadata.get(story_key)
+                
+                # Build JIRA URL if we have a key
+                jira_url = None
+                if story_key:
+                    try:
+                        from ..dependencies import get_jira_client
+                        jira_client = get_jira_client()
+                        if jira_client:
+                            jira_url = f"{jira_client.server_url.rstrip('/')}/browse/{story_key}"
+                    except:
+                        pass
+                
+                # Use metadata if available, otherwise use defaults
+                ticket_source = story_meta.get('source') if story_meta else None
+                action_taken = story_meta.get('action_taken') if story_meta else None
+                was_updated = story_meta.get('was_updated') if story_meta else None
+                metadata_jira_url = story_meta.get('jira_url') if story_meta else None
+                
+                # If story has a key but no metadata, infer it was found in PRD (most common case)
+                if story_key and not ticket_source:
+                    # Story has JIRA key but no metadata - likely parsed from PRD table
+                    # This can happen in edge cases or if metadata wasn't populated
+                    ticket_source = 'prd_table'  # Most likely source if key exists but no metadata
+                
                 # Acceptance criteria is now embedded in description, so set to empty list
                 story_detail = StoryDetail(
                     summary=story.summary,
@@ -265,7 +294,11 @@ def extract_story_details_with_tests(planning_result) -> List[StoryDetail]:
                     acceptance_criteria=[],  # Empty since it's now in description
                     test_cases=story_test_cases,
                     tasks=story_tasks,
-                    jira_key=getattr(story, 'key', None)
+                    jira_key=story_key,
+                    jira_url=metadata_jira_url or jira_url,
+                    ticket_source=ticket_source,
+                    action_taken=action_taken,
+                    was_updated=was_updated
                 )
                 story_details.append(story_detail)
                 

@@ -166,7 +166,11 @@ class StoryDetail(BaseModel):
     acceptance_criteria: List[str] = Field(default_factory=list, description="Story acceptance criteria (deprecated - now in description)")
     test_cases: List[TestCaseModel] = Field(default_factory=list, description="Test cases for this story")
     tasks: List[TaskDetail] = Field(default_factory=list, description="Tasks under this story")
-    jira_key: Optional[str] = Field(None, description="JIRA ticket key if created")
+    jira_key: Optional[str] = Field(None, description="JIRA ticket key if created or found")
+    jira_url: Optional[str] = Field(None, description="Full JIRA ticket URL")
+    ticket_source: Optional[str] = Field(None, description="Where the JIRA ticket was found: 'prd_table', 'jira_api', 'newly_created', or None")
+    action_taken: Optional[str] = Field(None, description="Action taken for this story: 'created', 'updated', 'skipped', or None")
+    was_updated: Optional[bool] = Field(None, description="Whether the JIRA ticket was updated/synced during this operation")
 
 
 class PlanningResultResponse(BaseModel):

@@ -729,3 +729,75 @@ class ConfluenceClient:
         except Exception as e:
             logger.error(f"Confluence connection test failed: {e}")
             return False
+    
+    def update_page_content(self, page_id: str, html_content: str, version: int) -> bool:
+        """
+        Update Confluence page content
+        
+        Args:
+            page_id: Confluence page ID
+            html_content: New HTML content in Confluence storage format
+            version: Current page version (will be incremented)
+            
+        Returns:
+            True if update successful, False otherwise
+        """
+        try:
+            # First, get current page to preserve metadata
+            current_page = self._get_page_by_id(page_id)
+            if not current_page:
+                logger.error(f"Could not fetch current page {page_id} for update")
+                return False
+            
+            # Get full page data including version
+            url = f"{self.server_url}/rest/api/content/{page_id}"
+            params = {'expand': 'version,space'}
+            
+            response = self.session.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            page_data = response.json()
+            
+            # Get current version from page data
+            current_version = page_data.get('version', {}).get('number', version)
+            
+            # Prepare update payload
+            update_url = f"{self.server_url}/rest/api/content/{page_id}"
+            update_payload = {
+                'id': page_id,
+                'type': 'page',
+                'title': page_data.get('title', ''),
+                'version': {
+                    'number': current_version + 1
+                },
+                'body': {
+                    'storage': {
+                        'value': html_content,
+                        'representation': 'storage'
+                    }
+                }
+            }
+            
+            # Update the page
+            response = self.session.put(
+                update_url,
+                json=update_payload,
+                headers={'Content-Type': 'application/json'},
+                timeout=30
+            )
+            response.raise_for_status()
+            
+            logger.info(f"Successfully updated Confluence page {page_id} to version {current_version + 1}")
+            return True
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to update Confluence page {page_id}: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                try:
+                    error_detail = e.response.json()
+                    logger.error(f"Error response: {error_detail}")
+                except:
+                    logger.error(f"Error response text: {e.response.text}")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error updating Confluence page {page_id}: {e}")
+            return False

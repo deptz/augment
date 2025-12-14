@@ -1142,6 +1142,183 @@ curl -X POST "http://localhost:8000/jira/update-story-ticket" \
   }'
 ```
 
+#### `POST /jira/bulk-update-stories`
+Bulk update multiple story tickets in a single request. Each story can have different update values for summary, description, test_cases, parent_epic, and links. Supports preview mode and asynchronous processing.
+
+**Request Body:**
+```json
+{
+  "stories": [
+    {
+      "story_key": "STORY-123",
+      "summary": "Updated Story 1 Title",
+      "description": "New description for story 1"
+    },
+    {
+      "story_key": "STORY-456",
+      "description": "Updated description for story 2",
+      "test_cases": "New test cases",
+      "parent_key": "EPIC-100"
+    },
+    {
+      "story_key": "STORY-789",
+      "summary": "Updated Story 3",
+      "links": [
+        {
+          "link_type": "Blocks",
+          "target_key": "STORY-999",
+          "direction": "outward"
+        }
+      ]
+    }
+  ],
+  "dry_run": true,
+  "async_mode": false
+}
+```
+
+**Parameters:**
+- `stories` (required): List of story update requests. Each story can have different update values. Maximum 100 stories per request.
+  - `story_key` (required): JIRA story ticket key to update
+  - `summary` (optional): Update the story title. Leave empty to keep current title.
+  - `description` (optional): Update the story description. Leave empty to keep current description.
+  - `test_cases` (optional): Update test cases for this story. Leave empty to keep current test cases.
+  - `parent_key` (optional): Change the parent epic. Leave empty to keep current parent.
+  - `links` (optional): Create links to other tickets. Leave empty if you don't need to add links.
+- `dry_run` (default: true): Preview mode - show what would be updated without actually updating JIRA
+- `async_mode` (default: false): Process in background (returns job_id for status tracking)
+
+**Response (Synchronous Mode):**
+```json
+{
+  "total_stories": 3,
+  "successful": 2,
+  "failed": 1,
+  "results": [
+    {
+      "story_key": "STORY-123",
+      "success": true,
+      "updated_in_jira": false,
+      "updates_applied": {
+        "summary": true,
+        "description": true
+      },
+      "links_created": [],
+      "error": null,
+      "preview": {
+        "story_key": "STORY-123",
+        "current_summary": "Old Story 1 Title",
+        "new_summary": "Updated Story 1 Title",
+        "current_description": "Old description",
+        "new_description": "New description for story 1"
+      }
+    },
+    {
+      "story_key": "STORY-456",
+      "success": true,
+      "updated_in_jira": false,
+      "updates_applied": {
+        "description": true,
+        "test_cases": true,
+        "parent_key": true
+      },
+      "links_created": [],
+      "error": null
+    },
+    {
+      "story_key": "STORY-789",
+      "success": false,
+      "updated_in_jira": false,
+      "updates_applied": {},
+      "links_created": [],
+      "error": "Ticket STORY-789 not found"
+    }
+  ],
+  "job_id": null,
+  "status_url": null,
+  "message": "Bulk update completed: 2 successful, 1 failed (preview mode - no JIRA changes made)"
+}
+```
+
+**Response (Async Mode):**
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "started",
+  "message": "Bulk story update queued for 3 stories",
+  "status_url": "/jobs/550e8400-e29b-41d4-a716-446655440000",
+  "jql": "",
+  "max_results": 3,
+  "update_jira": false,
+  "safety_note": "JIRA will only be updated if dry_run is false"
+}
+```
+
+**Error Handling:**
+- Invalid story keys: Skipped, marked as failed, processing continues
+- Non-story tickets: Error returned for that specific story, others continue
+- JIRA API errors: Logged and marked as failed, processing continues
+- Partial failures: Returns successful/failed counts with individual results
+
+**Example:**
+```bash
+# Preview mode (synchronous)
+curl -X POST "http://localhost:8000/jira/bulk-update-stories" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "stories": [
+      {
+        "story_key": "STORY-123",
+        "summary": "Updated Title"
+      },
+      {
+        "story_key": "STORY-456",
+        "description": "Updated description"
+      }
+    ],
+    "dry_run": true,
+    "async_mode": false
+  }'
+
+# Actually update stories (synchronous)
+curl -X POST "http://localhost:8000/jira/bulk-update-stories" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "stories": [
+      {
+        "story_key": "STORY-123",
+        "summary": "Updated Title"
+      }
+    ],
+    "dry_run": false,
+    "async_mode": false
+  }'
+
+# Async mode (background processing)
+curl -X POST "http://localhost:8000/jira/bulk-update-stories" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "stories": [
+      {
+        "story_key": "STORY-123",
+        "summary": "Updated Title"
+      }
+    ],
+    "dry_run": false,
+    "async_mode": true
+  }'
+
+# Check job status
+curl "http://localhost:8000/jobs/{job_id}"
+```
+
+**Notes:**
+- Maximum 100 stories per request
+- Each story update is independent - failures don't affect other stories
+- Preview mode shows what would be updated for each story
+- Async mode is recommended for large batches (>10 stories)
+- All story keys are validated before processing begins
+
 ### Test Generation
 
 #### `POST /plan/tests/comprehensive`

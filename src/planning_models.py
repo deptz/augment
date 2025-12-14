@@ -424,3 +424,4 @@ class PlanningResult(BaseModel):
     execution_time_seconds: float = Field(default=0.0, description="Time taken for planning")
     system_prompt: Optional[str] = Field(default=None, description="System prompt sent to LLM")
     user_prompt: Optional[str] = Field(default=None, description="User prompt sent to LLM")
+    story_metadata: Optional[Dict[str, Dict[str, Any]]] = Field(default=None, description="Metadata about stories: key -> {source, action_taken, was_updated, jira_url}")

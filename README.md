@@ -563,6 +563,7 @@ A 1-2 sentence summary of why this task was necessary, based on PRD/RFC goals.
 - `POST /jira/create-ticket` - Create a new JIRA Task ticket
 - `POST /jira/create-story-ticket` - Create a new JIRA Story ticket
 - `POST /jira/update-story-ticket` - Update an existing JIRA Story ticket (title, description, test cases, parent epic, links)
+- `POST /jira/bulk-update-stories` - Bulk update multiple story tickets with different values (supports preview and async modes)
 
 **Job Management:**
 - `GET /jobs/{job_id}` - Get status and results of a background job
@@ -731,6 +732,7 @@ curl -X DELETE "http://localhost:8000/jobs/{job_id}"
 - `POST /plan/tests/comprehensive` - Comprehensive test generation
 - `POST /sprint/plan/epic` - Sprint planning
 - `POST /sprint/timeline` - Timeline creation
+- `POST /jira/bulk-update-stories` - Bulk story updates
 
 For more details, see [Background Jobs Documentation](docs/api/API_DOCUMENTATION.md#background-job-processing).
 

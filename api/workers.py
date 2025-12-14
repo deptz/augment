@@ -663,6 +663,85 @@ async def process_prd_story_sync_worker(ctx, job_id: str, epic_key: str, prd_url
         raise
 
 
+async def process_bulk_story_update_worker(ctx, job_id: str, stories_data: List[Dict[str, Any]], dry_run: bool):
+    """ARQ worker function for bulk updating story tickets"""
+    _initialize_services_if_needed()
+    jira_client = get_jira_client()
+    
+    try:
+        job = _get_or_create_job(job_id, "bulk_story_update", f"Bulk updating {len(stories_data)} stories...")
+        job.total_tickets = len(stories_data)
+        
+        if hasattr(ctx, 'job') and ctx.job.cancelled:
+            job.status = "cancelled"
+            job.completed_at = datetime.now()
+            job.progress = {"message": "Job was cancelled"}
+            return
+        
+        if not jira_client:
+            raise RuntimeError("JIRA client not initialized")
+        
+        from .models.jira_operations import StoryUpdateItem, StoryUpdateResult
+        from .routes.jira_operations import _process_single_story_update
+        
+        results = []
+        successful = 0
+        failed = 0
+        
+        # Process each story
+        for i, story_dict in enumerate(stories_data, 1):
+            if hasattr(ctx, 'job') and ctx.job.cancelled:
+                job.status = "cancelled"
+                job.completed_at = datetime.now()
+                job.progress = {"message": "Job was cancelled"}
+                break
+            
+            story_item = StoryUpdateItem(**story_dict)
+            job.progress = {"message": f"Processing story {i}/{len(stories_data)}: {story_item.story_key}"}
+            job.processed_tickets = i
+            
+            logger.info(f"Processing story {i}/{len(stories_data)}: {story_item.story_key}")
+            
+            result = _process_single_story_update(
+                jira_client=jira_client,
+                story_item=story_item,
+                dry_run=dry_run
+            )
+            
+            results.append(result.dict())
+            
+            if result.success:
+                successful += 1
+                job.successful_tickets = successful
+            else:
+                failed += 1
+                job.failed_tickets = failed
+        
+        job.status = "completed"
+        job.completed_at = datetime.now()
+        job.results = {
+            "total_stories": len(stories_data),
+            "successful": successful,
+            "failed": failed,
+            "results": results
+        }
+        job.progress = {"message": f"Bulk update completed: {successful} successful, {failed} failed"}
+        
+        logger.info(f"Job {job_id} completed: bulk updated {len(stories_data)} stories ({successful} successful, {failed} failed)")
+        
+        return job.results
+        
+    except Exception as e:
+        logger.error(f"Job {job_id} failed: {e}")
+        if job_id in jobs:
+            job = jobs[job_id]
+            job.status = "failed"
+            job.completed_at = datetime.now()
+            job.error = str(e)
+            job.progress = {"message": f"Job failed: {str(e)}"}
+        raise
+
+
 async def process_story_coverage_worker(ctx, job_id: str, story_key: str, include_test_cases: bool = True,
                                        llm_model: Optional[str] = None, llm_provider: Optional[str] = None):
     """ARQ worker function for analyzing story coverage"""
