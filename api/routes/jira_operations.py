@@ -16,9 +16,17 @@ from ..models.jira_operations import (
     BulkUpdateStoriesRequest,
     BulkUpdateStoriesResponse,
     StoryUpdateItem,
-    StoryUpdateResult
+    StoryUpdateResult,
+    BulkCreateTasksRequest,
+    BulkCreateTasksResponse,
+    BulkCreateStoriesRequest,
+    BulkCreateStoriesResponse,
+    BulkCreateResult,
+    BulkCreateTaskItem,
+    BulkCreateStoryItem
 )
-from ..dependencies import get_jira_client, get_active_job_for_ticket, register_ticket_job
+from ..models.generation import BatchResponse, JobStatus
+from ..dependencies import get_jira_client, get_active_job_for_ticket, register_ticket_job, jobs
 from ..models.generation import BatchResponse, JobStatus
 from ..auth import get_current_user
 from datetime import datetime
@@ -1129,3 +1137,449 @@ async def bulk_update_stories(
     except Exception as e:
         logger.error(f"Error in bulk story update: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to bulk update stories: {str(e)}")
+
+
+@router.post("/jira/bulk-create-tasks",
+         tags=["JIRA Operations"],
+         response_model=Union[BulkCreateTasksResponse, BatchResponse],
+         summary="Bulk create multiple task tickets",
+         description="Create multiple task tickets in a single request. All tickets are created first, then all links are created. Preview mode by default. Set create_tickets=true to create. Supports async_mode for background processing.")
+async def bulk_create_tasks(
+    request: BulkCreateTasksRequest,
+    current_user: str = Depends(get_current_user)
+):
+    """Bulk create multiple task tickets"""
+    jira_client = get_jira_client()
+    from ..dependencies import get_confluence_client
+    from ..job_queue import get_redis_pool
+
+    try:
+        logger.info(f"User {current_user} bulk creating {len(request.tasks)} task tickets (create_tickets={request.create_tickets}, async_mode={request.async_mode})")
+
+        if not jira_client:
+            raise HTTPException(status_code=503, detail="JIRA client not initialized")
+
+        # Validate request
+        if not request.tasks:
+            raise HTTPException(status_code=400, detail="At least one task must be provided")
+
+        if len(request.tasks) > 50:
+            raise HTTPException(status_code=400, detail="Maximum 50 tasks can be created in a single request")
+
+        # If async mode, enqueue job
+        if request.async_mode:
+            # Check for duplicate active jobs on task story keys
+            duplicate_stories = []
+            story_keys = list(set([task.story_key for task in request.tasks]))
+            for story_key in story_keys:
+                active_job_id = get_active_job_for_ticket(story_key)
+                if active_job_id:
+                    duplicate_stories.append(story_key)
+                    logger.warning(f"Skipping story {story_key} - already being processed in job {active_job_id}")
+            
+            if duplicate_stories:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Some stories are already being processed: {', '.join(duplicate_stories)}",
+                    headers={"X-Duplicate-Stories": ",".join(duplicate_stories)}
+                )
+            
+            job_id = str(uuid.uuid4())
+            
+            jobs[job_id] = JobStatus(
+                job_id=job_id,
+                job_type="bulk_task_creation",
+                status="started",
+                progress={"message": f"Queued for creating {len(request.tasks)} task tickets"},
+                started_at=datetime.now(),
+                processed_tickets=0,
+                successful_tickets=0,
+                failed_tickets=0,
+                ticket_keys=story_keys
+            )
+            
+            # Register all story keys for duplicate prevention
+            for story_key in story_keys:
+                register_ticket_job(story_key, job_id)
+            
+            redis_pool = await get_redis_pool()
+            await redis_pool.enqueue_job(
+                'process_bulk_task_creation_worker',
+                job_id=job_id,
+                tasks_data=[task.dict() for task in request.tasks],
+                create_tickets=request.create_tickets,
+                _job_id=job_id
+            )
+            
+            logger.info(f"Enqueued bulk task creation job {job_id} for {len(request.tasks)} tasks")
+            
+            return BatchResponse(
+                job_id=job_id,
+                status="started",
+                message=f"Bulk task creation queued for {len(request.tasks)} tasks",
+                status_url=f"/jobs/{job_id}",
+                jql="",  # Not applicable
+                max_results=len(request.tasks),
+                update_jira=request.create_tickets,
+                safety_note="JIRA will only be updated if create_tickets is true"
+            )
+
+        if not request.create_tickets:
+            # Preview mode
+            logger.info(f"Preview mode - not creating tickets in JIRA")
+            preview_results = []
+            for i, task_item in enumerate(request.tasks):
+                preview_results.append(BulkCreateResult(
+                    index=i,
+                    success=True,
+                    ticket_key=None,
+                    error=None,
+                    links_created=[]
+                ))
+            
+            return BulkCreateTasksResponse(
+                total_tasks=len(request.tasks),
+                successful=len(request.tasks),
+                failed=0,
+                results=preview_results,
+                created_tickets=[],
+                message=f"Preview: {len(request.tasks)} task tickets would be created. Set create_tickets=true to commit."
+            )
+
+        # Get Confluence server URL if available
+        confluence_client = get_confluence_client()
+        confluence_server_url = None
+        if confluence_client:
+            confluence_server_url = confluence_client.server_url
+
+        # Get project key from first task's parent epic
+        project_key = jira_client.get_project_key_from_epic(request.tasks[0].parent_key)
+        if not project_key:
+            raise HTTPException(status_code=400, detail=f"Could not determine project key from epic {request.tasks[0].parent_key}")
+
+        # Build issue data for all tasks
+        from src.planning_models import TaskPlan, CycleTimeEstimate, TaskScope
+        
+        tickets_data = []
+        task_index_to_item = {}  # Map index to task item for link creation later
+        pending_links = []  # Collect all links to create after tickets are created
+        
+        for i, task_item in enumerate(request.tasks):
+            # Create cycle time estimate if mandays provided
+            cycle_time_estimate = None
+            if task_item.mandays is not None:
+                cycle_time_estimate = CycleTimeEstimate(
+                    development_days=task_item.mandays * 0.6,
+                    testing_days=task_item.mandays * 0.2,
+                    review_days=task_item.mandays * 0.15,
+                    deployment_days=task_item.mandays * 0.05,
+                    total_days=task_item.mandays,
+                    confidence_level=0.7
+                )
+
+            # Create TaskPlan
+            task_plan = TaskPlan(
+                summary=task_item.summary,
+                purpose=task_item.description,
+                scopes=[TaskScope(
+                    description=task_item.description,
+                    deliverable="Task completion"
+                )],
+                expected_outcomes=["Task completed successfully"],
+                test_cases=[],
+                cycle_time_estimate=cycle_time_estimate,
+                epic_key=task_item.parent_key
+            )
+
+            # Build issue data (similar to create_task_ticket)
+            description_adf = jira_client._convert_markdown_to_adf(task_item.description)
+            
+            issue_data = {
+                "fields": {
+                    "project": {"key": project_key},
+                    "summary": task_item.summary,
+                    "description": description_adf,
+                    "issuetype": {"name": "Task"}
+                }
+            }
+
+            # Add parent epic
+            if task_item.parent_key:
+                epic_type = jira_client.get_ticket_type(task_item.parent_key)
+                if epic_type and 'epic' in epic_type.lower():
+                    issue_data["fields"]["parent"] = {"key": task_item.parent_key}
+
+            # Add mandays if available
+            if cycle_time_estimate and jira_client.mandays_custom_field:
+                issue_data["fields"][jira_client.mandays_custom_field] = cycle_time_estimate.total_days
+
+            # Add test cases if available
+            if task_item.test_cases and jira_client.test_case_custom_field:
+                test_cases_adf = jira_client._convert_markdown_to_adf(task_item.test_cases)
+                issue_data["fields"][jira_client.test_case_custom_field] = test_cases_adf
+
+            tickets_data.append(issue_data)
+            task_index_to_item[i] = task_item
+
+            # Collect link information for later
+            if task_item.story_key:
+                pending_links.append({
+                    "index": i,
+                    "from": None,  # Will be set after ticket creation
+                    "to": task_item.story_key,
+                    "type": "Work item split",
+                    "direction": "outward"
+                })
+            
+            if task_item.blocks:
+                for blocked_key in task_item.blocks:
+                    pending_links.append({
+                        "index": i,
+                        "from": None,  # Will be set after ticket creation
+                        "to": blocked_key,
+                        "type": "Blocks",
+                        "direction": "outward"
+                    })
+
+        # Create all tickets first
+        logger.info(f"Creating {len(tickets_data)} task tickets in bulk...")
+        bulk_results = jira_client.bulk_create_tickets(tickets_data)
+        
+        created_ticket_keys = bulk_results.get("created_tickets", [])
+        failed_tickets = bulk_results.get("failed_tickets", [])
+        
+        # Build results
+        results = []
+        successful = 0
+        failed = 0
+        index_to_ticket_key = {}  # Map index to created ticket key
+        
+        for i in range(len(request.tasks)):
+            if i < len(created_ticket_keys):
+                ticket_key = created_ticket_keys[i]
+                index_to_ticket_key[i] = ticket_key
+                results.append(BulkCreateResult(
+                    index=i,
+                    success=True,
+                    ticket_key=ticket_key,
+                    error=None,
+                    links_created=[]
+                ))
+                successful += 1
+            else:
+                error_msg = "Failed to create ticket"
+                if i < len(failed_tickets):
+                    error_msg = str(failed_tickets[i])
+                results.append(BulkCreateResult(
+                    index=i,
+                    success=False,
+                    ticket_key=None,
+                    error=error_msg,
+                    links_created=[]
+                ))
+                failed += 1
+
+        # Now create all links after all tickets are created
+        logger.info(f"All tickets created. Creating {len(pending_links)} pending links...")
+        
+        for link_info in pending_links:
+            index = link_info["index"]
+            if index not in index_to_ticket_key:
+                continue  # Skip if ticket creation failed
+            
+            source_key = index_to_ticket_key[index]
+            target_key = link_info["to"]
+            link_type = link_info["type"]
+            direction = link_info.get("direction", "outward")
+            
+            # Create the link
+            link_success = jira_client.create_issue_link_generic(
+                source_key=source_key,
+                target_key=target_key,
+                link_type=link_type,
+                direction=direction
+            )
+            
+            if link_success:
+                results[index].links_created.append({
+                    "link_type": link_type,
+                    "source_key": source_key,
+                    "target_key": target_key,
+                    "status": "created"
+                })
+            else:
+                results[index].links_created.append({
+                    "link_type": link_type,
+                    "source_key": source_key,
+                    "target_key": target_key,
+                    "status": "failed"
+                })
+
+        message = f"Bulk creation completed: {successful} successful, {failed} failed"
+        logger.info(message)
+
+        return BulkCreateTasksResponse(
+            total_tasks=len(request.tasks),
+            successful=successful,
+            failed=failed,
+            results=results,
+            created_tickets=created_ticket_keys,
+            message=message
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in bulk task creation: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to bulk create tasks: {str(e)}")
+
+
+@router.post("/jira/bulk-create-stories",
+         tags=["JIRA Operations"],
+         response_model=BulkCreateStoriesResponse,
+         summary="Bulk create multiple story tickets",
+         description="Create multiple story tickets in a single request. All tickets are created first, then all links are created. Preview mode by default. Set create_tickets=true to create.")
+async def bulk_create_stories(
+    request: BulkCreateStoriesRequest,
+    current_user: str = Depends(get_current_user)
+):
+    """Bulk create multiple story tickets"""
+    jira_client = get_jira_client()
+    from ..dependencies import get_confluence_client
+
+    try:
+        logger.info(f"User {current_user} bulk creating {len(request.stories)} story tickets (create_tickets={request.create_tickets})")
+
+        if not jira_client:
+            raise HTTPException(status_code=503, detail="JIRA client not initialized")
+
+        # Validate request
+        if not request.stories:
+            raise HTTPException(status_code=400, detail="At least one story must be provided")
+
+        if len(request.stories) > 50:
+            raise HTTPException(status_code=400, detail="Maximum 50 stories can be created in a single request")
+
+        if not request.create_tickets:
+            # Preview mode
+            logger.info(f"Preview mode - not creating tickets in JIRA")
+            preview_results = []
+            for i, story_item in enumerate(request.stories):
+                preview_results.append(BulkCreateResult(
+                    index=i,
+                    success=True,
+                    ticket_key=None,
+                    error=None,
+                    links_created=[]
+                ))
+            
+            return BulkCreateStoriesResponse(
+                total_stories=len(request.stories),
+                successful=len(request.stories),
+                failed=0,
+                results=preview_results,
+                created_tickets=[],
+                message=f"Preview: {len(request.stories)} story tickets would be created. Set create_tickets=true to commit."
+            )
+
+        # Get Confluence server URL if available
+        confluence_client = get_confluence_client()
+        confluence_server_url = None
+        if confluence_client:
+            confluence_server_url = confluence_client.server_url
+
+        # Get project key from first story's parent epic
+        project_key = jira_client.get_project_key_from_epic(request.stories[0].parent_key)
+        if not project_key:
+            raise HTTPException(status_code=400, detail=f"Could not determine project key from epic {request.stories[0].parent_key}")
+
+        # Build issue data for all stories
+        from src.planning_models import StoryPlan
+        
+        tickets_data = []
+        
+        for story_item in request.stories:
+            # Create StoryPlan
+            story_plan = StoryPlan(
+                summary=story_item.summary,
+                description=story_item.description,
+                acceptance_criteria=[],
+                epic_key=story_item.parent_key
+            )
+
+            # Build issue data (similar to create_story_ticket)
+            description_adf = jira_client._convert_markdown_to_adf(story_item.description)
+            
+            issue_data = {
+                "fields": {
+                    "project": {"key": project_key},
+                    "summary": story_item.summary,
+                    "description": description_adf,
+                    "issuetype": {"name": "Story"}
+                }
+            }
+
+            # Add parent epic
+            if story_item.parent_key:
+                issue_data["fields"]["parent"] = {"key": story_item.parent_key}
+
+            # Add test cases if available
+            if story_item.test_cases and jira_client.test_case_custom_field:
+                test_cases_adf = jira_client._convert_markdown_to_adf(story_item.test_cases)
+                issue_data["fields"][jira_client.test_case_custom_field] = test_cases_adf
+
+            tickets_data.append(issue_data)
+
+        # Create all tickets first
+        logger.info(f"Creating {len(tickets_data)} story tickets in bulk...")
+        bulk_results = jira_client.bulk_create_tickets(tickets_data)
+        
+        created_ticket_keys = bulk_results.get("created_tickets", [])
+        failed_tickets = bulk_results.get("failed_tickets", [])
+        
+        # Build results
+        results = []
+        successful = 0
+        failed = 0
+        
+        for i in range(len(request.stories)):
+            if i < len(created_ticket_keys):
+                ticket_key = created_ticket_keys[i]
+                results.append(BulkCreateResult(
+                    index=i,
+                    success=True,
+                    ticket_key=ticket_key,
+                    error=None,
+                    links_created=[]
+                ))
+                successful += 1
+            else:
+                error_msg = "Failed to create ticket"
+                if i < len(failed_tickets):
+                    error_msg = str(failed_tickets[i])
+                results.append(BulkCreateResult(
+                    index=i,
+                    success=False,
+                    ticket_key=None,
+                    error=error_msg,
+                    links_created=[]
+                ))
+                failed += 1
+
+        message = f"Bulk creation completed: {successful} successful, {failed} failed"
+        logger.info(message)
+
+        return BulkCreateStoriesResponse(
+            total_stories=len(request.stories),
+            successful=successful,
+            failed=failed,
+            results=results,
+            created_tickets=created_ticket_keys,
+            message=message
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in bulk story creation: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to bulk create stories: {str(e)}")

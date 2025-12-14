@@ -31,3 +31,4 @@ echo "Press Ctrl+C to stop the worker"
 echo ""
 
 python run_worker.py
+
