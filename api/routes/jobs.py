@@ -138,13 +138,17 @@ async def _reconstruct_job_from_redis(job_id: str) -> Optional[JobStatus]:
             ticket_key = kwargs.get('ticket_key') or kwargs.get('story_key') or kwargs.get('epic_key')
             ticket_keys = kwargs.get('story_keys') or (kwargs.get('ticket_keys') if 'ticket_keys' in kwargs else None)
             
+            # Only use arq_results if it's a valid dict (for successful jobs)
+            # For failed jobs, arq_results contains the exception object, not actual results
+            results_for_job = arq_results if isinstance(arq_results, dict) else None
+            
             # Reconstruct JobStatus
             reconstructed_job = JobStatus(
                 job_id=job_id,
                 job_type=job_type,
                 status=status,
                 progress={"message": progress_msg},
-                results=arq_results,
+                results=results_for_job,
                 started_at=start_time if start_time else enqueue_time,
                 completed_at=finish_time if status in ["completed", "failed", "cancelled"] else None,
                 processed_tickets=1 if job_type in ['single', 'story_coverage'] else (len(ticket_keys) if ticket_keys else 0),
@@ -198,13 +202,17 @@ async def _reconstruct_job_from_redis(job_id: str) -> Optional[JobStatus]:
                 
                 logger.info(f"Reconstructing job {job_id} from Redis results: status={status}, has_results={arq_results is not None}")
                 
+                # Only use arq_results if it's a valid dict (for successful jobs)
+                # For failed jobs, arq_results contains the exception object, not actual results
+                results_for_job = arq_results if isinstance(arq_results, dict) else None
+                
                 # Reconstruct JobStatus
                 reconstructed_job = JobStatus(
                     job_id=job_id,
                     job_type=job_type,
                     status=status,
                     progress={"message": "Job completed (reconstructed from Redis)"},
-                    results=arq_results,
+                    results=results_for_job,
                     started_at=job_result.start_time if job_result.start_time else job_result.enqueue_time,
                     completed_at=job_result.finish_time,
                     processed_tickets=1 if job_type in ['single', 'story_coverage'] else 0,
