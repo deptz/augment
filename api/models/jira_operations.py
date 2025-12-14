@@ -295,3 +295,147 @@ class BulkUpdateStoriesResponse(BaseModel):
     )
     message: str = Field(..., description="Status message")
 
+
+class BulkCreateTaskItem(BaseModel):
+    """Individual task creation request for bulk operations"""
+    task_id: Optional[str] = Field(
+        None,
+        description="Internal task ID (UUID) for dependency resolution within the batch. Used to resolve references in 'blocks' field.",
+        example="b948a26f-5407-4eb6-9378-01a39115fab2"
+    )
+    parent_key: str = Field(
+        ...,
+        description="Parent epic ticket key",
+        example="EPIC-100"
+    )
+    summary: str = Field(
+        ...,
+        description="Task summary/title",
+        example="Implement user authentication"
+    )
+    description: str = Field(
+        ...,
+        description="Task description",
+        example="Add login functionality with email and password"
+    )
+    story_key: str = Field(
+        ...,
+        description="Story ticket key to link via split-from relationship",
+        example="STORY-123"
+    )
+    test_cases: Optional[str] = Field(
+        None,
+        description="Test cases content for custom field (optional)"
+    )
+    mandays: Optional[float] = Field(
+        None,
+        description="Mandays estimation value (optional)",
+        example=2.0
+    )
+    blocks: Optional[List[str]] = Field(
+        None,
+        description="List of ticket keys OR task_ids (UUIDs) that this task blocks. UUIDs will be resolved to JIRA keys for tasks in the same batch.",
+        example=["TASK-456", "b948a26f-5407-4eb6-9378-01a39115fab2"]
+    )
+
+
+class BulkCreateStoryItem(BaseModel):
+    """Individual story creation request for bulk operations"""
+    parent_key: str = Field(
+        ...,
+        description="Parent epic ticket key",
+        example="EPIC-100"
+    )
+    summary: str = Field(
+        ...,
+        description="Story summary/title",
+        example="User authentication feature"
+    )
+    description: str = Field(
+        ...,
+        description="Story description/context",
+        example="As a user, I want to authenticate with email and password so that I can access my account"
+    )
+    test_cases: Optional[str] = Field(
+        None,
+        description="Test cases content for custom field (optional)"
+    )
+
+
+class BulkCreateTasksRequest(BaseModel):
+    """Request to bulk create multiple task tickets"""
+    tasks: List[BulkCreateTaskItem] = Field(
+        ...,
+        description="List of task creation requests",
+        min_items=1
+    )
+    create_tickets: bool = Field(
+        default=False,
+        description="Create tickets in JIRA (default: false for preview mode)"
+    )
+    async_mode: bool = Field(
+        default=False,
+        description="Process in background (returns job_id for status tracking)"
+    )
+
+
+class BulkCreateStoriesRequest(BaseModel):
+    """Request to bulk create multiple story tickets"""
+    stories: List[BulkCreateStoryItem] = Field(
+        ...,
+        description="List of story creation requests",
+        min_items=1
+    )
+    create_tickets: bool = Field(
+        default=False,
+        description="Create tickets in JIRA (default: false for preview mode)"
+    )
+    async_mode: bool = Field(
+        default=False,
+        description="Process in background (returns job_id for status tracking)"
+    )
+
+
+class BulkCreateResult(BaseModel):
+    """Result for individual ticket creation in bulk operation"""
+    index: int = Field(..., description="Index of the ticket in the request")
+    success: bool = Field(..., description="Whether the creation was successful")
+    ticket_key: Optional[str] = Field(None, description="Created ticket key (if successful)")
+    error: Optional[str] = Field(None, description="Error message if creation failed")
+    links_created: List[Dict[str, str]] = Field(
+        default_factory=list,
+        description="List of links that were created for this ticket"
+    )
+
+
+class BulkCreateTasksResponse(BaseModel):
+    """Response from bulk task creation operation"""
+    total_tasks: int = Field(..., description="Total number of tasks in the request")
+    successful: int = Field(..., description="Number of successfully created tasks")
+    failed: int = Field(..., description="Number of failed task creations")
+    results: List[BulkCreateResult] = Field(
+        ...,
+        description="Individual results for each task creation"
+    )
+    created_tickets: List[str] = Field(
+        default_factory=list,
+        description="List of successfully created ticket keys"
+    )
+    message: str = Field(..., description="Status message")
+
+
+class BulkCreateStoriesResponse(BaseModel):
+    """Response from bulk story creation operation"""
+    total_stories: int = Field(..., description="Total number of stories in the request")
+    successful: int = Field(..., description="Number of successfully created stories")
+    failed: int = Field(..., description="Number of failed story creations")
+    results: List[BulkCreateResult] = Field(
+        ...,
+        description="Individual results for each story creation"
+    )
+    created_tickets: List[str] = Field(
+        default_factory=list,
+        description="List of successfully created ticket keys"
+    )
+    message: str = Field(..., description="Status message")
+

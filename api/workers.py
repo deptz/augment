@@ -742,6 +742,342 @@ async def process_bulk_story_update_worker(ctx, job_id: str, stories_data: List[
         raise
 
 
+async def process_bulk_task_creation_worker(ctx, job_id: str, tasks_data: List[Dict[str, Any]], create_tickets: bool):
+    """ARQ worker function for bulk creating task tickets"""
+    _initialize_services_if_needed()
+    jira_client = get_jira_client()
+    from .dependencies import get_confluence_client
+    
+    try:
+        job = _get_or_create_job(job_id, "bulk_task_creation", f"Creating {len(tasks_data)} task tickets...")
+        job.total_tickets = len(tasks_data)
+        
+        if hasattr(ctx, 'job') and ctx.job.cancelled:
+            job.status = "cancelled"
+            job.completed_at = datetime.now()
+            job.progress = {"message": "Job was cancelled"}
+            # Unregister story keys
+            story_keys = list(set([task.get("story_key") for task in tasks_data]))
+            for story_key in story_keys:
+                unregister_ticket_job(story_key)
+            return
+        
+        if not jira_client:
+            raise RuntimeError("JIRA client not initialized")
+        
+        if not create_tickets:
+            # Preview mode - return preview results
+            preview_results = []
+            for i, task_dict in enumerate(tasks_data):
+                preview_results.append({
+                    "index": i,
+                    "success": True,
+                    "ticket_key": None,
+                    "error": None,
+                    "links_created": []
+                })
+            
+            job.status = "completed"
+            job.completed_at = datetime.now()
+            job.results = {
+                "total_tasks": len(tasks_data),
+                "successful": len(tasks_data),
+                "failed": 0,
+                "results": preview_results,
+                "created_tickets": [],
+                "message": f"Preview: {len(tasks_data)} task tickets would be created. Set create_tickets=true to commit."
+            }
+            job.progress = {"message": f"Preview completed: {len(tasks_data)} tasks"}
+            job.successful_tickets = len(tasks_data)
+            
+            story_keys = list(set([task.get("story_key") for task in tasks_data]))
+            for story_key in story_keys:
+                unregister_ticket_job(story_key)
+            
+            return job.results
+        
+        # Get Confluence server URL if available
+        confluence_client = get_confluence_client()
+        confluence_server_url = None
+        if confluence_client:
+            confluence_server_url = confluence_client.server_url
+        
+        # Get project key from first task's parent epic
+        project_key = jira_client.get_project_key_from_epic(tasks_data[0]["parent_key"])
+        if not project_key:
+            raise RuntimeError(f"Could not determine project key from epic {tasks_data[0]['parent_key']}")
+        
+        # Build issue data for all tasks
+        from src.planning_models import TaskPlan, CycleTimeEstimate, TaskScope
+        
+        tickets_data = []
+        task_index_to_item = {}  # Map index to task item for link creation later
+        pending_links = []  # Collect all links to create after tickets are created
+        
+        job.progress = {"message": "Preparing task data..."}
+        
+        for i, task_dict in enumerate(tasks_data):
+            task_item = type('TaskItem', (), task_dict)()  # Simple object from dict
+            
+            # Create cycle time estimate if mandays provided
+            cycle_time_estimate = None
+            if task_dict.get("mandays") is not None:
+                mandays = task_dict["mandays"]
+                cycle_time_estimate = CycleTimeEstimate(
+                    development_days=mandays * 0.6,
+                    testing_days=mandays * 0.2,
+                    review_days=mandays * 0.15,
+                    deployment_days=mandays * 0.05,
+                    total_days=mandays,
+                    confidence_level=0.7
+                )
+            
+            # Create TaskPlan
+            task_plan = TaskPlan(
+                summary=task_dict["summary"],
+                purpose=task_dict["description"],
+                scopes=[TaskScope(
+                    description=task_dict["description"],
+                    deliverable="Task completion"
+                )],
+                expected_outcomes=["Task completed successfully"],
+                test_cases=[],
+                cycle_time_estimate=cycle_time_estimate,
+                epic_key=task_dict["parent_key"]
+            )
+            
+            # Build issue data
+            description_adf = jira_client._convert_markdown_to_adf(task_dict["description"])
+            
+            issue_data = {
+                "fields": {
+                    "project": {"key": project_key},
+                    "summary": task_dict["summary"],
+                    "description": description_adf,
+                    "issuetype": {"name": "Task"}
+                }
+            }
+            
+            # Add parent epic
+            if task_dict["parent_key"]:
+                epic_type = jira_client.get_ticket_type(task_dict["parent_key"])
+                if epic_type and 'epic' in epic_type.lower():
+                    issue_data["fields"]["parent"] = {"key": task_dict["parent_key"]}
+            
+            # Add mandays if available
+            if cycle_time_estimate and jira_client.mandays_custom_field:
+                issue_data["fields"][jira_client.mandays_custom_field] = cycle_time_estimate.total_days
+            
+            # Add test cases if available
+            if task_dict.get("test_cases") and jira_client.test_case_custom_field:
+                test_cases_adf = jira_client._convert_markdown_to_adf(task_dict["test_cases"])
+                issue_data["fields"][jira_client.test_case_custom_field] = test_cases_adf
+            
+            tickets_data.append(issue_data)
+            task_index_to_item[i] = task_dict
+            
+            # Collect link information for later
+            if task_dict.get("story_key"):
+                pending_links.append({
+                    "index": i,
+                    "from": None,  # Will be set after ticket creation
+                    "to": task_dict["story_key"],
+                    "type": "Work item split",
+                    "direction": "outward"
+                })
+            
+            if task_dict.get("blocks"):
+                for blocked_key in task_dict["blocks"]:
+                    pending_links.append({
+                        "index": i,
+                        "from": None,  # Will be set after ticket creation
+                        "to": blocked_key,
+                        "type": "Blocks",
+                        "direction": "outward"
+                    })
+        
+        # Create all tickets first
+        job.progress = {"message": f"Creating {len(tickets_data)} task tickets in bulk..."}
+        logger.info(f"Creating {len(tickets_data)} task tickets in bulk...")
+        bulk_results = jira_client.bulk_create_tickets(tickets_data)
+        
+        created_ticket_keys = bulk_results.get("created_tickets", [])
+        failed_tickets = bulk_results.get("failed_tickets", [])
+        
+        # Build results and mappings for dependency resolution
+        results = []
+        successful = 0
+        failed = 0
+        index_to_ticket_key = {}  # Map index to created ticket key
+        task_id_to_ticket_key = {}  # Map task_id (UUID) to created ticket key for dependency resolution
+        
+        for i in range(len(tasks_data)):
+            if i < len(created_ticket_keys):
+                ticket_key = created_ticket_keys[i]
+                index_to_ticket_key[i] = ticket_key
+                
+                # Build task_id -> ticket_key mapping for UUID-based dependency resolution
+                task_id = tasks_data[i].get("task_id")
+                if task_id:
+                    task_id_to_ticket_key[task_id] = ticket_key
+                    logger.debug(f"Mapped task_id {task_id} -> {ticket_key}")
+                
+                results.append({
+                    "index": i,
+                    "success": True,
+                    "ticket_key": ticket_key,
+                    "error": None,
+                    "links_created": []
+                })
+                successful += 1
+            else:
+                error_msg = "Failed to create ticket"
+                if i < len(failed_tickets):
+                    error_msg = str(failed_tickets[i])
+                results.append({
+                    "index": i,
+                    "success": False,
+                    "ticket_key": None,
+                    "error": error_msg,
+                    "links_created": []
+                })
+                failed += 1
+        
+        logger.info(f"Built task_id mapping with {len(task_id_to_ticket_key)} entries for dependency resolution")
+        
+        # Also build summary -> ticket_key mapping for summary-based dependency resolution
+        summary_to_ticket_key = {}
+        for i, task_dict in enumerate(tasks_data):
+            if i in index_to_ticket_key:
+                summary = task_dict.get("summary")
+                if summary:
+                    summary_to_ticket_key[summary] = index_to_ticket_key[i]
+        logger.info(f"Built summary mapping with {len(summary_to_ticket_key)} entries for dependency resolution")
+        
+        # Now create all links after all tickets are created
+        job.progress = {"message": f"All tickets created. Creating {len(pending_links)} pending links..."}
+        logger.info(f"All tickets created. Creating {len(pending_links)} pending links...")
+        
+        # Helper function to check if a string is a UUID
+        def is_uuid(value: str) -> bool:
+            import uuid as uuid_module
+            try:
+                uuid_module.UUID(value)
+                return True
+            except (ValueError, AttributeError):
+                return False
+        
+        for link_info in pending_links:
+            if hasattr(ctx, 'job') and ctx.job.cancelled:
+                break
+            
+            index = link_info["index"]
+            if index not in index_to_ticket_key:
+                continue  # Skip if ticket creation failed
+            
+            source_key = index_to_ticket_key[index]
+            target_key = link_info["to"]
+            link_type = link_info["type"]
+            direction = link_info.get("direction", "outward")
+            
+            # Resolve target_key if it's a task_id (UUID) or task summary
+            original_target = target_key
+            resolved = False
+            
+            # First, try to resolve as UUID (task_id)
+            if is_uuid(target_key):
+                resolved_key = task_id_to_ticket_key.get(target_key)
+                if resolved_key:
+                    target_key = resolved_key
+                    resolved = True
+                    logger.info(f"Resolved task_id {original_target} -> {target_key} for {link_type} link")
+            
+            # If not a UUID or not resolved, try to resolve as task summary
+            if not resolved and target_key in summary_to_ticket_key:
+                resolved_key = summary_to_ticket_key[target_key]
+                target_key = resolved_key
+                resolved = True
+                logger.info(f"Resolved task summary '{original_target}' -> {target_key} for {link_type} link")
+            
+            # If it's a UUID that couldn't be resolved, skip this link
+            if not resolved and is_uuid(original_target):
+                logger.warning(f"Could not resolve task_id {original_target} to JIRA key - task may not exist in this batch or was not created")
+                results[index]["links_created"].append({
+                    "link_type": link_type,
+                    "source_key": source_key,
+                    "target_key": original_target,
+                    "status": "failed",
+                    "error": f"Could not resolve task_id {original_target} to JIRA key"
+                })
+                continue
+            
+            # If still not resolved, assume it's already a JIRA key (e.g., "BIF-1234")
+            
+            # Create the link
+            link_success = jira_client.create_issue_link_generic(
+                source_key=source_key,
+                target_key=target_key,
+                link_type=link_type,
+                direction=direction
+            )
+            
+            if link_success:
+                results[index]["links_created"].append({
+                    "link_type": link_type,
+                    "source_key": source_key,
+                    "target_key": target_key,
+                    "status": "created"
+                })
+            else:
+                results[index]["links_created"].append({
+                    "link_type": link_type,
+                    "source_key": source_key,
+                    "target_key": target_key,
+                    "status": "failed"
+                })
+        
+        message = f"Bulk creation completed: {successful} successful, {failed} failed"
+        logger.info(message)
+        
+        job.status = "completed"
+        job.completed_at = datetime.now()
+        job.results = {
+            "total_tasks": len(tasks_data),
+            "successful": successful,
+            "failed": failed,
+            "results": results,
+            "created_tickets": created_ticket_keys,
+            "message": message
+        }
+        job.progress = {"message": message}
+        job.processed_tickets = len(tasks_data)
+        job.successful_tickets = successful
+        job.failed_tickets = failed
+        
+        # Unregister all story keys when job completes
+        story_keys = list(set([task.get("story_key") for task in tasks_data]))
+        for story_key in story_keys:
+            unregister_ticket_job(story_key)
+        
+        logger.info(f"Job {job_id} completed: bulk created {len(tasks_data)} tasks ({successful} successful, {failed} failed)")
+        
+        return job.results
+        
+    except Exception as e:
+        logger.error(f"Job {job_id} failed: {e}")
+        if job_id in jobs:
+            job = jobs[job_id]
+            job.status = "failed"
+            job.completed_at = datetime.now()
+            job.error = str(e)
+            job.progress = {"message": f"Job failed: {str(e)}"}
+            # Unregister story keys on failure
+            story_keys = list(set([task.get("story_key") for task in tasks_data]))
+            for story_key in story_keys:
+                unregister_ticket_job(story_key)
+        raise
+
+
 async def process_story_coverage_worker(ctx, job_id: str, story_key: str, include_test_cases: bool = True,
                                        additional_context: Optional[str] = None,
                                        llm_model: Optional[str] = None, llm_provider: Optional[str] = None):
@@ -1116,3 +1452,129 @@ async def process_task_creation_worker(ctx, job_id: str, story_keys: List[str], 
                     unregister_ticket_job(story_key)
         raise
 
+
+async def process_sprint_planning_worker(ctx, job_id: str, epic_key: str, board_id: int,
+                                         sprint_capacity_days: float, start_date: Optional[str] = None,
+                                         sprint_duration_days: int = 14, team_id: Optional[str] = None,
+                                         auto_create_sprints: bool = False, dry_run: bool = True):
+    """ARQ worker function for sprint planning"""
+    _initialize_services_if_needed()
+    
+    try:
+        job = _get_or_create_job(job_id, "sprint_planning", f"Planning sprint for epic {epic_key}...")
+        job.ticket_key = epic_key
+        
+        if hasattr(ctx, 'job') and ctx.job.cancelled:
+            job.status = "cancelled"
+            job.completed_at = datetime.now()
+            job.progress = {"message": "Job was cancelled"}
+            unregister_ticket_job(epic_key)
+            return
+        
+        # Get sprint planning service
+        from .routes.sprint_planning import get_sprint_planning_service
+        sprint_service = get_sprint_planning_service()
+        
+        if not sprint_service:
+            raise RuntimeError("Sprint planning service not available")
+        
+        job.progress = {"message": "Planning epic tasks to sprints..."}
+        
+        result = sprint_service.plan_epic_to_sprints(
+            epic_key=epic_key,
+            board_id=board_id,
+            sprint_capacity_days=sprint_capacity_days,
+            start_date=start_date,
+            sprint_duration_days=sprint_duration_days,
+            team_id=team_id,
+            auto_create_sprints=auto_create_sprints,
+            dry_run=dry_run
+        )
+        
+        job.status = "completed"
+        job.completed_at = datetime.now()
+        job.results = result
+        job.progress = {"message": f"Sprint planning completed: {result.get('total_tasks', 0)} tasks across {result.get('total_sprints', 0)} sprints"}
+        job.successful_tickets = result.get('total_tasks', 0) if result.get('success') else 0
+        
+        # Unregister epic key when job completes
+        unregister_ticket_job(epic_key)
+        
+        logger.info(f"Job {job_id} completed: sprint planning for epic {epic_key}")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Job {job_id} failed: {e}")
+        if job_id in jobs:
+            job = jobs[job_id]
+            job.status = "failed"
+            job.completed_at = datetime.now()
+            job.error = str(e)
+            job.progress = {"message": f"Job failed: {str(e)}"}
+            if job.ticket_key:
+                unregister_ticket_job(job.ticket_key)
+        raise
+
+
+async def process_timeline_planning_worker(ctx, job_id: str, epic_key: str, board_id: int,
+                                           start_date: Optional[str] = None, sprint_duration_days: int = 14,
+                                           team_capacity_days: Optional[float] = None,
+                                           team_id: Optional[str] = None, dry_run: bool = True):
+    """ARQ worker function for timeline planning"""
+    _initialize_services_if_needed()
+    
+    try:
+        job = _get_or_create_job(job_id, "timeline_planning", f"Creating timeline for epic {epic_key}...")
+        job.ticket_key = epic_key
+        
+        if hasattr(ctx, 'job') and ctx.job.cancelled:
+            job.status = "cancelled"
+            job.completed_at = datetime.now()
+            job.progress = {"message": "Job was cancelled"}
+            unregister_ticket_job(epic_key)
+            return
+        
+        # Get sprint planning service
+        from .routes.sprint_planning import get_sprint_planning_service
+        sprint_service = get_sprint_planning_service()
+        
+        if not sprint_service:
+            raise RuntimeError("Sprint planning service not available")
+        
+        job.progress = {"message": "Creating timeline schedule..."}
+        
+        result = sprint_service.schedule_timeline(
+            epic_key=epic_key,
+            board_id=board_id,
+            start_date=start_date,
+            sprint_duration_days=sprint_duration_days,
+            team_capacity_days=team_capacity_days,
+            team_id=team_id,
+            dry_run=dry_run
+        )
+        
+        job.status = "completed"
+        job.completed_at = datetime.now()
+        job.results = result
+        job.progress = {"message": f"Timeline created: {len(result.get('sprints', []))} sprints scheduled"}
+        job.successful_tickets = len(result.get('sprints', [])) if result.get('success') else 0
+        
+        # Unregister epic key when job completes
+        unregister_ticket_job(epic_key)
+        
+        logger.info(f"Job {job_id} completed: timeline planning for epic {epic_key}")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Job {job_id} failed: {e}")
+        if job_id in jobs:
+            job = jobs[job_id]
+            job.status = "failed"
+            job.completed_at = datetime.now()
+            job.error = str(e)
+            job.progress = {"message": f"Job failed: {str(e)}"}
+            if job.ticket_key:
+                unregister_ticket_job(job.ticket_key)
+        raise
