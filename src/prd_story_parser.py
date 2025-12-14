@@ -275,11 +275,12 @@ class PRDStoryParser:
             ac_text = self._extract_text_with_structure(ac_cell) if ac_cell else None
             
             # Build row_data in the format expected by _create_story_from_row
+            # Use empty strings instead of None to avoid NoneType errors in _create_story_from_row
             row_data = {
-                'title': story_text or None,
-                'description': story_text or None,  # Will be processed in _create_story_from_row
-                'acceptance_criteria': ac_text,
-                'mockup': mockup_raw or None,
+                'title': story_text or '',
+                'description': story_text or '',  # Will be processed in _create_story_from_row
+                'acceptance_criteria': ac_text or '',
+                'mockup': mockup_raw or '',
             }
             
             row_data_list.append(row_data)
@@ -699,13 +700,13 @@ class PRDStoryParser:
     def _create_story_from_row(self, row_data: Dict[str, str], epic_key: str) -> Optional[StoryPlan]:
         """Create a StoryPlan object from table row data"""
         try:
-            # Extract required fields
-            title = row_data.get('title', '').strip()
+            # Extract required fields - handle None values defensively
+            title = (row_data.get('title') or '').strip()
             if not title:
                 logger.warning("Story row missing title, skipping")
                 return None
             
-            description = row_data.get('description', '').strip()
+            description = (row_data.get('description') or '').strip()
             if not description:
                 description = title  # Use title as fallback
             
@@ -766,13 +767,13 @@ class PRDStoryParser:
                         summary = truncated + "..."
                     logger.warning(f"Summary truncated to {len(summary)} characters to meet JIRA limit")
             
-            # Append mockup content if available
-            mockup = row_data.get('mockup', '').strip()
+            # Append mockup content if available - handle None values defensively
+            mockup = (row_data.get('mockup') or '').strip()
             if mockup:
                 description += f"\n\n**Mockup:**\n{mockup}"
             
-            # Append acceptance criteria to description if available
-            acceptance_criteria_text = row_data.get('acceptance_criteria', '').strip()
+            # Append acceptance criteria to description if available - handle None values defensively
+            acceptance_criteria_text = (row_data.get('acceptance_criteria') or '').strip()
             if acceptance_criteria_text:
                 description += f"\n\n**Acceptance Criteria:**\n{acceptance_criteria_text}"
             
