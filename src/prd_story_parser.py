@@ -189,20 +189,27 @@ class PRDStoryParser:
         """
         stories = []
         
-        # Extract headers - exactly matching simulation: rows[0] with th tags
+        # Extract headers - try th tags first (backward compatible), then fall back to td tags
         rows = table.find_all("tr")
         if not rows:
             logger.warning("No rows found in story table")
             return []
         
-        # Get header row (first row, matching simulation logic exactly)
+        # Get header row (first row) - try th tags first, then td tags for compatibility
         header_cells = rows[0].find_all("th")
         if not header_cells:
-            logger.warning("No header row found in story table (first row has no th tags)")
-            return []
+            # Fall back to td tags if no th tags found (some Confluence tables use td for headers)
+            header_cells = rows[0].find_all("td")
+            if header_cells:
+                logger.debug("Using td tags for header row (no th tags found)")
+            else:
+                logger.warning("No header row found in story table (first row has no th or td tags)")
+                return []
+        else:
+            logger.debug("Using th tags for header row")
         
-        # Extract header texts (matching simulation exactly)
-        header_texts = [th.get_text(" ", strip=True) for th in header_cells]
+        # Extract header texts
+        header_texts = [cell.get_text(" ", strip=True) for cell in header_cells]
         if not header_texts:
             logger.warning("No headers found in story table")
             return []
