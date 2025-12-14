@@ -3,6 +3,7 @@ JIRA Operations Routes
 Endpoints for JIRA ticket operations
 """
 from fastapi import APIRouter, HTTPException, Depends
+from typing import Union, Dict, Any
 import logging
 
 from ..models.jira_operations import (
@@ -11,10 +12,17 @@ from ..models.jira_operations import (
     CreateStoryTicketRequest,
     UpdateStoryTicketRequest,
     UpdateTicketResponse,
-    CreateTicketResponse
+    CreateTicketResponse,
+    BulkUpdateStoriesRequest,
+    BulkUpdateStoriesResponse,
+    StoryUpdateItem,
+    StoryUpdateResult
 )
-from ..dependencies import get_jira_client
+from ..dependencies import get_jira_client, get_active_job_for_ticket, register_ticket_job
+from ..models.generation import BatchResponse, JobStatus
 from ..auth import get_current_user
+from datetime import datetime
+import uuid
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -32,26 +40,26 @@ async def update_jira_ticket(
     """Update a JIRA ticket with partial updates and link management"""
     jira_client = get_jira_client()
     from ..dependencies import get_confluence_client
-    
+
     try:
         logger.info(f"User {current_user} updating ticket {request.ticket_key} (update_jira={request.update_jira})")
-        
+
         if not jira_client:
             raise HTTPException(status_code=503, detail="JIRA client not initialized")
-        
+
         # Verify ticket exists
         ticket_data = jira_client.get_ticket(request.ticket_key)
         if not ticket_data:
             raise HTTPException(status_code=404, detail=f"Ticket {request.ticket_key} not found")
-        
+
         # Track what updates were applied
         updates_applied = {}
         links_created = []
-        
+
         if not request.update_jira:
             # Preview mode - just return what would be updated
             logger.info(f"Preview mode for {request.ticket_key} - not updating JIRA")
-            
+
             preview_data = {
                 "ticket_key": request.ticket_key,
                 "current_summary": ticket_data.get('fields', {}).get('summary', ''),
@@ -59,7 +67,7 @@ async def update_jira_ticket(
                     ticket_data.get('fields', {}).get('description', {})
                 ) if isinstance(ticket_data.get('fields', {}).get('description'), dict) else ticket_data.get('fields', {}).get('description', ''),
             }
-            
+
             if request.summary:
                 preview_data["new_summary"] = request.summary
             if request.description:
@@ -75,7 +83,7 @@ async def update_jira_ticket(
                     }
                     for link in request.links
                 ]
-            
+
             return UpdateTicketResponse(
                 success=True,
                 ticket_key=request.ticket_key,
@@ -85,10 +93,10 @@ async def update_jira_ticket(
                 preview=preview_data,
                 message=f"Preview: Ticket {request.ticket_key} would be updated. Set update_jira=true to commit."
             )
-        
+
         # Actually update JIRA
         logger.info(f"Updating ticket {request.ticket_key} in JIRA")
-        
+
         # Update summary if provided
         if request.summary:
             logger.info(f"Updating summary for {request.ticket_key}")
@@ -99,7 +107,7 @@ async def update_jira_ticket(
             updates_applied["summary"] = summary_updated
             if not summary_updated:
                 logger.warning(f"Failed to update summary for {request.ticket_key}")
-        
+
         # Update description if provided
         if request.description:
             logger.info(f"Updating description for {request.ticket_key}")
@@ -117,13 +125,13 @@ async def update_jira_ticket(
                 confluence_server_url = None
                 if confluence_client:
                     confluence_server_url = confluence_client.server_url
-                
+
                 jira_client._attach_images_from_description(
-                    request.ticket_key, 
-                    request.description, 
+                    request.ticket_key,
+                    request.description,
                     confluence_server_url
                 )
-        
+
         # Update test cases if provided
         if request.test_cases:
             logger.info(f"Updating test cases for {request.ticket_key}")
@@ -134,27 +142,27 @@ async def update_jira_ticket(
             updates_applied["test_cases"] = test_cases_updated
             if not test_cases_updated:
                 logger.warning(f"Failed to update test cases for {request.ticket_key}")
-        
+
         # Process links if provided
         if request.links:
             logger.info(f"Processing {len(request.links)} link(s) for {request.ticket_key}")
-            
+
             for link_req in request.links:
                 link_type = link_req.link_type
                 target_key = link_req.target_key
                 direction = link_req.direction
-                
+
                 # Smart split detection
                 if "split" in link_type.lower():
                     logger.info(f"Detected split link type, applying smart direction logic")
-                    
+
                     # Get ticket types
                     source_type = jira_client.get_ticket_type(request.ticket_key)
                     target_type = jira_client.get_ticket_type(target_key)
-                    
+
                     if source_type and target_type:
                         logger.info(f"Source type: {source_type}, Target type: {target_type}")
-                        
+
                         # Task -> Story: split from (inward)
                         if "task" in source_type and "story" in target_type:
                             direction = "inward"
@@ -163,7 +171,7 @@ async def update_jira_ticket(
                         elif "story" in source_type and "task" in target_type:
                             direction = "outward"
                             logger.info(f"Story -> Task detected, using 'split to' (outward)")
-                
+
                 # Create the link
                 link_created = jira_client.create_issue_link_generic(
                     source_key=request.ticket_key,
@@ -171,7 +179,7 @@ async def update_jira_ticket(
                     link_type=link_type,
                     direction=direction
                 )
-                
+
                 if link_created:
                     links_created.append({
                         "link_type": link_type,
@@ -186,26 +194,26 @@ async def update_jira_ticket(
                         "direction": direction,
                         "status": "failed"
                     })
-        
+
         # Build success message
         updated_fields = [field for field, success in updates_applied.items() if success]
         message_parts = []
-        
+
         if updated_fields:
             message_parts.append(f"Updated fields: {', '.join(updated_fields)}")
-        
+
         if links_created:
             successful_links = [l for l in links_created if l["status"] == "created"]
             if successful_links:
                 message_parts.append(f"Created {len(successful_links)} link(s)")
-        
+
         if not message_parts:
             message = f"No updates were applied to ticket {request.ticket_key}"
         else:
             message = f"Successfully updated ticket {request.ticket_key}. " + "; ".join(message_parts)
-        
+
         logger.info(message)
-        
+
         return UpdateTicketResponse(
             success=True,
             ticket_key=request.ticket_key,
@@ -214,7 +222,7 @@ async def update_jira_ticket(
             links_created=links_created,
             message=message
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -242,24 +250,24 @@ async def create_jira_ticket(
     """Create a new JIRA Task ticket"""
     jira_client = get_jira_client()
     from ..dependencies import get_confluence_client
-    
+
     try:
         logger.info(f"User {current_user} creating ticket (create_ticket={request.create_ticket})")
-        
+
         if not jira_client:
             raise HTTPException(status_code=503, detail="JIRA client not initialized")
-        
+
         # Get Confluence server URL if available
         confluence_client = get_confluence_client()
         confluence_server_url = None
         if confluence_client:
             confluence_server_url = confluence_client.server_url
-        
+
         # Get project key from parent epic
         project_key = jira_client.get_project_key_from_epic(request.parent_key)
         if not project_key:
             raise HTTPException(status_code=400, detail=f"Could not determine project key from epic {request.parent_key}")
-        
+
         if not request.create_ticket:
             # Preview mode
             logger.info(f"Preview mode - not creating ticket in JIRA")
@@ -279,13 +287,13 @@ async def create_jira_ticket(
                 },
                 message=f"Preview: Task ticket would be created. Set create_ticket=true to commit."
             )
-        
+
         # Actually create ticket
         logger.info(f"Creating task ticket in JIRA")
-        
+
         # Prepare task data
         from src.planning_models import TaskPlan, CycleTimeEstimate, TaskScope
-        
+
         # Create cycle time estimate only if mandays is provided
         cycle_time_estimate = None
         if request.mandays is not None:
@@ -299,7 +307,7 @@ async def create_jira_ticket(
                 total_days=request.mandays,
                 confidence_level=0.7
             )
-        
+
         # Create minimal TaskPlan with required fields
         # Use description as purpose, create minimal scope and expected outcome
         task_plan = TaskPlan(
@@ -314,7 +322,7 @@ async def create_jira_ticket(
             cycle_time_estimate=cycle_time_estimate,
             epic_key=request.parent_key
         )
-        
+
         # Create the task ticket with raw description to avoid duplication
         task_key = jira_client.create_task_ticket(
             task_plan=task_plan,
@@ -323,9 +331,9 @@ async def create_jira_ticket(
             raw_description=request.description,
             confluence_server_url=confluence_server_url
         )
-        
+
         # task_key will be set if creation succeeds, otherwise an exception is raised
-        
+
         # Update test cases separately if provided (as raw string for custom field)
         if request.test_cases:
             test_cases_updated = jira_client.update_test_case_custom_field(
@@ -334,16 +342,16 @@ async def create_jira_ticket(
             )
             if test_cases_updated:
                 logger.info(f"Added test cases to task {task_key}")
-        
+
         links_created = []
-        
+
         # Link to story
         link_created = jira_client.create_issue_link(
             inward_key=request.story_key,
             outward_key=task_key,
             link_type="Work item split"
         )
-        
+
         if link_created:
             links_created.append({
                 "link_type": "Work item split",
@@ -351,7 +359,7 @@ async def create_jira_ticket(
                 "target_key": task_key,
                 "status": "created"
             })
-        
+
         # Create blocking links if provided
         if request.blocks:
             for blocked_key in request.blocks:
@@ -361,7 +369,7 @@ async def create_jira_ticket(
                     link_type="Blocks",
                     direction="outward"
                 )
-                
+
                 if block_link_created:
                     links_created.append({
                         "link_type": "Blocks",
@@ -369,9 +377,9 @@ async def create_jira_ticket(
                         "target_key": blocked_key,
                         "status": "created"
                     })
-        
+
         logger.info(f"Successfully created task {task_key}")
-        
+
         return CreateTicketResponse(
             success=True,
             ticket_key=task_key,
@@ -379,7 +387,7 @@ async def create_jira_ticket(
             links_created=links_created,
             message=f"Successfully created task {task_key}"
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -406,67 +414,70 @@ async def create_story_ticket(
     """Create a new JIRA Story ticket"""
     jira_client = get_jira_client()
     from ..dependencies import get_confluence_client
-    
+
     try:
         logger.info(f"User {current_user} creating story ticket (create_ticket={request.create_ticket})")
-        
+
         if not jira_client:
             raise HTTPException(status_code=503, detail="JIRA client not initialized")
-        
+
         # Get Confluence server URL if available
         confluence_client = get_confluence_client()
         confluence_server_url = None
         if confluence_client:
             confluence_server_url = confluence_client.server_url
-        
+
         # Get project key from parent epic
         project_key = jira_client.get_project_key_from_epic(request.parent_key)
         if not project_key:
             raise HTTPException(status_code=400, detail=f"Could not determine project key from epic {request.parent_key}")
-        
+
         # Process summary and description (for both preview and actual creation)
         # Extract title (everything before "As a...") and keep in summary
         # Move "As a... I want to... So that..." to description
         # Ensure summary is under 255 characters
         import re
-        
+
         summary = request.summary
         description = request.description
-        
+
         # Pattern to match "As a..." at the start of the user story part
-        # This will match "As a [role]," or "As an [role],"
-        as_a_pattern = r'\s*(As\s+(?:an?\s+)?[^,]+,\s*I\s+want\s+to\s+[^.]*(?:\s+so\s+that\s+[^.]*)?)\.?'
-        
+        # This will match "As a [role]," or "As an [role]," or "As a [role]" (with or without comma)
+        # Updated to handle both "I want to" and "I want a" formats
+        # Pattern matches: "As a [role], I want [anything] [so that...]" or "As a [role] I want [anything] [so that...]"
+        # Uses non-greedy match to stop before "I want" when there's no comma
+        as_a_pattern = r'\s*(As\s+(?:an?\s+)?.+?(?:,\s*)?I\s+want\s+[^.]*(?:\s+[Ss]o\s+that\s+[^.]*)?)\.?'
+
         # Find where "As a..." starts in the summary
         as_a_match = re.search(as_a_pattern, summary, re.IGNORECASE)
-        
+
         if as_a_match:
             # Get the position where "As a..." starts
             as_a_start = as_a_match.start()
-            
+
             # Extract title (everything before "As a...")
             title = summary[:as_a_start].strip()
-            
+
             # Extract user story (from "As a..." onwards)
             user_story_text = as_a_match.group(1).strip()
-            
+
             # Use title as summary (or fallback to original if no title found)
             if title:
                 summary = title
             else:
                 # If no title before "As a...", remove the user story part
                 summary = re.sub(as_a_pattern, '', summary, flags=re.IGNORECASE).strip()
-            
+
             # Clean up summary
             summary = re.sub(r'\s+', ' ', summary).strip()
-            
+
             # Add user story to description if not already there
             if user_story_text.lower() not in description.lower():
                 if description:
                     description = f"{user_story_text}\n\n{description}"
                 else:
                     description = user_story_text
-        
+
         # Ensure summary is under 255 characters
         summary_was_truncated = False
         if len(summary) > 255:
@@ -479,7 +490,7 @@ async def create_story_ticket(
                 summary = truncated + "..."
             summary_was_truncated = True
             logger.warning(f"Summary truncated to {len(summary)} characters to meet JIRA limit")
-        
+
         if not request.create_ticket:
             # Preview mode
             logger.info(f"Preview mode - not creating story ticket in JIRA")
@@ -501,13 +512,13 @@ async def create_story_ticket(
                 },
                 message=preview_message
             )
-        
+
         # Actually create ticket
         logger.info(f"Creating story ticket in JIRA")
-        
+
         # Prepare story data (summary and description already processed above)
         from src.planning_models import StoryPlan
-        
+
         story_plan = StoryPlan(
             summary=summary,
             description=description,
@@ -517,25 +528,25 @@ async def create_story_ticket(
             epic_key=request.parent_key,
             priority="medium"
         )
-        
+
         # Create the story ticket
         story_key = jira_client.create_story_ticket(
             story_plan=story_plan,
             project_key=project_key,
             confluence_server_url=confluence_server_url
         )
-        
+
         if not story_key:
             raise HTTPException(status_code=500, detail="Failed to create story ticket")
-        
+
         # Add test cases if provided (via update)
         if request.test_cases:
             update_success = jira_client.update_test_case_custom_field(story_key, request.test_cases)
             if update_success:
                 logger.info(f"Added test cases to story {story_key}")
-        
+
         logger.info(f"Successfully created story {story_key}")
-        
+
         return CreateTicketResponse(
             success=True,
             ticket_key=story_key,
@@ -543,7 +554,7 @@ async def create_story_ticket(
             links_created=[],
             message=f"Successfully created story {story_key}"
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -569,34 +580,34 @@ async def update_story_ticket(
 ):
     """Update an existing JIRA Story ticket"""
     jira_client = get_jira_client()
-    
+
     try:
         logger.info(f"User {current_user} updating story ticket {request.story_key} (update_jira={request.update_jira})")
-        
+
         if not jira_client:
             raise HTTPException(status_code=503, detail="JIRA client not initialized")
-        
+
         # Verify ticket exists
         ticket_data = jira_client.get_ticket(request.story_key)
         if not ticket_data:
             raise HTTPException(status_code=404, detail=f"Ticket {request.story_key} not found")
-        
+
         # Validate ticket type is Story
         ticket_type = jira_client.get_ticket_type(request.story_key)
         if not ticket_type or "story" not in ticket_type.lower():
             raise HTTPException(
-                status_code=400, 
+                status_code=400,
                 detail=f"Ticket {request.story_key} is not a Story ticket (type: {ticket_type}). This endpoint only works with Story tickets."
             )
-        
+
         # Track what updates were applied
         updates_applied = {}
         links_created = []
-        
+
         if not request.update_jira:
             # Preview mode - just return what would be updated
             logger.info(f"Preview mode for {request.story_key} - not updating JIRA")
-            
+
             preview_data = {
                 "story_key": request.story_key,
                 "current_summary": ticket_data.get('fields', {}).get('summary', ''),
@@ -604,12 +615,12 @@ async def update_story_ticket(
                     ticket_data.get('fields', {}).get('description', {})
                 ) if isinstance(ticket_data.get('fields', {}).get('description'), dict) else ticket_data.get('fields', {}).get('description', ''),
             }
-            
+
             # Get current parent epic
             current_parent = ticket_data.get('fields', {}).get('parent', {})
             if current_parent:
                 preview_data["current_parent_key"] = current_parent.get('key', '')
-            
+
             if request.summary:
                 preview_data["new_summary"] = request.summary
             if request.description:
@@ -627,7 +638,7 @@ async def update_story_ticket(
                     }
                     for link in request.links
                 ]
-            
+
             return UpdateTicketResponse(
                 success=True,
                 ticket_key=request.story_key,
@@ -637,10 +648,10 @@ async def update_story_ticket(
                 preview=preview_data,
                 message=f"Preview: Story ticket {request.story_key} would be updated. Set update_jira=true to commit."
             )
-        
+
         # Actually update JIRA
         logger.info(f"Updating story ticket {request.story_key} in JIRA")
-        
+
         # Update summary if provided
         if request.summary:
             logger.info(f"Updating summary for {request.story_key}")
@@ -651,7 +662,7 @@ async def update_story_ticket(
             updates_applied["summary"] = summary_updated
             if not summary_updated:
                 logger.warning(f"Failed to update summary for {request.story_key}")
-        
+
         # Update description if provided
         if request.description:
             logger.info(f"Updating description for {request.story_key}")
@@ -670,13 +681,13 @@ async def update_story_ticket(
                 confluence_server_url = None
                 if confluence_client:
                     confluence_server_url = confluence_client.server_url
-                
+
                 jira_client._attach_images_from_description(
-                    request.story_key, 
-                    request.description, 
+                    request.story_key,
+                    request.description,
                     confluence_server_url
                 )
-        
+
         # Update test cases if provided
         if request.test_cases:
             logger.info(f"Updating test cases for {request.story_key}")
@@ -687,7 +698,7 @@ async def update_story_ticket(
             updates_applied["test_cases"] = test_cases_updated
             if not test_cases_updated:
                 logger.warning(f"Failed to update test cases for {request.story_key}")
-        
+
         # Update parent epic if provided
         if request.parent_key:
             logger.info(f"Updating parent epic for {request.story_key} to {request.parent_key}")
@@ -698,32 +709,32 @@ async def update_story_ticket(
             updates_applied["parent_key"] = parent_updated
             if not parent_updated:
                 logger.warning(f"Failed to update parent epic for {request.story_key}")
-        
+
         # Process links if provided
         if request.links:
             logger.info(f"Processing {len(request.links)} link(s) for {request.story_key}")
-            
+
             for link_req in request.links:
                 link_type = link_req.link_type
                 target_key = link_req.target_key
                 direction = link_req.direction
-                
+
                 # Smart split detection
                 if "split" in link_type.lower():
                     logger.info(f"Detected split link type, applying smart direction logic")
-                    
+
                     # Get ticket types
                     source_type = jira_client.get_ticket_type(request.story_key)
                     target_type = jira_client.get_ticket_type(target_key)
-                    
+
                     if source_type and target_type:
                         logger.info(f"Source type: {source_type}, Target type: {target_type}")
-                        
+
                         # Story -> Task: split to (outward)
                         if "story" in source_type and "task" in target_type:
                             direction = "outward"
                             logger.info(f"Story -> Task detected, using 'split to' (outward)")
-                
+
                 # Create the link
                 link_created = jira_client.create_issue_link_generic(
                     source_key=request.story_key,
@@ -731,7 +742,7 @@ async def update_story_ticket(
                     link_type=link_type,
                     direction=direction
                 )
-                
+
                 if link_created:
                     links_created.append({
                         "link_type": link_type,
@@ -746,26 +757,26 @@ async def update_story_ticket(
                         "direction": direction,
                         "status": "failed"
                     })
-        
+
         # Build success message
         updated_fields = [field for field, success in updates_applied.items() if success]
         message_parts = []
-        
+
         if updated_fields:
             message_parts.append(f"Updated fields: {', '.join(updated_fields)}")
-        
+
         if links_created:
             successful_links = [l for l in links_created if l["status"] == "created"]
             if successful_links:
                 message_parts.append(f"Created {len(successful_links)} link(s)")
-        
+
         if not message_parts:
             message = f"No updates were applied to story ticket {request.story_key}"
         else:
             message = f"Successfully updated story ticket {request.story_key}. " + "; ".join(message_parts)
-        
+
         logger.info(message)
-        
+
         return UpdateTicketResponse(
             success=True,
             ticket_key=request.story_key,
@@ -774,7 +785,7 @@ async def update_story_ticket(
             links_created=links_created,
             message=message
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:
@@ -788,3 +799,333 @@ async def update_story_ticket(
             message=f"Failed to update story ticket",
             error=str(e)
         )
+
+
+def _process_single_story_update(
+    jira_client,
+    story_item: StoryUpdateItem,
+    dry_run: bool
+) -> StoryUpdateResult:
+    """
+    Process a single story update (helper function for bulk operations)
+
+    Args:
+        jira_client: JiraClient instance
+        story_item: StoryUpdateItem with update data
+        dry_run: Whether to actually update JIRA
+
+    Returns:
+        StoryUpdateResult with update status
+    """
+    from ..dependencies import get_confluence_client
+
+    story_key = story_item.story_key
+    updates_applied = {}
+    links_created = []
+    preview_data = None
+    error = None
+
+    try:
+        # Verify ticket exists
+        ticket_data = jira_client.get_ticket(story_key)
+        if not ticket_data:
+            return StoryUpdateResult(
+                story_key=story_key,
+                success=False,
+                updated_in_jira=False,
+                updates_applied={},
+                links_created=[],
+                error=f"Ticket {story_key} not found"
+            )
+
+        # Validate ticket type is Story
+        ticket_type = jira_client.get_ticket_type(story_key)
+        if not ticket_type or "story" not in ticket_type.lower():
+            return StoryUpdateResult(
+                story_key=story_key,
+                success=False,
+                updated_in_jira=False,
+                updates_applied={},
+                links_created=[],
+                error=f"Ticket {story_key} is not a Story ticket (type: {ticket_type})"
+            )
+
+        # Preview mode
+        if dry_run:
+            preview_data = {
+                "story_key": story_key,
+                "current_summary": ticket_data.get('fields', {}).get('summary', ''),
+                "current_description": jira_client._extract_text_from_adf(
+                    ticket_data.get('fields', {}).get('description', {})
+                ) if isinstance(ticket_data.get('fields', {}).get('description'), dict) else ticket_data.get('fields', {}).get('description', ''),
+            }
+
+            current_parent = ticket_data.get('fields', {}).get('parent', {})
+            if current_parent:
+                preview_data["current_parent_key"] = current_parent.get('key', '')
+
+            if story_item.summary:
+                preview_data["new_summary"] = story_item.summary
+            if story_item.description:
+                preview_data["new_description"] = story_item.description
+            if story_item.test_cases:
+                preview_data["new_test_cases"] = story_item.test_cases
+            if story_item.parent_key:
+                preview_data["new_parent_key"] = story_item.parent_key
+            if story_item.links:
+                preview_data["links_to_create"] = [
+                    {
+                        "link_type": link.link_type,
+                        "target_key": link.target_key,
+                        "direction": link.direction
+                    }
+                    for link in story_item.links
+                ]
+
+            return StoryUpdateResult(
+                story_key=story_key,
+                success=True,
+                updated_in_jira=False,
+                updates_applied={},
+                links_created=[],
+                preview=preview_data,
+                error=None
+            )
+
+        # Actually update JIRA
+        logger.info(f"Updating story ticket {story_key} in JIRA")
+
+        # Update summary if provided
+        if story_item.summary:
+            logger.info(f"Updating summary for {story_key}")
+            summary_updated = jira_client.update_ticket_summary(
+                ticket_key=story_key,
+                summary=story_item.summary
+            )
+            updates_applied["summary"] = summary_updated
+            if not summary_updated:
+                logger.warning(f"Failed to update summary for {story_key}")
+
+        # Update description if provided
+        if story_item.description:
+            logger.info(f"Updating description for {story_key}")
+            description_updated = jira_client.update_ticket_description(
+                ticket_key=story_key,
+                description=story_item.description,
+                dry_run=False
+            )
+            updates_applied["description"] = description_updated
+            if not description_updated:
+                logger.warning(f"Failed to update description for {story_key}")
+            else:
+                # Handle image attachments if description contains images
+                confluence_client = get_confluence_client()
+                confluence_server_url = None
+                if confluence_client:
+                    confluence_server_url = confluence_client.server_url
+
+                jira_client._attach_images_from_description(
+                    story_key,
+                    story_item.description,
+                    confluence_server_url
+                )
+
+        # Update test cases if provided
+        if story_item.test_cases:
+            logger.info(f"Updating test cases for {story_key}")
+            test_cases_updated = jira_client.update_test_case_custom_field(
+                ticket_key=story_key,
+                test_cases_content=story_item.test_cases
+            )
+            updates_applied["test_cases"] = test_cases_updated
+            if not test_cases_updated:
+                logger.warning(f"Failed to update test cases for {story_key}")
+
+        # Update parent epic if provided
+        if story_item.parent_key:
+            logger.info(f"Updating parent epic for {story_key} to {story_item.parent_key}")
+            parent_updated = jira_client.update_ticket_parent(
+                ticket_key=story_key,
+                parent_key=story_item.parent_key
+            )
+            updates_applied["parent_key"] = parent_updated
+            if not parent_updated:
+                logger.warning(f"Failed to update parent epic for {story_key}")
+
+        # Process links if provided
+        if story_item.links:
+            logger.info(f"Processing {len(story_item.links)} link(s) for {story_key}")
+
+            for link_req in story_item.links:
+                link_type = link_req.link_type
+                target_key = link_req.target_key
+                direction = link_req.direction
+
+                # Smart split detection
+                if "split" in link_type.lower():
+                    logger.info(f"Detected split link type, applying smart direction logic")
+
+                    # Get ticket types
+                    source_type = jira_client.get_ticket_type(story_key)
+                    target_type = jira_client.get_ticket_type(target_key)
+
+                    if source_type and target_type:
+                        logger.info(f"Source type: {source_type}, Target type: {target_type}")
+
+                        # Story -> Task: split to (outward)
+                        if "story" in source_type and "task" in target_type:
+                            direction = "outward"
+                            logger.info(f"Story -> Task detected, using 'split to' (outward)")
+
+                # Create the link
+                link_created = jira_client.create_issue_link_generic(
+                    source_key=story_key,
+                    target_key=target_key,
+                    link_type=link_type,
+                    direction=direction
+                )
+
+                if link_created:
+                    links_created.append({
+                        "link_type": link_type,
+                        "target_key": target_key,
+                        "direction": direction,
+                        "status": "created"
+                    })
+                else:
+                    links_created.append({
+                        "link_type": link_type,
+                        "target_key": target_key,
+                        "direction": direction,
+                        "status": "failed"
+                    })
+
+        return StoryUpdateResult(
+            story_key=story_key,
+            success=True,
+            updated_in_jira=True,
+            updates_applied=updates_applied,
+            links_created=links_created,
+            error=None
+        )
+
+    except Exception as e:
+        logger.error(f"Error updating story ticket {story_key}: {str(e)}", exc_info=True)
+        return StoryUpdateResult(
+            story_key=story_key,
+            success=False,
+            updated_in_jira=False,
+            updates_applied={},
+            links_created=[],
+            error=str(e)
+        )
+
+
+@router.post("/jira/bulk-update-stories",
+         tags=["JIRA Operations"],
+         response_model=Union[BulkUpdateStoriesResponse, BatchResponse],
+         summary="Bulk update multiple story tickets",
+         description="Update multiple story tickets in a single request. Each story can have different update values. Supports preview mode and async processing.")
+async def bulk_update_stories(
+    request: BulkUpdateStoriesRequest,
+    current_user: str = Depends(get_current_user)
+):
+    """Bulk update multiple story tickets"""
+    jira_client = get_jira_client()
+
+    try:
+        logger.info(f"User {current_user} bulk updating {len(request.stories)} story tickets (dry_run={request.dry_run}, async_mode={request.async_mode})")
+
+        if not jira_client:
+            raise HTTPException(status_code=503, detail="JIRA client not initialized")
+
+        # Validate request
+        if not request.stories:
+            raise HTTPException(status_code=400, detail="At least one story must be provided")
+
+        if len(request.stories) > 100:
+            raise HTTPException(status_code=400, detail="Maximum 100 stories can be updated in a single request")
+
+        # If async mode, enqueue job
+        if request.async_mode:
+            from ..job_queue import get_redis_pool
+            from ..dependencies import jobs
+
+            job_id = str(uuid.uuid4())
+
+            jobs[job_id] = JobStatus(
+                job_id=job_id,
+                job_type="bulk_story_update",
+                status="started",
+                progress={"message": f"Queued for bulk updating {len(request.stories)} stories"},
+                started_at=datetime.now(),
+                processed_tickets=0,
+                successful_tickets=0,
+                failed_tickets=0,
+                ticket_keys=[item.story_key for item in request.stories]
+            )
+
+            redis_pool = await get_redis_pool()
+            await redis_pool.enqueue_job(
+                'process_bulk_story_update_worker',
+                job_id=job_id,
+                stories_data=[item.dict() for item in request.stories],
+                dry_run=request.dry_run,
+                _job_id=job_id
+            )
+
+            logger.info(f"Enqueued bulk story update job {job_id} for {len(request.stories)} stories")
+
+            return BatchResponse(
+                job_id=job_id,
+                status="started",
+                message=f"Bulk story update queued for {len(request.stories)} stories",
+                status_url=f"/jobs/{job_id}",
+                jql="",  # Not applicable
+                max_results=len(request.stories),
+                update_jira=not request.dry_run,
+                safety_note="JIRA will only be updated if dry_run is false"
+            )
+
+        # Synchronous mode - process all stories
+        results = []
+        successful = 0
+        failed = 0
+
+        for i, story_item in enumerate(request.stories, 1):
+            logger.info(f"Processing story {i}/{len(request.stories)}: {story_item.story_key}")
+
+            result = _process_single_story_update(
+                jira_client=jira_client,
+                story_item=story_item,
+                dry_run=request.dry_run
+            )
+
+            results.append(result)
+
+            if result.success:
+                successful += 1
+            else:
+                failed += 1
+
+        message = f"Bulk update completed: {successful} successful, {failed} failed"
+        if request.dry_run:
+            message += " (preview mode - no JIRA changes made)"
+
+        logger.info(message)
+
+        return BulkUpdateStoriesResponse(
+            total_stories=len(request.stories),
+            successful=successful,
+            failed=failed,
+            results=results,
+            job_id=None,
+            status_url=None,
+            message=message
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in bulk story update: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to bulk update stories: {str(e)}")

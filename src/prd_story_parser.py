@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 class PRDStoryParser:
     """Parser for extracting story tickets from PRD table format"""
-    
+
     def __init__(self):
         """
         Initialize PRD Story Parser
@@ -27,15 +27,15 @@ class PRDStoryParser:
             'Story-List',
             'Story List'
         ]
-    
+
     def parse_stories_from_prd_content(self, prd_content: Dict[str, Any], epic_key: str) -> List[StoryPlan]:
         """
         Parse story tickets from PRD content
-        
+
         Args:
             prd_content: PRD page data from Confluence
             epic_key: Epic key to associate stories with
-            
+
         Returns:
             List of StoryPlan objects
         """
@@ -47,69 +47,69 @@ class PRDStoryParser:
                 logger.debug(f"PRD content keys: {list(prd_content.keys())}")
                 logger.debug(f"Body structure: {prd_content.get('body', {})}")
                 return []
-            
+
             soup = BeautifulSoup(html_content, 'html.parser')
-            
+
             # Debug: Log all tables found
             all_tables = soup.find_all("table")
             logger.debug(f"Found {len(all_tables)} table(s) in PRD HTML")
             for i, tbl in enumerate(all_tables):
                 headers = [th.get_text(" ", strip=True) for th in tbl.find_all("th")]
                 logger.debug(f"Table {i+1} headers: {headers}")
-            
+
             # Find the story ticket list section
             table = self._find_story_table(soup)
             if not table:
                 logger.warning("Story ticket list table not found in PRD")
                 logger.debug(f"Searched {len(all_tables)} tables but none matched story table criteria")
                 return []
-            
+
             logger.debug(f"Found story table with {len(table.find_all('tr'))} rows")
-            
+
             # Store page context for constructing attachment URLs
             self._page_id = prd_content.get('id', '')
             self._page_url = prd_content.get('url', '')
-            
+
             # Parse table rows into stories
             stories = self._parse_table_rows(table, epic_key)
             logger.info(f"Parsed {len(stories)} stories from PRD table")
             return stories
-            
+
         except Exception as e:
             logger.error(f"Error parsing stories from PRD: {e}")
             return []
-    
+
     def _find_story_table(self, soup: BeautifulSoup) -> Optional[Any]:
         """Find the story ticket list table in the PRD"""
         # Strategy 0 (PRIMARY): Find table with both "user story" AND "acceptance criteria" in headers
         # This matches the working simulation logic exactly
         potential_table = None  # Store table with "user story" even if no "acceptance criteria"
-        
+
         for tbl in soup.find_all("table"):
             # Match simulation exactly: use find_all("th") directly on table
             headers = [th.get_text(" ", strip=True) for th in tbl.find_all("th")]
             if not headers:
                 continue
-            
+
             # Normalize headers for comparison
             headers_lower = [h.lower() for h in headers]
             header_text = ' '.join(headers_lower)
-            
+
             # Check for both required headers (matching simulation logic exactly)
             has_user_story = any("user story" in h or "user-story" in h for h in headers_lower)
             has_acceptance_criteria = any("acceptance criteria" in h or "acceptance-criteria" in h or "acceptance" in h for h in headers_lower)
-            
+
             if has_user_story and has_acceptance_criteria:
                 logger.debug("Found story table by primary strategy (has both 'user story' and 'acceptance criteria' headers)")
                 logger.debug(f"Table headers: {headers}")
                 return tbl
-            
+
             # Also check if table has "user story" header (even without acceptance criteria, might still be valid)
             if has_user_story and potential_table is None:
                 logger.debug(f"Found table with 'user story' header (but no 'acceptance criteria'): {headers}")
                 # Store as potential match but continue searching for better match
                 potential_table = tbl
-        
+
         # Strategy 1: Find by section ID
         for pattern in self.story_section_patterns:
             section = soup.find(attrs={'id': pattern})
@@ -119,7 +119,7 @@ class PRDStoryParser:
                 if table:
                     logger.debug(f"Found story table by section ID: {pattern}")
                     return table
-        
+
         # Strategy 2: Find by heading text (prioritize this for "User Stories" tables)
         for pattern in self.story_section_patterns:
             # Try to find heading with this text
@@ -134,7 +134,7 @@ class PRDStoryParser:
                         if self._is_story_table(headers) or 'user story' in ' '.join(headers).lower():
                             logger.debug(f"Found story table by heading: {heading_text}")
                             return table
-        
+
         # Strategy 3: Find any table with story-related headers (but prefer tables with "user story" in headers)
         story_tables = []
         for table in soup.find_all('table'):
@@ -146,25 +146,25 @@ class PRDStoryParser:
                     logger.debug("Found story table by header analysis (has 'user story')")
                     return table
                 story_tables.append(table)
-        
+
         # Return first story table found if no "user story" table exists
         if story_tables:
             logger.debug("Found story table by header analysis")
             return story_tables[0]
-        
+
         # If we found a table with "user story" but no "acceptance criteria", use it as fallback
         if potential_table:
             logger.debug("Using table with 'user story' header (acceptance criteria column may be missing or named differently)")
             return potential_table
-        
+
         return None
-    
+
     def _is_story_table(self, headers: List[str]) -> bool:
         """Check if table headers indicate this is a story table"""
         header_text = ' '.join(headers).lower()
         story_keywords = ['story', 'title', 'description', 'acceptance']
         return any(keyword in header_text for keyword in story_keywords)
-    
+
     def _extract_table_headers(self, table: Any) -> List[str]:
         """Extract column headers from table"""
         headers = []
@@ -179,22 +179,22 @@ class PRDStoryParser:
                 for cell in first_row.find_all(['th', 'td']):
                     headers.append(cell.get_text().strip())
         return headers
-    
+
     def _parse_table_rows(self, table: Any, epic_key: str) -> List[StoryPlan]:
         """Parse table rows into StoryPlan objects
-        
+
         Uses simpler logic matching simulate_prd_extraction.py exactly:
         - rows[0] is the header row
         - Process rows starting from rows[1:] (skip header row)
         """
         stories = []
-        
+
         # Extract headers - try th tags first (backward compatible), then fall back to td tags
         rows = table.find_all("tr")
         if not rows:
             logger.warning("No rows found in story table")
             return []
-        
+
         # Get header row (first row) - try th tags first, then td tags for compatibility
         header_cells = rows[0].find_all("th")
         if not header_cells:
@@ -207,15 +207,15 @@ class PRDStoryParser:
                 return []
         else:
             logger.debug("Using th tags for header row")
-        
+
         # Extract header texts
         header_texts = [cell.get_text(" ", strip=True) for cell in header_cells]
         if not header_texts:
             logger.warning("No headers found in story table")
             return []
-        
+
         logger.debug(f"Table headers: {header_texts}")
-        
+
         # Helper function to get column index by fragment (matching simulation logic exactly)
         def col_index(fragment: str):
             frag = fragment.lower()
@@ -223,21 +223,25 @@ class PRDStoryParser:
                 if frag in h.lower():
                     return idx
             return None
-        
+
         # Extract column indices (matching simulation exactly)
         idx_number = col_index("#")
         idx_story = col_index("user story")
         idx_importance = col_index("importance")
         idx_mockup = col_index("mockup")
         idx_ac = col_index("acceptance criteria")
-        
-        logger.debug(f"Column indices - story: {idx_story}, acceptance_criteria: {idx_ac}, number: {idx_number}")
-        
+        # Detect JIRA ticket column (support multiple name variations)
+        idx_jira_ticket = (col_index("jira ticket") or col_index("story key") or
+                          col_index("jira link") or col_index("ticket") or
+                          col_index("story ticket"))
+
+        logger.debug(f"Column indices - story: {idx_story}, acceptance_criteria: {idx_ac}, number: {idx_number}, jira_ticket: {idx_jira_ticket}")
+
         if idx_story is None:
             logger.warning("Required 'user story' column not found in table headers")
             logger.debug(f"Available headers: {header_texts}")
             return []
-        
+
         # Step 1: Collect all row data and acceptance criteria
         row_data_list = []
         skipped_rows = 0
@@ -246,19 +250,19 @@ class PRDStoryParser:
             if not tds:
                 skipped_rows += 1
                 continue
-            
+
             # Heuristic: only keep "full" rows that look like data rows (matching simulation logic)
             if len(tds) < len(header_texts):
                 skipped_rows += 1
                 logger.debug(f"Skipping row with {len(tds)} cells (expected {len(header_texts)})")
                 continue
-            
+
             # Helper function to get cell by index (matching simulation logic exactly)
             def cell(idx):
                 if idx is None or idx >= len(tds):
                     return None
                 return tds[idx]
-            
+
             # Extract values using _clean_text for most cells (matching simulation exactly)
             number = self._clean_text(cell(idx_number)) or None
             story_cell = cell(idx_story)
@@ -266,14 +270,23 @@ class PRDStoryParser:
             # Use _extract_cell_text for mockup column to handle images
             mockup_cell = cell(idx_mockup)
             mockup_raw = self._extract_cell_text(mockup_cell) if mockup_cell else None
-            
+
             # Story / description: use _clean_text (joins with spaces, matching simulation)
             story_text = self._clean_text(story_cell) if story_cell else ""
-            
+
+            # Extract JIRA ticket key from JIRA ticket column if present
+            jira_key = None
+            if idx_jira_ticket is not None:
+                jira_ticket_cell = cell(idx_jira_ticket)
+                if jira_ticket_cell:
+                    jira_key = self._extract_jira_key(jira_ticket_cell)
+                    if jira_key:
+                        logger.debug(f"Found JIRA ticket key in PRD table: {jira_key}")
+
             # Acceptance criteria: extract text while preserving HTML structure
             ac_cell = cell(idx_ac)
             ac_text = self._extract_text_with_structure(ac_cell) if ac_cell else None
-            
+
             # Build row_data in the format expected by _create_story_from_row
             # Use empty strings instead of None to avoid NoneType errors in _create_story_from_row
             row_data = {
@@ -281,40 +294,45 @@ class PRDStoryParser:
                 'description': story_text or '',  # Will be processed in _create_story_from_row
                 'acceptance_criteria': ac_text or '',
                 'mockup': mockup_raw or '',
+                'jira_key': jira_key,  # Include JIRA key if found
             }
-            
+
             row_data_list.append(row_data)
-        
+
         logger.debug(f"Collected {len(row_data_list)} data rows (skipped {skipped_rows} rows)")
-        
+
         if not row_data_list:
             logger.warning("No valid data rows found in story table")
             logger.debug(f"Total rows in table: {len(rows)}, header row: 1, data rows processed: {len(row_data_list)}")
             return []
-        
+
         # Create stories from row data
         for idx, row_data in enumerate(row_data_list):
             # Debug logging for first few rows
             if len(stories) < 2:
                 title_preview = row_data.get("title", "")[:50] if row_data.get("title") else None
                 logger.debug(f"Row data: title='{title_preview}'")
-            
+
             # Create StoryPlan from row data
             story = self._create_story_from_row(row_data, epic_key)
             if story:
+                # Set JIRA key if found in PRD table
+                if row_data.get('jira_key'):
+                    story.key = row_data['jira_key']
+                    logger.debug(f"Set story key from PRD table: {story.key}")
                 stories.append(story)
             else:
                 logger.debug(f"Row {idx+1} did not produce a valid story (likely missing title)")
-        
+
         logger.debug(f"Created {len(stories)} stories from {len(row_data_list)} data rows")
         return stories
-    
+
     def _normalize_headers(self, headers: List[str]) -> Dict[str, str]:
         """Normalize header names to standard keys"""
         mapping = {}
         for header in headers:
             header_lower = header.lower().strip()
-            
+
             # Map to standard keys
             # Check for "user story" first (common in PRD tables)
             if 'user story' in header_lower or 'user-story' in header_lower:
@@ -329,9 +347,9 @@ class PRDStoryParser:
                 mapping[header_lower] = 'mockup'
             else:
                 mapping[header_lower] = header_lower
-        
+
         return mapping
-    
+
     def _clean_text(self, cell: Any) -> str:
         """Extract and clean text from a BeautifulSoup node (matching simulation logic)
         Joins with spaces for normal text extraction
@@ -343,28 +361,28 @@ class PRDStoryParser:
             script.decompose()
         # Use stripped_strings and join with spaces (matching _clean_text from simulation)
         return " ".join(cell.stripped_strings)
-    
+
     def _extract_text_with_structure(self, cell: Any) -> str:
         """
-        Extract text from HTML cell while preserving structure and styling (paragraphs, lists, 
+        Extract text from HTML cell while preserving structure and styling (paragraphs, lists,
         line breaks, bold, italic, links, etc.) as Markdown.
-        
+
         Args:
             cell: BeautifulSoup element (td cell)
-            
+
         Returns:
             Text string with structure and styling preserved as Markdown
         """
         if cell is None:
             return ""
-        
+
         lines = []
-        
+
         def process_element(elem, in_bold=False, in_italic=False, in_code=False):
             """Recursively process HTML elements to preserve structure and styling"""
             if elem is None:
                 return
-            
+
             # Handle text nodes
             if isinstance(elem, str):
                 text = elem.strip()
@@ -381,9 +399,9 @@ class PRDStoryParser:
                     else:
                         lines.append(text)
                 return
-            
+
             tag_name = elem.name.lower() if elem.name else None
-            
+
             # Handle images (both <img> tags and Confluence ac:image macros)
             if tag_name == 'img':
                 src = elem.get('src', '')
@@ -418,19 +436,19 @@ class PRDStoryParser:
                     ri_attachment = ac_link.find('ri:attachment')
                     if ri_attachment:
                         filename = ri_attachment.get('ri:filename', '')
-                
+
                 # Also check for ac:image with direct ri:attachment
                 if not filename:
                     ri_attachment_direct = elem.find('ri:attachment')
                     if ri_attachment_direct:
                         filename = ri_attachment_direct.get('ri:filename', '')
-                
+
                 # Check for ac:parameter with image data as fallback
                 if not filename:
                     ac_parameter = elem.find('ac:parameter', {'ac:name': 'alt'})
                     if ac_parameter:
                         filename = ac_parameter.get_text(strip=True)
-                
+
                 if filename:
                     # Try to construct Confluence attachment URL if we have page context
                     if hasattr(self, '_page_id') and self._page_id:
@@ -462,7 +480,7 @@ class PRDStoryParser:
                 link_text = " ".join(filter(None, link_parts)).strip()
                 if not link_text:
                     link_text = href
-                
+
                 # Convert to markdown link format
                 if href:
                     lines.append(f"[{link_text}]({href})")
@@ -511,11 +529,11 @@ class PRDStoryParser:
                 styled_text = self._extract_styled_text_from_element(elem)
                 if styled_text:
                     lines.append(styled_text)
-        
+
         # Process all children of the cell
         for child in cell.children:
             process_element(child)
-        
+
         # Join lines, but clean up excessive blank lines
         result_lines = []
         prev_blank = False
@@ -525,19 +543,19 @@ class PRDStoryParser:
                 continue  # Skip consecutive blank lines
             result_lines.append(line)
             prev_blank = is_blank
-        
+
         return '\n'.join(result_lines).strip()
-    
+
     def _extract_styled_text_from_element(self, elem: Any) -> str:
         """Extract text from an element preserving inline styling as Markdown"""
         if elem is None:
             return ""
-        
+
         if isinstance(elem, str):
             return elem.strip()
-        
+
         tag_name = elem.name.lower() if elem.name else None
-        
+
         # Handle styling elements
         if tag_name in ['strong', 'b']:
             text = ''.join([self._extract_styled_text_from_element(c) for c in elem.children])
@@ -559,7 +577,7 @@ class PRDStoryParser:
         else:
             # For other elements, recursively extract text
             return ''.join([self._extract_styled_text_from_element(c) for c in elem.children])
-    
+
     def _extract_cell_text_simple(self, cell: Any) -> str:
         """Extract text content from table cell using simple stripped_strings approach
         Preserves newlines for structure (used for acceptance criteria cells only)
@@ -571,18 +589,18 @@ class PRDStoryParser:
             script.decompose()
         # Use stripped_strings and join with newlines to preserve structure
         return "\n".join(cell.stripped_strings)
-    
+
     def _extract_cell_text(self, cell: Any) -> str:
         """Extract text content from table cell, handling HTML formatting, images, and links"""
         # Remove script and style elements
         for script in cell(["script", "style"]):
             script.decompose()
-        
+
         # Extract images and links before getting text
         image_links = []
         figma_links = []
         other_links = []
-        
+
         # Extract images (both <img> tags and Confluence image attachments)
         for img in cell.find_all(['img', 'ac:image']):
             # Handle standard img tags
@@ -612,7 +630,7 @@ class PRDStoryParser:
                             image_links.append(f"[Image: {alt}]({src})")
                         else:
                             image_links.append(f"[Image]({src})")
-            
+
             # Handle Confluence ac:image macros
             elif img.name == 'ac:image':
                 filename = None
@@ -622,19 +640,19 @@ class PRDStoryParser:
                     ri_attachment = ac_link.find('ri:attachment')
                     if ri_attachment:
                         filename = ri_attachment.get('ri:filename', '')
-                
+
                 # Also check for ac:image with direct ri:attachment
                 if not filename:
                     ri_attachment_direct = img.find('ri:attachment')
                     if ri_attachment_direct:
                         filename = ri_attachment_direct.get('ri:filename', '')
-                
+
                 # Check for ac:parameter with image data as fallback
                 if not filename:
                     ac_parameter = img.find('ac:parameter', {'ac:name': 'alt'})
                     if ac_parameter:
                         filename = ac_parameter.get_text(strip=True)
-                
+
                 if filename:
                     # Try to construct Confluence attachment URL if we have page context
                     if hasattr(self, '_page_id') and self._page_id:
@@ -644,12 +662,12 @@ class PRDStoryParser:
                     else:
                         # Just filename if no page context
                         image_links.append(f"[Image: {filename}]")
-        
+
         # Extract links (especially Figma links)
         for link in cell.find_all('a', href=True):
             href = link.get('href', '')
             link_text = link.get_text(strip=True) or href
-            
+
             # Check for Figma links
             if 'figma.com' in href.lower():
                 figma_links.append(f"[Figma: {link_text}]({href})")
@@ -659,13 +677,13 @@ class PRDStoryParser:
                     other_links.append(f"[{link_text}]({href})")
                 else:
                     other_links.append(href)
-        
+
         # Get text content
         text = cell.get_text(separator=' ', strip=True)
         # Normalize whitespace
         text = re.sub(r'\s+', ' ', text)
         text = text.strip()
-        
+
         # Remove URLs from plain text if they're already extracted as links
         # This prevents duplicate display of the same URL
         all_extracted_urls = []
@@ -677,13 +695,13 @@ class PRDStoryParser:
             # Also check if it's a plain URL
             elif link_info.startswith('http'):
                 all_extracted_urls.append(link_info)
-        
+
         # Remove extracted URLs from plain text to avoid duplicates
         for url in all_extracted_urls:
             # Remove the URL from text (handle both with and without trailing punctuation)
             text = re.sub(re.escape(url) + r'[.,;:!?]?', '', text, flags=re.IGNORECASE)
             text = text.strip()
-        
+
         # Combine text with extracted media/links
         parts = []
         if text:
@@ -694,9 +712,53 @@ class PRDStoryParser:
             parts.extend(image_links)
         if other_links:
             parts.extend(other_links)
-        
+
         return '\n'.join(parts) if parts else ''
-    
+
+    def _extract_jira_key(self, cell: Any) -> Optional[str]:
+        """
+        Extract JIRA ticket key from a table cell
+
+        Supports multiple formats:
+        - Plain key: STORY-123
+        - Markdown link: [STORY-123](https://...)
+        - HTML link: <a href="...">STORY-123</a>
+        - Text with key: "See STORY-123 for details"
+
+        Args:
+            cell: BeautifulSoup cell element
+
+        Returns:
+            JIRA ticket key (e.g., "STORY-123") or None if not found
+        """
+        if cell is None:
+            return None
+
+        # Get text content
+        cell_text = cell.get_text(" ", strip=True)
+
+        # Pattern to match JIRA ticket keys: PROJECT-123
+        jira_key_pattern = r'\b([A-Z][A-Z0-9]+-\d+)\b'
+
+        # Try to find JIRA key in text
+        match = re.search(jira_key_pattern, cell_text)
+        if match:
+            return match.group(1)
+
+        # Also check for links (markdown or HTML)
+        links = cell.find_all('a', href=True)
+        for link in links:
+            href = link.get('href', '')
+            link_text = link.get_text(strip=True)
+
+            # Check if link text or href contains JIRA key
+            for text in [link_text, href]:
+                match = re.search(jira_key_pattern, text)
+                if match:
+                    return match.group(1)
+
+        return None
+
     def _create_story_from_row(self, row_data: Dict[str, str], epic_key: str) -> Optional[StoryPlan]:
         """Create a StoryPlan object from table row data"""
         try:
@@ -705,38 +767,42 @@ class PRDStoryParser:
             if not title:
                 logger.warning("Story row missing title, skipping")
                 return None
-            
+
             description = (row_data.get('description') or '').strip()
             if not description:
                 description = title  # Use title as fallback
-            
+
             # Process title and description: Extract title (before "As a...") and move user story to description
             # Pattern to match "As a..." at the start of the user story part
-            as_a_pattern = r'\s*(As\s+(?:an?\s+)?[^,]+,\s*I\s+want\s+to\s+[^.]*(?:\s+so\s+that\s+[^.]*)?)\.?'
-            
+            # Pattern matches: "As a [role], I want [anything] [so that...]" or "As a [role] I want [anything] [so that...]"
+            # Handles both "I want to" and "I want a" formats
+            # Handles both with and without comma after role
+            # Uses non-greedy match to stop before "I want" when there's no comma
+            as_a_pattern = r'\s*(As\s+(?:an?\s+)?.+?(?:,\s*)?I\s+want\s+[^.]*(?:\s+[Ss]o\s+that\s+[^.]*)?)\.?'
+
             # Find where "As a..." starts in the title
             as_a_match = re.search(as_a_pattern, title, re.IGNORECASE)
-            
+
             if as_a_match:
                 # Get the position where "As a..." starts
                 as_a_start = as_a_match.start()
-                
+
                 # Extract title (everything before "As a...")
                 title_part = title[:as_a_start].strip()
-                
+
                 # Extract user story (from "As a..." onwards)
                 user_story_text = as_a_match.group(1).strip()
-                
+
                 # Use title_part as summary (or fallback to original if no title found)
                 if title_part:
                     summary = title_part
                 else:
                     # If no title before "As a...", remove the user story part
                     summary = re.sub(as_a_pattern, '', title, flags=re.IGNORECASE).strip()
-                
+
                 # Clean up summary
                 summary = re.sub(r'\s+', ' ', summary).strip()
-                
+
                 # Ensure summary is under 255 characters
                 if len(summary) > 255:
                     # Truncate at word boundary
@@ -747,7 +813,7 @@ class PRDStoryParser:
                     else:
                         summary = truncated + "..."
                     logger.warning(f"Summary truncated to {len(summary)} characters to meet JIRA limit")
-                
+
                 # Add user story to description if not already there
                 if user_story_text.lower() not in description.lower():
                     if description:
@@ -766,17 +832,17 @@ class PRDStoryParser:
                     else:
                         summary = truncated + "..."
                     logger.warning(f"Summary truncated to {len(summary)} characters to meet JIRA limit")
-            
+
             # Append mockup content if available - handle None values defensively
             mockup = (row_data.get('mockup') or '').strip()
             if mockup:
                 description += f"\n\n**Mockup:**\n{mockup}"
-            
+
             # Append acceptance criteria to description if available - handle None values defensively
             acceptance_criteria_text = (row_data.get('acceptance_criteria') or '').strip()
             if acceptance_criteria_text:
                 description += f"\n\n**Acceptance Criteria:**\n{acceptance_criteria_text}"
-            
+
             # Create StoryPlan (use processed summary, not original title)
             story = StoryPlan(
                 summary=summary,  # Use processed summary (title extracted, user story moved to description)
@@ -787,9 +853,9 @@ class PRDStoryParser:
                 epic_key=epic_key,
                 priority="medium"
             )
-            
+
             return story
-            
+
         except Exception as e:
             logger.error(f"Error creating story from row data: {e}")
             return None
