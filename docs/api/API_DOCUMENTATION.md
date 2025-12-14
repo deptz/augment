@@ -1338,7 +1338,237 @@ curl "http://localhost:8000/jobs/{job_id}"
 - Async mode is recommended for large batches (>10 stories)
 - All story keys are validated before processing begins
 
-### Bulk Creation
+#### `POST /jira/bulk-create-tasks`
+Bulk create multiple task tickets in a single request. All tickets are created first, then all links are created to ensure referenced tickets exist. Supports preview mode.
+
+**Request Body:**
+```json
+{
+  "tasks": [
+    {
+      "parent_key": "EPIC-100",
+      "summary": "Implement user authentication",
+      "description": "Add login functionality with email and password",
+      "story_key": "STORY-123",
+      "test_cases": "Test case content",
+      "mandays": 2.0,
+      "blocks": ["TASK-456", "TASK-789"]
+    },
+    {
+      "parent_key": "EPIC-100",
+      "summary": "Implement password reset",
+      "description": "Add password reset functionality",
+      "story_key": "STORY-123",
+      "mandays": 1.5
+    }
+  ],
+  "create_tickets": false
+}
+```
+
+**Parameters:**
+- `tasks` (required): List of task creation requests. Maximum 50 tasks per request.
+  - `parent_key` (required): Parent epic ticket key
+  - `summary` (required): Task summary/title
+  - `description` (required): Task description
+  - `story_key` (required): Story ticket key to link via split-from relationship
+  - `test_cases` (optional): Test cases content for custom field
+  - `mandays` (optional): Mandays estimation value (float)
+  - `blocks` (optional): List of ticket keys that this task blocks
+- `create_tickets` (default: false): Set to true to actually create tickets in JIRA
+
+**Response:**
+```json
+{
+  "total_tasks": 2,
+  "successful": 2,
+  "failed": 0,
+  "results": [
+    {
+      "index": 0,
+      "success": true,
+      "ticket_key": "TASK-101",
+      "error": null,
+      "links_created": [
+        {
+          "link_type": "Work item split",
+          "source_key": "STORY-123",
+          "target_key": "TASK-101",
+          "status": "created"
+        },
+        {
+          "link_type": "Blocks",
+          "source_key": "TASK-101",
+          "target_key": "TASK-456",
+          "status": "created"
+        }
+      ]
+    },
+    {
+      "index": 1,
+      "success": true,
+      "ticket_key": "TASK-102",
+      "error": null,
+      "links_created": [
+        {
+          "link_type": "Work item split",
+          "source_key": "STORY-123",
+          "target_key": "TASK-102",
+          "status": "created"
+        }
+      ]
+    }
+  ],
+  "created_tickets": ["TASK-101", "TASK-102"],
+  "message": "Bulk creation completed: 2 successful, 0 failed"
+}
+```
+
+**Important:** This endpoint follows a two-phase approach:
+1. **Phase 1**: All tickets are created first using JIRA's bulk create API
+2. **Phase 2**: All links are created after all tickets exist (prevents linking to non-existent tickets)
+
+**Example:**
+```bash
+# Preview mode (default)
+curl -X POST "http://localhost:8000/jira/bulk-create-tasks" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tasks": [
+      {
+        "parent_key": "EPIC-100",
+        "summary": "Implement user authentication",
+        "description": "Add login functionality",
+        "story_key": "STORY-123"
+      }
+    ],
+    "create_tickets": false
+  }'
+
+# Actually create tickets
+curl -X POST "http://localhost:8000/jira/bulk-create-tasks" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tasks": [
+      {
+        "parent_key": "EPIC-100",
+        "summary": "Implement user authentication",
+        "description": "Add login functionality",
+        "story_key": "STORY-123",
+        "mandays": 2.0
+      }
+    ],
+    "create_tickets": true
+  }'
+```
+
+**Notes:**
+- Maximum 50 tasks per request
+- All tickets are created first, then all links are created
+- If a ticket creation fails, links for that ticket are skipped
+- Preview mode shows what would be created without actually creating tickets
+
+#### `POST /jira/bulk-create-stories`
+Bulk create multiple story tickets in a single request. All tickets are created first, then all links are created to ensure referenced tickets exist. Supports preview mode.
+
+**Request Body:**
+```json
+{
+  "stories": [
+    {
+      "parent_key": "EPIC-100",
+      "summary": "User authentication feature",
+      "description": "As a user, I want to authenticate with email and password so that I can access my account",
+      "test_cases": "Test case content"
+    },
+    {
+      "parent_key": "EPIC-100",
+      "summary": "Password reset feature",
+      "description": "As a user, I want to reset my password so that I can regain access to my account"
+    }
+  ],
+  "create_tickets": false
+}
+```
+
+**Parameters:**
+- `stories` (required): List of story creation requests. Maximum 50 stories per request.
+  - `parent_key` (required): Parent epic ticket key
+  - `summary` (required): Story summary/title
+  - `description` (required): Story description/context
+  - `test_cases` (optional): Test cases content for custom field
+- `create_tickets` (default: false): Set to true to actually create tickets in JIRA
+
+**Response:**
+```json
+{
+  "total_stories": 2,
+  "successful": 2,
+  "failed": 0,
+  "results": [
+    {
+      "index": 0,
+      "success": true,
+      "ticket_key": "STORY-101",
+      "error": null,
+      "links_created": []
+    },
+    {
+      "index": 1,
+      "success": true,
+      "ticket_key": "STORY-102",
+      "error": null,
+      "links_created": []
+    }
+  ],
+  "created_tickets": ["STORY-101", "STORY-102"],
+  "message": "Bulk creation completed: 2 successful, 0 failed"
+}
+```
+
+**Important:** This endpoint follows a two-phase approach:
+1. **Phase 1**: All tickets are created first using JIRA's bulk create API
+2. **Phase 2**: All links are created after all tickets exist (currently stories only link to epics, which are set during creation)
+
+**Example:**
+```bash
+# Preview mode (default)
+curl -X POST "http://localhost:8000/jira/bulk-create-stories" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "stories": [
+      {
+        "parent_key": "EPIC-100",
+        "summary": "User authentication feature",
+        "description": "As a user, I want to authenticate"
+      }
+    ],
+    "create_tickets": false
+  }'
+
+# Actually create tickets
+curl -X POST "http://localhost:8000/jira/bulk-create-stories" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "stories": [
+      {
+        "parent_key": "EPIC-100",
+        "summary": "User authentication feature",
+        "description": "As a user, I want to authenticate",
+        "test_cases": "Test cases here"
+      }
+    ],
+    "create_tickets": true
+  }'
+```
+
+**Notes:**
+- Maximum 50 stories per request
+- All tickets are created first, then all links are created
+- Stories are automatically linked to their parent epic during creation
+- Preview mode shows what would be created without actually creating tickets
+
+### Bulk Creation (Planning-Based)
 
 Bulk creation endpoints allow you to generate and create multiple JIRA tickets (stories and tasks) in a single operation. All endpoints support `async_mode` for background processing of long-running operations.
 

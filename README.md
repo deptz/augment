@@ -569,6 +569,8 @@ A 1-2 sentence summary of why this task was necessary, based on PRD/RFC goals.
 - `POST /jira/create-story-ticket` - Create a new JIRA Story ticket
 - `POST /jira/update-story-ticket` - Update an existing JIRA Story ticket (title, description, test cases, parent epic, links)
 - `POST /jira/bulk-update-stories` - Bulk update multiple story tickets with different values (supports preview and async modes)
+- `POST /jira/bulk-create-tasks` - Bulk create multiple task tickets (creates all tickets first, then all links)
+- `POST /jira/bulk-create-stories` - Bulk create multiple story tickets (creates all tickets first, then all links)
 
 **Job Management:**
 - `GET /jobs/{job_id}` - Get status and results of a background job
