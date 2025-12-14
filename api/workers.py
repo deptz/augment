@@ -835,3 +835,282 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
                 unregister_ticket_job(job.ticket_key)
         raise
 
+
+async def process_epic_creation_worker(ctx, job_id: str, epic_key: str, operation_mode: str, create_tickets: bool):
+    """ARQ worker function for epic planning and creation"""
+    _initialize_services_if_needed()
+    generator = get_generator()
+    
+    try:
+        job = _get_or_create_job(job_id, "epic_creation", f"Planning and creating tickets for epic {epic_key}...")
+        job.ticket_key = epic_key
+        
+        if hasattr(ctx, 'job') and ctx.job.cancelled:
+            job.status = "cancelled"
+            job.completed_at = datetime.now()
+            job.progress = {"message": "Job was cancelled"}
+            unregister_ticket_job(epic_key)
+            return
+        
+        if not generator.planning_service:
+            raise RuntimeError("Planning service not available - requires Confluence client configuration")
+        
+        # Create planning context
+        from src.planning_models import PlanningContext, OperationMode
+        
+        mode_map = {
+            "documentation": OperationMode.DOCUMENTATION,
+            "planning": OperationMode.PLANNING,
+            "hybrid": OperationMode.HYBRID
+        }
+        
+        job.progress = {"message": "Creating planning context..."}
+        
+        context = PlanningContext(
+            epic_key=epic_key,
+            mode=mode_map.get(operation_mode, OperationMode.HYBRID),
+            include_analysis=True,
+            max_stories_per_epic=20,
+            max_tasks_per_story=8
+        )
+        
+        job.progress = {"message": "Executing planning and creation..."}
+        
+        # Execute planning with creation
+        results = generator.planning_service.execute_planning_with_creation(
+            context, 
+            create_tickets=create_tickets
+        )
+        
+        job.status = "completed"
+        job.completed_at = datetime.now()
+        job.results = results
+        job.progress = {"message": f"Epic planning and creation completed: {results.get('success', False)}"}
+        
+        # Count created tickets
+        if results.get("creation_results"):
+            created_tickets = results["creation_results"].get("created_tickets", {})
+            total_created = len(created_tickets.get("stories", [])) + len(created_tickets.get("tasks", []))
+            job.successful_tickets = total_created
+        
+        # Unregister epic key when job completes
+        unregister_ticket_job(epic_key)
+        
+        logger.info(f"Job {job_id} completed: epic planning and creation for {epic_key}")
+        
+        # Return results so ARQ stores them in Redis for persistence
+        return results
+        
+    except Exception as e:
+        logger.error(f"Job {job_id} failed: {e}")
+        if job_id in jobs:
+            job = jobs[job_id]
+            job.status = "failed"
+            job.completed_at = datetime.now()
+            job.error = str(e)
+            job.progress = {"message": f"Job failed: {str(e)}"}
+            # Unregister epic key on failure
+            if job.ticket_key:
+                unregister_ticket_job(job.ticket_key)
+        raise
+
+
+async def process_story_creation_worker(ctx, job_id: str, epic_key: str, story_count: Optional[int], create_tickets: bool):
+    """ARQ worker function for creating stories for an epic"""
+    _initialize_services_if_needed()
+    generator = get_generator()
+    
+    try:
+        job = _get_or_create_job(job_id, "story_creation", f"Creating stories for epic {epic_key}...")
+        job.ticket_key = epic_key
+        
+        if hasattr(ctx, 'job') and ctx.job.cancelled:
+            job.status = "cancelled"
+            job.completed_at = datetime.now()
+            job.progress = {"message": "Job was cancelled"}
+            unregister_ticket_job(epic_key)
+            return
+        
+        if not generator.planning_service:
+            raise RuntimeError("Planning service not available - requires Confluence client configuration")
+        
+        # Generate stories first
+        from src.planning_models import PlanningContext, OperationMode
+        
+        job.progress = {"message": "Generating stories..."}
+        
+        context = PlanningContext(
+            epic_key=epic_key,
+            mode=OperationMode.PLANNING,
+            max_stories_per_epic=story_count or 5
+        )
+        
+        planning_result = generator.planning_service.generate_stories_for_epic(context)
+        
+        if not planning_result.success or not planning_result.epic_plan:
+            job.status = "failed"
+            job.completed_at = datetime.now()
+            job.error = "Story generation failed"
+            job.progress = {"message": f"Story generation failed: {planning_result.errors}"}
+            job.results = {
+                "success": False,
+                "errors": planning_result.errors,
+                "epic_key": epic_key
+            }
+            unregister_ticket_job(epic_key)
+            return job.results
+        
+        # Create stories if requested
+        job.progress = {"message": "Creating story tickets..."}
+        
+        creation_results = generator.planning_service.create_stories_for_epic(
+            epic_key,
+            planning_result.epic_plan.stories,
+            dry_run=not create_tickets
+        )
+        
+        job.status = "completed"
+        job.completed_at = datetime.now()
+        job.results = {
+            "epic_key": epic_key,
+            "planning_results": planning_result.dict(),
+            "creation_results": creation_results,
+            "success": creation_results.get("success", False)
+        }
+        
+        # Count created stories
+        if creation_results.get("created_tickets"):
+            created_stories = creation_results["created_tickets"].get("stories", [])
+            job.successful_tickets = len(created_stories)
+        
+        job.progress = {"message": f"Story creation completed: {job.successful_tickets} stories created"}
+        
+        # Unregister epic key when job completes
+        unregister_ticket_job(epic_key)
+        
+        logger.info(f"Job {job_id} completed: created stories for epic {epic_key}")
+        
+        # Return results so ARQ stores them in Redis for persistence
+        return job.results
+        
+    except Exception as e:
+        logger.error(f"Job {job_id} failed: {e}")
+        if job_id in jobs:
+            job = jobs[job_id]
+            job.status = "failed"
+            job.completed_at = datetime.now()
+            job.error = str(e)
+            job.progress = {"message": f"Job failed: {str(e)}"}
+            # Unregister epic key on failure
+            if job.ticket_key:
+                unregister_ticket_job(job.ticket_key)
+        raise
+
+
+async def process_task_creation_worker(ctx, job_id: str, story_keys: List[str], tasks_per_story: Optional[int], create_tickets: bool):
+    """ARQ worker function for creating tasks for stories"""
+    _initialize_services_if_needed()
+    generator = get_generator()
+    
+    try:
+        job = _get_or_create_job(job_id, "task_creation", f"Creating tasks for {len(story_keys)} stories...")
+        job.ticket_keys = story_keys.copy()
+        
+        if hasattr(ctx, 'job') and ctx.job.cancelled:
+            job.status = "cancelled"
+            job.completed_at = datetime.now()
+            job.progress = {"message": "Job was cancelled"}
+            # Unregister all story keys
+            for story_key in story_keys:
+                unregister_ticket_job(story_key)
+            return
+        
+        if not generator.planning_service:
+            raise RuntimeError("Planning service not available - requires Confluence client configuration")
+        
+        # Generate tasks first
+        from src.planning_models import PlanningContext, OperationMode
+        
+        # Derive epic_key from first story_key
+        epic_key = story_keys[0].split('-')[0] + "-000"
+        
+        job.progress = {"message": "Generating tasks..."}
+        
+        context = PlanningContext(
+            epic_key=epic_key,
+            mode=OperationMode.PLANNING,
+            max_tasks_per_story=tasks_per_story or 3
+        )
+        
+        planning_result = generator.planning_service.generate_tasks_for_stories(
+            story_keys, context
+        )
+        
+        if not planning_result.success or not planning_result.epic_plan:
+            job.status = "failed"
+            job.completed_at = datetime.now()
+            job.error = "Task generation failed"
+            job.progress = {"message": f"Task generation failed: {planning_result.errors}"}
+            job.results = {
+                "success": False,
+                "errors": planning_result.errors,
+                "story_keys": story_keys
+            }
+            # Unregister all story keys on failure
+            for story_key in story_keys:
+                unregister_ticket_job(story_key)
+            return job.results
+        
+        # Extract all tasks from stories
+        all_tasks = []
+        for story in planning_result.epic_plan.stories:
+            all_tasks.extend(story.tasks)
+        
+        # Create tasks if requested
+        job.progress = {"message": "Creating task tickets..."}
+        
+        creation_results = generator.planning_service.create_tasks_for_stories(
+            all_tasks,
+            story_keys,
+            dry_run=not create_tickets
+        )
+        
+        job.status = "completed"
+        job.completed_at = datetime.now()
+        job.results = {
+            "story_keys": story_keys,
+            "planning_results": planning_result.dict(),
+            "creation_results": creation_results,
+            "success": creation_results.get("success", False)
+        }
+        
+        # Count created tasks
+        if creation_results.get("created_tickets"):
+            created_tasks = creation_results["created_tickets"].get("tasks", [])
+            job.successful_tickets = len(created_tasks)
+        
+        job.progress = {"message": f"Task creation completed: {job.successful_tickets} tasks created"}
+        
+        # Unregister all story keys when job completes
+        for story_key in story_keys:
+            unregister_ticket_job(story_key)
+        
+        logger.info(f"Job {job_id} completed: created tasks for {len(story_keys)} stories")
+        
+        # Return results so ARQ stores them in Redis for persistence
+        return job.results
+        
+    except Exception as e:
+        logger.error(f"Job {job_id} failed: {e}")
+        if job_id in jobs:
+            job = jobs[job_id]
+            job.status = "failed"
+            job.completed_at = datetime.now()
+            job.error = str(e)
+            job.progress = {"message": f"Job failed: {str(e)}"}
+            # Unregister all story keys on failure
+            if job.ticket_keys:
+                for story_key in job.ticket_keys:
+                    unregister_ticket_job(story_key)
+        raise
+

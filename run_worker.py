@@ -18,7 +18,11 @@ from api.workers import (
     process_task_generation_worker,
     process_test_generation_worker,
     process_story_coverage_worker,
-    process_prd_story_sync_worker
+    process_prd_story_sync_worker,
+    process_bulk_story_update_worker,
+    process_epic_creation_worker,
+    process_story_creation_worker,
+    process_task_creation_worker
 )
 from src.config import Config
 import logging
@@ -57,7 +61,11 @@ async def main():
                 process_task_generation_worker,
                 process_test_generation_worker,
                 process_story_coverage_worker,
-                process_prd_story_sync_worker
+                process_prd_story_sync_worker,
+                process_bulk_story_update_worker,
+                process_epic_creation_worker,
+                process_story_creation_worker,
+                process_task_creation_worker
             ],
             redis_settings=WorkerSettings.redis_settings,
             max_jobs=WorkerSettings.max_jobs,
