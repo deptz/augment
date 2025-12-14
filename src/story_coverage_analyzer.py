@@ -33,7 +33,8 @@ class StoryCoverageAnalyzer:
     def analyze_coverage(
         self, 
         story_key: str, 
-        include_test_cases: bool = True
+        include_test_cases: bool = True,
+        additional_context: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Main analysis method - analyzes story coverage by its tasks
@@ -41,6 +42,7 @@ class StoryCoverageAnalyzer:
         Args:
             story_key: The story ticket key to analyze
             include_test_cases: Whether to include test case analysis
+            additional_context: Optional additional context or requirements to consider
             
         Returns:
             Dictionary with coverage analysis results
@@ -59,7 +61,7 @@ class StoryCoverageAnalyzer:
                 }
             
             # Step 2: Build LLM prompt (user prompt)
-            user_prompt = self._build_llm_prompt(story_data, tasks_data, include_test_cases)
+            user_prompt = self._build_llm_prompt(story_data, tasks_data, include_test_cases, additional_context)
             
             # Step 3: Get system prompt from LLM client
             system_prompt = self.llm_client.get_system_prompt()
@@ -136,7 +138,8 @@ class StoryCoverageAnalyzer:
         self, 
         story_data: Dict[str, Any], 
         tasks_data: List[Dict[str, Any]],
-        include_test_cases: bool
+        include_test_cases: bool,
+        additional_context: Optional[str] = None
     ) -> str:
         """
         Build the LLM prompt for coverage analysis
@@ -145,6 +148,7 @@ class StoryCoverageAnalyzer:
             story_data: Story ticket data
             tasks_data: List of task ticket data
             include_test_cases: Whether to include test cases in analysis
+            additional_context: Optional additional context to include in analysis
             
         Returns:
             Formatted prompt string
@@ -196,6 +200,11 @@ class StoryCoverageAnalyzer:
             # Get prompt template from config or use centralized default
             prompt_template = self.config.get('prompts', {}).get('story_coverage_analysis', Prompts.get_story_coverage_analysis_template())
             
+            # Format additional_context section
+            additional_context_section = ""
+            if additional_context:
+                additional_context_section = f"\n\n**Additional Context/Requirements:**\n{additional_context}\n"
+            
             # Format the prompt
             prompt = prompt_template.format(
                 story_key=story_key,
@@ -205,7 +214,8 @@ class StoryCoverageAnalyzer:
                 tasks_count=len(tasks_data),
                 tasks_summary='\n'.join(tasks_summary) if tasks_summary else "No tasks found",
                 tasks_details='\n\n'.join(tasks_details) if tasks_details else "No task details available",
-                include_test_cases=include_test_cases
+                include_test_cases=include_test_cases,
+                additional_context=additional_context_section
             )
             
             return prompt

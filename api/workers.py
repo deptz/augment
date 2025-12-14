@@ -743,6 +743,7 @@ async def process_bulk_story_update_worker(ctx, job_id: str, stories_data: List[
 
 
 async def process_story_coverage_worker(ctx, job_id: str, story_key: str, include_test_cases: bool = True,
+                                       additional_context: Optional[str] = None,
                                        llm_model: Optional[str] = None, llm_provider: Optional[str] = None):
     """ARQ worker function for analyzing story coverage"""
     _initialize_services_if_needed()
@@ -790,7 +791,8 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
         # Perform analysis
         result = analyzer.analyze_coverage(
             story_key=story_key,
-            include_test_cases=include_test_cases
+            include_test_cases=include_test_cases,
+            additional_context=additional_context
         )
         
         if not result.get('success', False):

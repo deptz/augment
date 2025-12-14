@@ -31,6 +31,10 @@ class StoryCoverageRequest(BaseModel):
         None,
         description="LLM model to use (uses default if not specified)"
     )
+    additional_context: Optional[str] = Field(
+        None,
+        description="Additional context or requirements to consider in the analysis (e.g., specific concerns, constraints, or focus areas)"
+    )
     
     @validator('llm_provider')
     def validate_provider(cls, v):

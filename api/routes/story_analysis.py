@@ -92,6 +92,7 @@ async def analyze_story_coverage(
                 job_id=job_id,
                 story_key=request.story_key,
                 include_test_cases=request.include_test_cases,
+                additional_context=request.additional_context,
                 llm_model=request.llm_model,
                 llm_provider=request.llm_provider,
                 _job_id=job_id
@@ -128,7 +129,8 @@ async def analyze_story_coverage(
         # Perform analysis
         result = analyzer.analyze_coverage(
             story_key=request.story_key,
-            include_test_cases=request.include_test_cases
+            include_test_cases=request.include_test_cases,
+            additional_context=request.additional_context
         )
         
         if not result.get('success', False):
