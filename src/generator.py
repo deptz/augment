@@ -112,6 +112,18 @@ class DescriptionGenerator:
                 ticket_key, description.description, dry_run
             )
             
+            # Handle image attachments if description contains images (only if not dry run)
+            if success and not dry_run:
+                confluence_server_url = None
+                if self.confluence_client:
+                    confluence_server_url = self.confluence_client.server_url
+                
+                self.jira_client._attach_images_from_description(
+                    ticket_key, 
+                    description.description, 
+                    confluence_server_url
+                )
+            
             # Add model and provider to the result
             llm_provider = None
             llm_model = None

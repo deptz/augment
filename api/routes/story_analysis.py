@@ -161,6 +161,7 @@ async def update_task_from_suggestion(
 ):
     """Update an existing task with suggested improvements"""
     jira_client = get_jira_client()
+    from ..dependencies import get_confluence_client
     
     try:
         logger.info(f"User {current_user} updating task {request.task_key} (update_jira={request.update_jira})")
@@ -197,6 +198,18 @@ async def update_task_from_suggestion(
         
         if not description_updated:
             raise HTTPException(status_code=500, detail=f"Failed to update description for {request.task_key}")
+        
+        # Handle image attachments if description contains images
+        confluence_client = get_confluence_client()
+        confluence_server_url = None
+        if confluence_client:
+            confluence_server_url = confluence_client.server_url
+        
+        jira_client._attach_images_from_description(
+            request.task_key, 
+            request.updated_description, 
+            confluence_server_url
+        )
         
         # Update test cases if provided
         if request.updated_test_cases:

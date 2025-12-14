@@ -37,7 +37,7 @@ class JiraClient:
     
     def _get_fields_list(self) -> str:
         """Get the list of fields to fetch from Jira API"""
-        base_fields = ['key', 'summary', 'description', 'status', 'parent', 'assignee', 'created', 'updated']
+        base_fields = ['key', 'summary', 'description', 'status', 'parent', 'assignee', 'created', 'updated', 'issuetype']
         custom_fields = [self.prd_custom_field]
         
         if self.rfc_custom_field:
@@ -1027,7 +1027,7 @@ class JiraClient:
             logger.error(f"Error creating story ticket: {str(e)}")
             return None
     
-    def create_task_ticket(self, task_plan, project_key: str, story_key: Optional[str] = None, raw_description: Optional[str] = None) -> Optional[str]:
+    def create_task_ticket(self, task_plan, project_key: str, story_key: Optional[str] = None, raw_description: Optional[str] = None, confluence_server_url: Optional[str] = None) -> Optional[str]:
         """
         Create a task ticket in JIRA
         
@@ -1036,6 +1036,7 @@ class JiraClient:
             project_key: JIRA project key
             story_key: Parent story key (optional)
             raw_description: Optional raw description to use directly (bypasses TaskPlan formatting)
+            confluence_server_url: Optional Confluence server URL for downloading image attachments
             
         Returns:
             Created ticket key or None if failed
@@ -1119,7 +1120,7 @@ class JiraClient:
                 
                 # Handle image attachments if description contains images
                 description_text = raw_description if raw_description else task_plan.description
-                self._attach_images_from_description(ticket_key, description_text)
+                self._attach_images_from_description(ticket_key, description_text, confluence_server_url)
                 
                 return ticket_key
             else:

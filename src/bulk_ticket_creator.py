@@ -356,9 +356,14 @@ class BulkTicketCreator:
     
     def _create_task_with_retry(self, task_plan: TaskPlan, project_key: str, story_key: str, max_retries: int = 3) -> Optional[str]:
         """Create task ticket with retry logic"""
+        # Get Confluence server URL if available
+        confluence_server_url = None
+        if self.confluence_client:
+            confluence_server_url = self.confluence_client.server_url
+        
         for attempt in range(max_retries):
             try:
-                task_key = self.jira_client.create_task_ticket(task_plan, project_key, story_key)
+                task_key = self.jira_client.create_task_ticket(task_plan, project_key, story_key, confluence_server_url=confluence_server_url)
                 if task_key:
                     return task_key
                 

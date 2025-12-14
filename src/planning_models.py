@@ -1,6 +1,7 @@
 """
 Planning-specific data models for top-down epic/story/task generation
 """
+import uuid
 from typing import List, Optional, Dict, Any, Union
 from datetime import datetime
 from enum import Enum
@@ -97,6 +98,7 @@ class TaskScope(BaseModel):
 class TaskPlan(BaseModel):
     """Planned task with all required content"""
     key: Optional[str] = Field(default=None, description="JIRA task key")
+    task_id: Optional[str] = Field(default=None, description="Temporary task ID (UUID) for dependency resolution before JIRA creation")
     summary: str = Field(description="Task title/summary")
     purpose: str = Field(description="Why this task is needed")
     scopes: List[TaskScope] = Field(description="What exactly needs to be done")
@@ -106,7 +108,7 @@ class TaskPlan(BaseModel):
     cycle_time_estimate: Optional[CycleTimeEstimate] = Field(default=None, description="Effort estimation")
     epic_key: Optional[str] = Field(default=None, description="Parent epic JIRA key")
     story_key: Optional[str] = Field(default=None, description="Parent story JIRA key")
-    depends_on_tasks: List[str] = Field(default_factory=list, description="Task IDs this task depends on")
+    depends_on_tasks: List[str] = Field(default_factory=list, description="Task IDs (task_id or summary) this task depends on. Prefer task_id when available.")
     blocked_by_teams: List[TaskTeam] = Field(default_factory=list, description="Teams this task is blocked by")
     sprint_id: Optional[int] = Field(default=None, description="Assigned sprint ID")
     scheduled_sprint: Optional[Dict[str, Any]] = Field(default=None, description="Scheduled sprint information")

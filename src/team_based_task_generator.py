@@ -458,7 +458,9 @@ class TeamBasedTaskGenerator:
             # Create test cases based on team
             test_cases = self._generate_team_test_cases(team, title)
             
+            import uuid
             return TaskPlan(
+                task_id=str(uuid.uuid4()),  # Generate stable identifier for dependency resolution
                 summary=title,
                 purpose=purpose,
                 scopes=[scope],
@@ -468,7 +470,7 @@ class TeamBasedTaskGenerator:
                 cycle_time_estimate=cycle_estimate,
                 epic_key=story.epic_key,
                 story_key=getattr(story, 'key', None),
-                depends_on_tasks=depends_on_tasks,  # Store AI-generated dependencies
+                depends_on_tasks=depends_on_tasks,  # Store AI-generated dependencies (summary strings, will be resolved later)
                 blocked_by_teams=blocked_by_team_enums  # Store AI-generated team blocks
             )
             
@@ -494,7 +496,9 @@ class TeamBasedTaskGenerator:
             # Create test cases based on team
             test_cases = self._generate_team_test_cases(task_dict['team'], task_dict.get('title', 'Task'))
             
+            import uuid
             return TaskPlan(
+                task_id=str(uuid.uuid4()),  # Generate stable identifier for dependency resolution
                 summary=task_dict.get('title', f"{task_dict['team'].value.title()} Task"),
                 purpose=task_dict.get('purpose', f"Support {task_dict['team'].value} implementation"),
                 scopes=[scope],
@@ -1017,6 +1021,10 @@ class TeamBasedTaskGenerator:
             logger.info("Tasks are AI-generated - using AI-provided dependencies instead of hardcoded rules")
             dependency_count = sum(1 for task in tasks if task.depends_on_tasks)
             logger.info(f"AI provided dependencies for {dependency_count}/{len(tasks)} tasks")
+            
+            # Convert summary-based dependencies to task_id when possible
+            self._convert_dependencies_to_task_id(tasks)
+            
             return tasks
         
         logger.info("Tasks are pattern-generated - applying hardcoded dependency rules")
@@ -1062,7 +1070,90 @@ class TeamBasedTaskGenerator:
         dependency_count = sum(1 for task in tasks if task.depends_on_tasks)
         logger.info(f"Set up dependencies for {dependency_count}/{len(tasks)} tasks")
         
+        # Convert summary-based dependencies to task_id when possible
+        self._convert_dependencies_to_task_id(tasks)
+        
         return tasks
+    
+    def _convert_dependencies_to_task_id(self, tasks: List[TaskPlan]) -> None:
+        """
+        Convert summary-based dependencies to task_id when possible.
+        This makes dependencies stable even if summaries change.
+        
+        Args:
+            tasks: List of tasks to update dependencies for
+        """
+        # Build mapping from summary to task_id
+        summary_to_task_id = {task.summary: task.task_id for task in tasks if task.task_id}
+        
+        # Also build normalized summary to task_id mapping for fuzzy matching
+        normalized_to_task_id = {}
+        for task in tasks:
+            if task.task_id:
+                # Normalize summary for matching
+                normalized = self._normalize_task_summary_for_matching(task.summary)
+                if normalized and normalized not in normalized_to_task_id:
+                    normalized_to_task_id[normalized] = task.task_id
+        
+        # Update dependencies for each task
+        converted_count = 0
+        for task in tasks:
+            if not task.depends_on_tasks:
+                continue
+            
+            updated_dependencies = []
+            for dep in task.depends_on_tasks:
+                # If already a task_id (UUID format), keep it
+                if self._is_uuid(dep):
+                    updated_dependencies.append(dep)
+                    continue
+                
+                # Try exact summary match
+                if dep in summary_to_task_id:
+                    updated_dependencies.append(summary_to_task_id[dep])
+                    converted_count += 1
+                    logger.debug(f"Converted dependency '{dep}' to task_id {summary_to_task_id[dep]}")
+                    continue
+                
+                # Try normalized summary match
+                normalized_dep = self._normalize_task_summary_for_matching(dep)
+                if normalized_dep in normalized_to_task_id:
+                    updated_dependencies.append(normalized_to_task_id[normalized_dep])
+                    converted_count += 1
+                    logger.debug(f"Converted dependency '{dep}' (normalized: '{normalized_dep}') to task_id {normalized_to_task_id[normalized_dep]}")
+                    continue
+                
+                # Keep original if no match found (backward compatibility)
+                updated_dependencies.append(dep)
+                logger.debug(f"Could not convert dependency '{dep}' to task_id, keeping as summary")
+            
+            task.depends_on_tasks = updated_dependencies
+        
+        if converted_count > 0:
+            logger.info(f"Converted {converted_count} summary-based dependencies to task_id")
+    
+    def _normalize_task_summary_for_matching(self, summary: str) -> str:
+        """Normalize task summary for matching (same logic as planning_service)"""
+        if not summary:
+            return ""
+        import re
+        normalized = summary.strip()
+        # Remove team prefixes
+        normalized = re.sub(r'^\s*\[(BE|FE|QA)\]\s*', '', normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r'^\s*(BE|FE|QA):\s*', '', normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r'^\s*(BE|FE|QA)\s+', '', normalized, flags=re.IGNORECASE)
+        normalized = ' '.join(normalized.split())
+        normalized = normalized.lower()
+        return normalized
+    
+    def _is_uuid(self, value: str) -> bool:
+        """Check if string is a UUID"""
+        import uuid
+        try:
+            uuid.UUID(value)
+            return True
+        except (ValueError, AttributeError):
+            return False
     
     def _has_dependency_relationship(self, dependency_task: TaskPlan, dependent_task: TaskPlan) -> bool:
         """

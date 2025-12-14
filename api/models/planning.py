@@ -149,10 +149,11 @@ class EpicAnalysisResponse(BaseModel):
 
 class TaskDetail(BaseModel):
     """Detailed task information for API responses"""
+    task_id: Optional[str] = Field(None, description="Temporary task ID (UUID) for dependency resolution before JIRA creation")
     summary: str = Field(..., description="Task title/summary")
     description: str = Field(..., description="Full task description")
     team: str = Field(..., description="Team responsible for the task")
-    depends_on_tasks: List[str] = Field(default_factory=list, description="Task IDs this task depends on")
+    depends_on_tasks: List[str] = Field(default_factory=list, description="Task IDs (task_id or summary) this task depends on. Prefer task_id when available.")
     estimated_days: Optional[float] = Field(None, description="Total estimated cycle time in days")
     test_cases: List[TestCaseModel] = Field(default_factory=list, description="Test cases for this task")
     jira_key: Optional[str] = Field(None, description="JIRA ticket key if created")

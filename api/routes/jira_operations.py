@@ -31,6 +31,7 @@ async def update_jira_ticket(
 ):
     """Update a JIRA ticket with partial updates and link management"""
     jira_client = get_jira_client()
+    from ..dependencies import get_confluence_client
     
     try:
         logger.info(f"User {current_user} updating ticket {request.ticket_key} (update_jira={request.update_jira})")
@@ -110,6 +111,18 @@ async def update_jira_ticket(
             updates_applied["description"] = description_updated
             if not description_updated:
                 logger.warning(f"Failed to update description for {request.ticket_key}")
+            else:
+                # Handle image attachments if description contains images
+                confluence_client = get_confluence_client()
+                confluence_server_url = None
+                if confluence_client:
+                    confluence_server_url = confluence_client.server_url
+                
+                jira_client._attach_images_from_description(
+                    request.ticket_key, 
+                    request.description, 
+                    confluence_server_url
+                )
         
         # Update test cases if provided
         if request.test_cases:
@@ -228,12 +241,19 @@ async def create_jira_ticket(
 ):
     """Create a new JIRA Task ticket"""
     jira_client = get_jira_client()
+    from ..dependencies import get_confluence_client
     
     try:
         logger.info(f"User {current_user} creating ticket (create_ticket={request.create_ticket})")
         
         if not jira_client:
             raise HTTPException(status_code=503, detail="JIRA client not initialized")
+        
+        # Get Confluence server URL if available
+        confluence_client = get_confluence_client()
+        confluence_server_url = None
+        if confluence_client:
+            confluence_server_url = confluence_client.server_url
         
         # Get project key from parent epic
         project_key = jira_client.get_project_key_from_epic(request.parent_key)
@@ -300,7 +320,8 @@ async def create_jira_ticket(
             task_plan=task_plan,
             project_key=project_key,
             story_key=request.story_key,
-            raw_description=request.description
+            raw_description=request.description,
+            confluence_server_url=confluence_server_url
         )
         
         # task_key will be set if creation succeeds, otherwise an exception is raised

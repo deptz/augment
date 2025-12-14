@@ -120,6 +120,7 @@ def extract_task_details_with_tests(planning_result) -> List[TaskDetail]:
                         logger.warning(f"Failed to generate test cases for task '{task.summary}': {e}")
                 
                 task_detail = TaskDetail(
+                    task_id=getattr(task, 'task_id', None),  # Include task_id for stable dependency resolution
                     summary=task.summary,
                     description=task.format_description(),
                     team=task.team.value,
@@ -244,6 +245,7 @@ def extract_story_details_with_tests(planning_result) -> List[StoryDetail]:
                                 logger.warning(f"Failed to generate test cases for task '{task.summary}': {e}")
                         
                         story_task = TaskDetail(
+                            task_id=getattr(task, 'task_id', None),  # Include task_id for stable dependency resolution
                             summary=task.summary,
                             description=task.format_description(),
                             team=task.team.value,

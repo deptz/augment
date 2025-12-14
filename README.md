@@ -28,7 +28,8 @@ Whether you're backfilling documentation for existing tickets or planning new fe
 - **Multi-LLM Support**: Choose from OpenAI GPT, Anthropic Claude, Google Gemini, or Moonshot AI (KIMI) - switch providers anytime
 - **Runtime Model Selection**: Select different LLM models per request via API parameters for optimal performance
 - **Team-Based Task Generation**: Automatically separates work into Backend, Frontend, and QA tasks with appropriate assignments
-- **AI-Powered Dependencies**: Intelligently detects and manages task dependencies and relationships
+- **AI-Powered Dependencies**: Intelligently detects and manages task dependencies and relationships with stable task_id resolution
+- **Stable Dependency Resolution**: Uses UUID-based task identifiers to ensure dependencies remain valid even when task summaries are edited
 - **Comprehensive Test Generation**: Generates detailed test cases for stories and tasks with context-aware scenarios
 - **Background Job Processing**: All generation endpoints support asynchronous processing with real-time job tracking and cancellation
 - **Duplicate Prevention**: Prevents duplicate processing of tickets that are already being handled
@@ -461,6 +462,30 @@ curl -X POST "http://localhost:8000/plan/tasks/team-based" \
   }'
 ```
 
+**Task Dependency Resolution:**
+
+The system uses stable task identifiers (UUID) to ensure dependencies remain valid even when task summaries are edited:
+
+- Each task receives a unique `task_id` (UUID) during generation
+- Dependencies reference `task_id` instead of mutable summaries
+- Automatic conversion from summary-based to task_id-based dependencies
+- Backward compatible with existing summary-based dependencies
+- Robust matching with fuzzy fallback for edge cases
+
+**API Response includes task_id:**
+```json
+{
+  "task_details": [
+    {
+      "task_id": "550e8400-e29b-41d4-a716-446655440000",
+      "summary": "[BE] Implement user authentication API",
+      "depends_on_tasks": ["550e8400-e29b-41d4-a716-446655440001"],
+      "team": "backend"
+    }
+  ]
+}
+```
+
 **Sync Stories from PRD:**
 ```bash
 # Synchronous mode (default)
@@ -523,6 +548,7 @@ A 1-2 sentence summary of why this task was necessary, based on PRD/RFC goals.
 - `POST /plan/tasks/generate` - Generate contextual tasks for stories
 - `POST /plan/tasks/team-based` - Generate team-separated tasks (Backend/Frontend/QA)
 - `POST /plan/tasks/bulk-create` - Create multiple JIRA tickets with dependencies
+- All task generation endpoints return `task_id` (UUID) for stable dependency resolution
 
 **Story Sync from PRD:**
 - `POST /plan/stories/sync-from-prd` - Sync story tickets from PRD table to JIRA (supports async_mode)
@@ -756,6 +782,13 @@ For more details, see [Background Jobs Documentation](docs/api/API_DOCUMENTATION
     - Check the existing job status using `GET /jobs/ticket/{ticket_key}`
     - Wait for the existing job to complete before retrying
     - Use the `X-Active-Job-Id` header from the error response to track the existing job
+
+11. **Task dependencies not resolving correctly**
+    - The system uses stable task_id (UUID) for dependency resolution
+    - Dependencies are automatically converted from summary to task_id during generation
+    - If dependencies fail, check logs for dependency resolution attempts
+    - Ensure all tasks in a batch are created together for proper dependency mapping
+    - The system supports both task_id and summary-based dependencies (backward compatible)
 
 ### Debug Mode
 

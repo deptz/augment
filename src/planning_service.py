@@ -2,6 +2,7 @@
 Planning Service for Epic Development Planning
 """
 import logging
+import re
 import time
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
@@ -657,8 +658,10 @@ class PlanningService:
         """Generate basic team-separated tasks as fallback when AI generation fails"""
         tasks = []
         
+        import uuid
         # Backend task
         backend_task = TaskPlan(
+            task_id=str(uuid.uuid4()),  # Generate stable identifier for dependency resolution
             summary=f"Backend implementation for {story.summary}",
             purpose="Implement backend logic and data handling",
             scopes=[TaskScope(
@@ -699,6 +702,7 @@ class PlanningService:
         
         # Frontend task
         frontend_task = TaskPlan(
+            task_id=str(uuid.uuid4()),  # Generate stable identifier for dependency resolution
             summary=f"Frontend implementation for {story.summary}",
             purpose="Implement user interface and user experience",
             scopes=[TaskScope(
@@ -739,6 +743,7 @@ class PlanningService:
         
         # QA task
         qa_task = TaskPlan(
+            task_id=str(uuid.uuid4()),  # Generate stable identifier for dependency resolution
             summary=f"Quality assurance for {story.summary}",
             purpose="Ensure quality and validate functionality",
             scopes=[TaskScope(
@@ -953,17 +958,44 @@ class PlanningService:
         self._task_summary_to_plan = {task.summary: task for task in tasks}
         self._task_summary_to_key = {}
         
+        # Build task_id to key mapping for stable dependency resolution
+        self._task_id_to_key = {}
+        self._task_id_to_plan = {task.task_id: task for task in tasks if task.task_id}
+        
+        # Build normalized mappings for faster dependency lookup (backward compatibility)
+        self._normalized_summary_to_key = {}
+        self._normalized_summary_to_original = {}
+        
         # First pass: Create all tickets
         for i, task in enumerate(tasks, 1):
-            logger.debug(f"Creating task {i}/{len(tasks)}: {task.summary}")
+            logger.debug(f"Creating task {i}/{len(tasks)}: {task.summary} (task_id: {task.task_id})")
             task_key = self._create_task_ticket_only(task)
             if task_key:
                 created_keys.append(task_key)
+                # Store original summary mapping (backward compatibility)
                 self._task_summary_to_key[task.summary] = task_key
+                
+                # Store task_id mapping (preferred for dependency resolution)
+                if task.task_id:
+                    self._task_id_to_key[task.task_id] = task_key
+                    logger.debug(f"   Mapped task_id {task.task_id} -> {task_key}")
+                
+                # Store normalized summary mapping for faster lookup (backward compatibility)
+                normalized_summary = self._normalize_task_summary(task.summary)
+                if normalized_summary:
+                    # If multiple tasks have same normalized summary, keep the first one
+                    if normalized_summary not in self._normalized_summary_to_key:
+                        self._normalized_summary_to_key[normalized_summary] = task_key
+                        self._normalized_summary_to_original[normalized_summary] = task.summary
+                    else:
+                        logger.debug(f"   Note: Normalized summary '{normalized_summary}' already mapped to another task")
+                
                 logger.debug(f"Task {i} created successfully: {task_key}")
             else:
                 failed_count += 1
                 logger.warning(f"Task {i} creation failed: {task.summary}")
+        
+        logger.debug(f"Built dependency mappings: {len(self._task_summary_to_key)} summaries, {len(self._task_id_to_key)} task_ids, {len(self._normalized_summary_to_key)} normalized")
         
         # Second pass: Create relationships after all tickets exist
         logger.info(f"Creating relationships for {len(created_keys)} created tasks...")
@@ -1045,10 +1077,16 @@ class PlanningService:
             logger.debug(f"Using project key: {project_key}")
             
             # Create the ticket using JIRA client
+            # Pass Confluence server URL for image attachment support
+            confluence_server_url = None
+            if self.confluence_client:
+                confluence_server_url = self.confluence_client.server_url
+            
             task_key = self.jira_client.create_task_ticket(
                 task_plan=task,
                 project_key=project_key,
-                story_key=getattr(task, 'story_key', None)
+                story_key=getattr(task, 'story_key', None),
+                confluence_server_url=confluence_server_url
             )
             
             if task_key:
@@ -1080,21 +1118,35 @@ class PlanningService:
             
             # Handle "depends_on_tasks" relationships - create "Blocks" links
             if task.depends_on_tasks:
-                logger.info(f"Creating dependency links for {task_key}: depends on {task.depends_on_tasks}")
-                for dependency_summary in task.depends_on_tasks:
+                logger.info(f"🔗 Processing {len(task.depends_on_tasks)} dependency(ies) for task {task_key}: {task.depends_on_tasks}")
+                dependency_resolved = 0
+                dependency_failed = 0
+                
+                for dependency_identifier in task.depends_on_tasks:
+                    logger.debug(f"   Resolving dependency: '{dependency_identifier}'")
                     # Try to find the actual JIRA key for the dependency task
-                    dependency_key = self._find_task_key_by_summary(dependency_summary)
+                    # First try task_id lookup (preferred), then fall back to summary lookup (backward compatibility)
+                    dependency_key = self._find_task_key_by_identifier(dependency_identifier)
                     if dependency_key:
                         # Create "Blocks" link: dependency blocks this task
                         # Try "Blocks" first, fallback to standard link types
                         success = self._create_dependency_link(dependency_key, task_key)
                         if success:
-                            logger.info(f"✅ Created dependency link: {dependency_key} blocks {task_key}")
+                            logger.info(f"✅ Created dependency link: {dependency_key} blocks {task_key} (dependency: '{dependency_identifier}')")
                             relationships_created += 1
+                            dependency_resolved += 1
                         else:
-                            logger.warning(f"❌ Failed to create dependency link: {dependency_key} -> {task_key}")
+                            logger.warning(f"❌ Failed to create dependency link: {dependency_key} -> {task_key} (dependency: '{dependency_identifier}')")
+                            dependency_failed += 1
                     else:
-                        logger.warning(f"🔍 Could not find JIRA key for dependency task: {dependency_summary}")
+                        logger.warning(f"🔍 Could not resolve dependency task: '{dependency_identifier}' (task {task_key} depends on this)")
+                        dependency_failed += 1
+                
+                # Summary logging
+                if dependency_resolved > 0:
+                    logger.info(f"   ✅ Resolved {dependency_resolved}/{len(task.depends_on_tasks)} dependencies for {task_key}")
+                if dependency_failed > 0:
+                    logger.warning(f"   ⚠️ Failed to resolve {dependency_failed}/{len(task.depends_on_tasks)} dependencies for {task_key}")
             
             # Handle story relationship - create "Split from" link only to stories
             if task.story_key:
@@ -1125,31 +1177,153 @@ class PlanningService:
             logger.error(f"💥 Error creating relationships for task {task_key}: {str(e)}")
             logger.exception("Full exception details:")
 
+    def _normalize_task_summary(self, summary: str) -> str:
+        """
+        Normalize task summary for matching:
+        - Remove team prefixes ([BE], [FE], [QA])
+        - Strip whitespace
+        - Convert to lowercase
+        """
+        if not summary:
+            return ""
+        
+        # Remove team prefixes (case-insensitive)
+        normalized = summary.strip()
+        # Match [BE], [FE], [QA] at the start (with optional whitespace)
+        normalized = re.sub(r'^\s*\[(BE|FE|QA)\]\s*', '', normalized, flags=re.IGNORECASE)
+        # Also handle without brackets: BE, FE, QA at start
+        normalized = re.sub(r'^\s*(BE|FE|QA):\s*', '', normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r'^\s*(BE|FE|QA)\s+', '', normalized, flags=re.IGNORECASE)
+        
+        # Normalize whitespace and case
+        normalized = ' '.join(normalized.split())  # Collapse multiple spaces
+        normalized = normalized.lower()
+        
+        return normalized
+    
+    def _fuzzy_match_dependency(self, dependency_summary: str, available_summaries: List[str]) -> Optional[str]:
+        """
+        Try to find a fuzzy/partial match for dependency summary in available summaries.
+        Returns the first matching summary if found, None otherwise.
+        """
+        normalized_dep = self._normalize_task_summary(dependency_summary)
+        if not normalized_dep:
+            return None
+        
+        # Try different matching strategies
+        for summary in available_summaries:
+            normalized_summary = self._normalize_task_summary(summary)
+            
+            # Strategy 1: Exact normalized match
+            if normalized_dep == normalized_summary:
+                logger.debug(f"Fuzzy match (exact normalized): '{dependency_summary}' -> '{summary}'")
+                return summary
+            
+            # Strategy 2: Dependency is contained in summary (dependency is shorter/more specific)
+            if normalized_dep in normalized_summary and len(normalized_dep) >= 10:
+                logger.debug(f"Fuzzy match (dependency contained in summary): '{dependency_summary}' -> '{summary}'")
+                return summary
+            
+            # Strategy 3: Summary is contained in dependency (summary is shorter/more specific)
+            if normalized_summary in normalized_dep and len(normalized_summary) >= 10:
+                logger.debug(f"Fuzzy match (summary contained in dependency): '{dependency_summary}' -> '{summary}'")
+                return summary
+            
+            # Strategy 4: Word overlap (at least 3 significant words match)
+            dep_words = set(word for word in normalized_dep.split() if len(word) > 3)
+            summary_words = set(word for word in normalized_summary.split() if len(word) > 3)
+            if dep_words and summary_words:
+                overlap = dep_words.intersection(summary_words)
+                # If at least 50% of dependency words match, consider it a match
+                if len(overlap) >= min(3, len(dep_words) * 0.5):
+                    logger.debug(f"Fuzzy match (word overlap {len(overlap)} words): '{dependency_summary}' -> '{summary}'")
+                    return summary
+        
+        return None
+
+    def _find_task_key_by_identifier(self, identifier: str) -> Optional[str]:
+        """
+        Find JIRA key for a task by identifier (task_id or summary).
+        Prefers task_id lookup, falls back to summary lookup for backward compatibility.
+        
+        Args:
+            identifier: Either a task_id (UUID) or task summary string
+            
+        Returns:
+            JIRA task key if found, None otherwise
+        """
+        # First try task_id lookup (preferred method)
+        if hasattr(self, '_task_id_to_key') and identifier in self._task_id_to_key:
+            task_key = self._task_id_to_key[identifier]
+            logger.debug(f"✅ Found task by task_id: {identifier} -> {task_key}")
+            return task_key
+        
+        # Fall back to summary-based lookup (backward compatibility)
+        return self._find_task_key_by_summary(identifier)
+    
     def _find_task_key_by_summary(self, task_summary: str) -> Optional[str]:
         """
-        Find JIRA key for a task by its summary
-        This is a helper method to resolve task dependencies
+        Find JIRA key for a task by its summary with multiple matching strategies:
+        1. Exact match
+        2. Normalized match (case-insensitive, whitespace-normalized, team prefix removed)
+        3. Fuzzy/partial match (containment or word overlap)
         """
         try:
-            logger.debug(f"Looking for JIRA key for task summary: {task_summary}")
+            logger.debug(f"🔍 Looking for JIRA key for dependency: '{task_summary}'")
             
-            # Check our mapping of summaries to keys built during creation
-            if hasattr(self, '_task_summary_to_key') and task_summary in self._task_summary_to_key:
+            if not hasattr(self, '_task_summary_to_key') or not self._task_summary_to_key:
+                logger.warning(f"⚠️ No task summary mapping available for dependency lookup")
+                return None
+            
+            # Strategy 1: Exact match (current behavior)
+            if task_summary in self._task_summary_to_key:
                 task_key = self._task_summary_to_key[task_summary]
-                logger.debug(f"Found task key in mapping: {task_summary} -> {task_key}")
+                logger.info(f"✅ Found exact match: '{task_summary}' -> {task_key}")
                 return task_key
             
-            # If not found in mapping, try to search JIRA (fallback)
-            logger.warning(f"Task key not found in mapping for: {task_summary}")
+            logger.debug(f"   Exact match failed, trying normalized match...")
             
-            # Note: JIRA search fallback could be implemented in the future
-            # This would search for recently created tasks with matching summaries
-            # For now, we rely on the mapping built during ticket creation
+            # Strategy 2: Normalized match
+            normalized_dep = self._normalize_task_summary(task_summary)
+            if normalized_dep:
+                # Check if we have normalized mapping
+                if hasattr(self, '_normalized_summary_to_key'):
+                    if normalized_dep in self._normalized_summary_to_key:
+                        task_key = self._normalized_summary_to_key[normalized_dep]
+                        original_summary = self._normalized_summary_to_original.get(normalized_dep, task_summary)
+                        logger.info(f"✅ Found normalized match: '{task_summary}' -> '{original_summary}' -> {task_key}")
+                        return task_key
+                
+                # Fallback: iterate through mapping and compare normalized versions
+                for original_summary, task_key in self._task_summary_to_key.items():
+                    normalized_original = self._normalize_task_summary(original_summary)
+                    if normalized_dep == normalized_original:
+                        logger.info(f"✅ Found normalized match (fallback): '{task_summary}' -> '{original_summary}' -> {task_key}")
+                        return task_key
+            
+            logger.debug(f"   Normalized match failed, trying fuzzy match...")
+            
+            # Strategy 3: Fuzzy/partial match
+            available_summaries = list(self._task_summary_to_key.keys())
+            matched_summary = self._fuzzy_match_dependency(task_summary, available_summaries)
+            if matched_summary:
+                task_key = self._task_summary_to_key[matched_summary]
+                logger.info(f"✅ Found fuzzy match: '{task_summary}' -> '{matched_summary}' -> {task_key}")
+                return task_key
+            
+            # All strategies failed
+            logger.warning(f"❌ Could not find JIRA key for dependency: '{task_summary}'")
+            logger.debug(f"   Available task summaries in mapping ({len(available_summaries)}):")
+            for i, summary in enumerate(available_summaries[:10], 1):  # Show first 10
+                logger.debug(f"     {i}. {summary}")
+            if len(available_summaries) > 10:
+                logger.debug(f"     ... and {len(available_summaries) - 10} more")
             
             return None
             
         except Exception as e:
-            logger.error(f"Error finding task key for summary '{task_summary}': {str(e)}")
+            logger.error(f"💥 Error finding task key for summary '{task_summary}': {str(e)}")
+            logger.exception("Full exception details:")
             return None
 
     def _create_dependency_link(self, dependency_key: str, task_key: str) -> bool:
