@@ -81,6 +81,7 @@ class BulkTicketCreator:
             
             # Create tasks for each story
             task_mapping = {}  # task_plan_id -> created_key
+            pending_links = []  # Collect links to create after all tickets are created
             
             for story_plan in epic_plan.stories:
                 story_id = id(story_plan)
@@ -97,23 +98,13 @@ class BulkTicketCreator:
                         task_mapping[id(task_plan)] = task_key
                         logger.info(f"Created task {task_key}: {task_plan.summary}")
                         
-                        # Create "Split From" relationship if specified
+                        # Collect "Split From" relationship for later creation
                         if hasattr(task_plan, 'split_from_story') and task_plan.split_from_story:
-                            link_success = self.jira_client.create_issue_link(
-                                task_key, story_key, "Split From"
-                            )
-                            if link_success:
-                                results["relationships_created"].append({
-                                    "from": task_key,
-                                    "to": story_key,
-                                    "type": "Split From"
-                                })
-                            else:
-                                results["relationships_failed"].append({
-                                    "from": task_key,
-                                    "to": story_key,
-                                    "type": "Split From"
-                                })
+                            pending_links.append({
+                                "from": task_key,
+                                "to": story_key,
+                                "type": "Split From"
+                            })
                     else:
                         results["failed_creations"].append({
                             "type": "task",
@@ -122,6 +113,19 @@ class BulkTicketCreator:
                             "error": "Failed to create task ticket"
                         })
                         results["success"] = False
+            
+            # Now that all tickets are created, create all links
+            logger.info(f"All tickets created. Creating {len(pending_links)} pending links...")
+            
+            # Create "Split From" relationships
+            for link_info in pending_links:
+                link_success = self.jira_client.create_issue_link(
+                    link_info["from"], link_info["to"], link_info["type"]
+                )
+                if link_success:
+                    results["relationships_created"].append(link_info)
+                else:
+                    results["relationships_failed"].append(link_info)
             
             # Create dependency relationships between tasks
             self._create_task_dependencies(epic_plan.stories, task_mapping, results)
@@ -226,6 +230,8 @@ class BulkTicketCreator:
             "success": True,
             "created_tickets": {"tasks": []},
             "failed_creations": [],
+            "relationships_created": [],
+            "relationships_failed": [],
             "errors": [],
             "execution_time_seconds": 0.0
         }
