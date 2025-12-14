@@ -203,7 +203,7 @@ class StoryCoverageAnalyzer:
             # Format additional_context section
             additional_context_section = ""
             if additional_context:
-                additional_context_section = f"\n\n**Additional Context/Requirements:**\n{additional_context}\n"
+                additional_context_section = f"**Additional Context/Requirements:**\n{additional_context}\n"
             
             # Format the prompt
             prompt = prompt_template.format(
