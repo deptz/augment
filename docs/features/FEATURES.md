@@ -451,7 +451,7 @@ curl -X POST "http://localhost:8000/sprint/timeline" \
 
 ### Overview
 
-Automatically syncs story tickets from PRD (Product Requirements Document) table format to JIRA, creating story tickets with proper descriptions and acceptance criteria.
+Automatically syncs story tickets from PRD (Product Requirements Document) table format to JIRA, creating story tickets with proper descriptions and acceptance criteria. The system also automatically updates the PRD table with JIRA ticket links when stories are created or updated.
 
 ### Key Features
 
@@ -461,6 +461,10 @@ Automatically syncs story tickets from PRD (Product Requirements Document) table
 - **Existing Ticket Handling**: Supports skip, update, or error actions for existing tickets
 - **Async Support**: Supports both synchronous and asynchronous processing
 - **Dry Run Mode**: Defaults to `dry_run=true` for safe preview
+- **Automatic PRD Table Updates**: Automatically updates PRD table with JIRA links when stories are created or updated
+- **UUID-Based Row Matching**: Uses temporary UUIDs for exact row matching during sync (eliminates need for fuzzy matching)
+- **Automatic Column Creation**: Creates "JIRA Ticket" column in PRD table if it doesn't exist
+- **HTML Link Formatting**: Formats JIRA links as proper HTML anchor tags for Confluence compatibility
 
 ### PRD Table Format
 
@@ -561,12 +565,37 @@ curl -X POST "http://localhost:8000/plan/stories/sync-from-prd" \
 curl "http://localhost:8000/jobs/{job_id}"
 ```
 
+### PRD Table Updates
+
+When stories are created or updated, the system automatically updates the PRD table:
+
+**Automatic Column Creation:**
+- Creates a "JIRA Ticket" column in the PRD table if it doesn't exist
+- Adds missing cells to rows that are too short
+- Handles all table structures gracefully
+
+**UUID-Based Row Matching:**
+- During dry run mode, generates temporary UUIDs for each story to be created
+- Stores UUIDs as placeholders in PRD table: `[TEMP-{uuid}](placeholder)`
+- When story is created, uses UUID for exact row matching (no fuzzy matching needed)
+- Falls back to fuzzy matching by story title if UUID is not available
+
+**Link Formatting:**
+- Formats JIRA links as proper HTML anchor tags (`<a href="...">...</a>`)
+- Ensures links are clickable in Confluence
+- Replaces UUID placeholders with actual JIRA links
+
+**Update Flows:**
+- **Story Creation**: Single and bulk story creation endpoints automatically update PRD table
+- **Story Updates**: Single and bulk story update endpoints automatically update PRD table
+- **PRD Sync**: PRD sync flow updates table for both new and existing stories (when `existing_ticket_action="update"`)
+
 ### Integration
 
 The PRD story sync integrates with:
-- **Confluence**: Fetches PRD documents from Confluence
+- **Confluence**: Fetches PRD documents from Confluence and updates PRD tables
 - **JIRA**: Creates story tickets under the specified epic
-- **Planning Service**: Uses planning service for ticket creation
+- **Planning Service**: Uses planning service for ticket creation and PRD updates
 - **Background Jobs**: Supports async processing for large PRDs
 
 ---

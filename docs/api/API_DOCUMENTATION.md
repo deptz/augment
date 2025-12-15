@@ -887,6 +887,14 @@ The endpoint expects a table in the PRD document with the following structure:
 - **Missing columns**: Handled gracefully - title is required, description defaults to title if missing
 - **Acceptance criteria parsing**: Supports Given/When/Then format, bullet points, or plain text
 
+**PRD Table Updates:**
+- **Dry Run Mode**: Generates temporary UUIDs for stories to be created and adds them as placeholders in the PRD table
+- **Actual Creation**: When stories are created, the PRD table is automatically updated with clickable JIRA links
+- **UUID Matching**: Uses UUID for exact row matching (eliminates need for fuzzy matching)
+- **Column Creation**: Automatically creates "JIRA Ticket" column if it doesn't exist
+- **Link Formatting**: Formats links as proper HTML anchor tags for Confluence compatibility
+- **Update Flow**: When `existing_ticket_action="update"`, existing stories also get their PRD table rows updated
+
 **Example:**
 ```bash
 # Synchronous mode
@@ -1063,6 +1071,8 @@ Create a new JIRA Task ticket with automatic linking and mandays estimation.
 
 **Note:** Mandays estimation is automatically set from the task's cycle time estimate when the ticket is created. The mandays custom field must be configured in your JIRA instance.
 
+**PRD Table Updates:** If the story matches a PRD table row (by UUID or fuzzy matching), the PRD table is automatically updated with a clickable JIRA link. The "JIRA Ticket" column is created automatically if it doesn't exist.
+
 **Example:**
 ```bash
 # Preview mode (default)
@@ -1089,6 +1099,8 @@ curl -X POST "http://localhost:8000/jira/create-ticket" \
 
 #### `POST /jira/update-story-ticket`
 Update an existing story ticket. Only works on Story tickets - will return an error if you try to update a different ticket type. You can update the title, description, test cases, parent epic, or add links. By default, this shows you what would change without actually updating anything. Set update_jira=true when you're ready to make the changes.
+
+**PRD Table Updates:** Automatically updates the PRD table with a JIRA link if the story matches a PRD table row (by fuzzy matching on story title). The "JIRA Ticket" column is created automatically if it doesn't exist.
 
 **Request Body:**
 ```json
@@ -1163,6 +1175,8 @@ curl -X POST "http://localhost:8000/jira/update-story-ticket" \
 
 #### `POST /jira/bulk-update-stories`
 Bulk update multiple story tickets in a single request. Each story can have different update values for summary, description, test_cases, parent_epic, and links. Supports preview mode and asynchronous processing.
+
+**PRD Table Updates:** Automatically updates PRD tables with JIRA links for each updated story that matches a PRD table row (by fuzzy matching on story title). The "JIRA Ticket" column is created automatically if it doesn't exist.
 
 **Request Body:**
 ```json
@@ -1470,6 +1484,8 @@ curl -X POST "http://localhost:8000/jira/bulk-create-tasks" \
 
 #### `POST /jira/bulk-create-stories`
 Bulk create multiple story tickets in a single request. All tickets are created first, then all links are created to ensure referenced tickets exist. Supports preview mode.
+
+**PRD Table Updates:** Automatically updates PRD tables with JIRA links for each created story that matches a PRD table row (by UUID if provided, or fuzzy matching on story title). The "JIRA Ticket" column is created automatically if it doesn't exist.
 
 **Request Body:**
 ```json

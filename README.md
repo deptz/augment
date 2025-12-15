@@ -518,6 +518,14 @@ The endpoint expects a table in the PRD document with:
 - Table columns: Title, Description, Acceptance Criteria (columns are auto-detected)
 - Missing columns are handled gracefully
 
+**PRD Table Updates:**
+When stories are created or updated, the system automatically:
+- Creates a "JIRA Ticket" column in the PRD table if it doesn't exist
+- Updates the corresponding PRD table row with a clickable JIRA link
+- Uses UUID-based matching for exact row identification (from dry run preview)
+- Falls back to fuzzy matching by story title if UUID is not available
+- Formats links as proper HTML anchor tags for Confluence compatibility
+
 ### Generated Description Format
 
 The tool generates descriptions in this structured format:
@@ -566,11 +574,11 @@ A 1-2 sentence summary of why this task was necessary, based on PRD/RFC goals.
 **JIRA Operations:**
 - `POST /jira/update-ticket` - Update any JIRA ticket (summary, description, test cases, links)
 - `POST /jira/create-ticket` - Create a new JIRA Task ticket
-- `POST /jira/create-story-ticket` - Create a new JIRA Story ticket
-- `POST /jira/update-story-ticket` - Update an existing JIRA Story ticket (title, description, test cases, parent epic, links)
-- `POST /jira/bulk-update-stories` - Bulk update multiple story tickets with different values (supports preview and async modes)
+- `POST /jira/create-story-ticket` - Create a new JIRA Story ticket (automatically updates PRD table with JIRA link)
+- `POST /jira/update-story-ticket` - Update an existing JIRA Story ticket (title, description, test cases, parent epic, links; automatically updates PRD table)
+- `POST /jira/bulk-update-stories` - Bulk update multiple story tickets with different values (supports preview and async modes; automatically updates PRD tables)
 - `POST /jira/bulk-create-tasks` - Bulk create multiple task tickets (creates all tickets first, then all links)
-- `POST /jira/bulk-create-stories` - Bulk create multiple story tickets (creates all tickets first, then all links)
+- `POST /jira/bulk-create-stories` - Bulk create multiple story tickets (creates all tickets first, then all links; automatically updates PRD tables)
 
 **Job Management:**
 - `GET /jobs/{job_id}` - Get status and results of a background job

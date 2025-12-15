@@ -258,6 +258,102 @@ The database includes the following tables:
 
 ---
 
+## PRD Table Updates
+
+### Overview
+
+The system automatically updates PRD (Product Requirements Document) tables in Confluence with JIRA ticket links when stories are created or updated. This ensures PRD documents stay synchronized with JIRA tickets.
+
+### Key Features
+
+- **Automatic Column Creation**: Creates "JIRA Ticket" column in PRD table if it doesn't exist
+- **UUID-Based Row Matching**: Uses temporary UUIDs for exact row matching during PRD sync
+- **Fuzzy Matching Fallback**: Falls back to fuzzy matching by story title if UUID is not available
+- **HTML Link Formatting**: Formats JIRA links as proper HTML anchor tags for Confluence compatibility
+- **Cell Management**: Automatically adds missing cells to rows that are too short
+
+### Implementation Details
+
+**File:** `src/prd_table_updater.py`
+
+**Key Functions:**
+- `_add_jira_ticket_column()`: Creates "JIRA Ticket" column if missing (uses `soup.new_tag()` for HTML tag creation)
+- `add_uuid_placeholder_to_row()`: Adds temporary UUID placeholder to PRD table row during dry run
+- `find_row_by_uuid()`: Locates PRD table row by UUID placeholder
+- `replace_uuid_with_jira_link()`: Replaces UUID placeholder with actual JIRA link
+- `update_story_row_with_jira_link()`: Updates PRD table row with JIRA link using fuzzy matching
+
+**File:** `src/planning_service.py`
+
+**Key Functions:**
+- `_update_prd_table_for_story()`: Reusable method for single-story PRD updates
+- `_update_prd_table_with_story_links_uuid()`: Handles PRD updates for multiple stories with UUID support
+- `sync_stories_from_prd_table()`: PRD sync flow that generates UUIDs during dry run and updates table during creation
+
+### UUID-Based Matching Flow
+
+1. **Dry Run Mode:**
+   - System generates UUID for each story to be created
+   - UUID is stored in `StoryPlan.prd_row_uuid`
+   - UUID placeholder is added to PRD table: `[TEMP-{uuid}](placeholder)`
+   - PRD page is saved with UUID placeholders
+
+2. **Actual Creation:**
+   - When story is created, `prd_row_uuid` is passed to PRD update function
+   - System finds PRD row by UUID using `find_row_by_uuid()`
+   - UUID placeholder is replaced with actual JIRA link using `replace_uuid_with_jira_link()`
+
+3. **Fallback:**
+   - If UUID is not available (e.g., manual story creation), system uses fuzzy matching
+   - Fuzzy matching compares story title/summary with PRD table row titles
+   - Uses `update_story_row_with_jira_link()` for fuzzy matching
+
+### HTML Link Formatting
+
+Confluence expects HTML anchor tags for clickable links, not markdown. The system creates proper HTML:
+
+```python
+jira_cell.clear()
+link_tag = soup.new_tag("a", href=jira_url)
+link_tag.string = jira_key
+jira_cell.append(link_tag)
+```
+
+This ensures links are clickable in Confluence pages.
+
+### Column Creation
+
+The system automatically creates the "JIRA Ticket" column if it doesn't exist:
+
+1. Checks if column exists by searching for header text
+2. If missing, creates new `<th>` header cell using `soup.new_tag("th")`
+3. Adds column to all existing rows
+4. Handles edge cases where rows have different cell counts
+
+**Important:** The `soup` object (BeautifulSoup root) must be used for `new_tag()`, not the `table` object. The system traverses the table's parent chain to find the BeautifulSoup root if not provided.
+
+### Update Flows
+
+**Story Creation:**
+- `POST /jira/create-story-ticket`: Updates PRD table after story creation
+- `POST /jira/bulk-create-stories`: Updates PRD table for each created story
+
+**Story Updates:**
+- `POST /jira/update-story-ticket`: Updates PRD table after story update
+- `POST /jira/bulk-update-stories`: Updates PRD table for each updated story
+
+**PRD Sync:**
+- `POST /plan/stories/sync-from-prd`: Updates PRD table for both new and existing stories (when `existing_ticket_action="update"`)
+
+### Error Handling
+
+- PRD updates are non-blocking: failures don't prevent story creation/updates
+- Errors are logged as warnings, not errors
+- System gracefully handles missing PRD documents, missing rows, or Confluence API failures
+- Column creation failures are logged but don't stop the update process
+
+---
+
 ## Related Documentation
 
 - [API Documentation](../api/API_DOCUMENTATION.md) - API reference
