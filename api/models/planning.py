@@ -171,6 +171,7 @@ class StoryDetail(BaseModel):
     ticket_source: Optional[str] = Field(None, description="Where the JIRA ticket was found: 'prd_table', 'jira_api', 'newly_created', or None")
     action_taken: Optional[str] = Field(None, description="Action taken for this story: 'created', 'updated', 'skipped', or None")
     was_updated: Optional[bool] = Field(None, description="Whether the JIRA ticket was updated/synced during this operation")
+    prd_row_uuid: Optional[str] = Field(None, description="Temporary UUID for matching PRD table row (from dry run preview)")
 
 
 class PlanningResultResponse(BaseModel):

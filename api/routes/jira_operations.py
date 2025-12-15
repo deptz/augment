@@ -553,6 +553,32 @@ async def create_story_ticket(
             if update_success:
                 logger.info(f"Added test cases to story {story_key}")
 
+        # Update PRD table with JIRA link if possible
+        try:
+            from ..dependencies import get_confluence_client, get_llm_client
+            from src.planning_service import PlanningService
+            
+            confluence_client = get_confluence_client()
+            llm_client = get_llm_client()
+            
+            if confluence_client and llm_client:
+                planning_service = PlanningService(jira_client, confluence_client, llm_client)
+                prd_updated = planning_service._update_prd_table_for_story(
+                    story_summary=summary,
+                    story_key=story_key,
+                    epic_key=request.parent_key,
+                    prd_row_uuid=request.prd_row_uuid
+                )
+                if prd_updated:
+                    logger.info(f"Updated PRD table with JIRA link for story {story_key}")
+                else:
+                    logger.debug(f"PRD table not updated for story {story_key} (may not have PRD or no matching row)")
+            else:
+                logger.debug("Confluence or LLM client not available, skipping PRD update")
+        except Exception as e:
+            # Don't fail story creation if PRD update fails
+            logger.warning(f"Error updating PRD table for story {story_key}: {e}")
+
         logger.info(f"Successfully created story {story_key}")
 
         return CreateTicketResponse(
@@ -785,6 +811,49 @@ async def update_story_ticket(
 
         logger.info(message)
 
+        # Update PRD table with JIRA link if possible
+        try:
+            from ..dependencies import get_confluence_client, get_llm_client
+            from src.planning_service import PlanningService
+            
+            confluence_client = get_confluence_client()
+            llm_client = get_llm_client()
+            
+            if confluence_client and llm_client:
+                planning_service = PlanningService(jira_client, confluence_client, llm_client)
+                
+                # Get epic_key from ticket (use updated parent if changed, otherwise current parent)
+                epic_key = None
+                if request.parent_key:
+                    epic_key = request.parent_key
+                else:
+                    # Get current parent from ticket
+                    current_parent = ticket_data.get('fields', {}).get('parent', {})
+                    if current_parent:
+                        epic_key = current_parent.get('key')
+                
+                # Get story summary (use updated summary if changed, otherwise current summary)
+                story_summary = request.summary if request.summary else ticket_data.get('fields', {}).get('summary', '')
+                
+                if epic_key and story_summary:
+                    prd_updated = planning_service._update_prd_table_for_story(
+                        story_summary=story_summary,
+                        story_key=request.story_key,
+                        epic_key=epic_key,
+                        prd_row_uuid=None  # No UUID available for manual updates
+                    )
+                    if prd_updated:
+                        logger.info(f"Updated PRD table with JIRA link for story {request.story_key}")
+                    else:
+                        logger.debug(f"PRD table not updated for story {request.story_key} (may not have PRD or no matching row)")
+                else:
+                    logger.debug(f"Cannot update PRD table: epic_key={epic_key}, story_summary={bool(story_summary)}")
+            else:
+                logger.debug("Confluence or LLM client not available, skipping PRD update")
+        except Exception as e:
+            # Don't fail story update if PRD update fails
+            logger.warning(f"Error updating PRD table for story {request.story_key}: {e}")
+
         return UpdateTicketResponse(
             success=True,
             ticket_key=request.story_key,
@@ -1007,6 +1076,49 @@ def _process_single_story_update(
                         "direction": direction,
                         "status": "failed"
                     })
+
+        # Update PRD table with JIRA link if possible
+        try:
+            from ..dependencies import get_confluence_client, get_llm_client
+            from src.planning_service import PlanningService
+            
+            confluence_client = get_confluence_client()
+            llm_client = get_llm_client()
+            
+            if confluence_client and llm_client:
+                planning_service = PlanningService(jira_client, confluence_client, llm_client)
+                
+                # Get epic_key from ticket (use updated parent if changed, otherwise current parent)
+                epic_key = None
+                if story_item.parent_key:
+                    epic_key = story_item.parent_key
+                else:
+                    # Get current parent from ticket
+                    current_parent = ticket_data.get('fields', {}).get('parent', {})
+                    if current_parent:
+                        epic_key = current_parent.get('key')
+                
+                # Get story summary (use updated summary if changed, otherwise current summary)
+                story_summary = story_item.summary if story_item.summary else ticket_data.get('fields', {}).get('summary', '')
+                
+                if epic_key and story_summary:
+                    prd_updated = planning_service._update_prd_table_for_story(
+                        story_summary=story_summary,
+                        story_key=story_key,
+                        epic_key=epic_key,
+                        prd_row_uuid=None  # No UUID available for manual updates
+                    )
+                    if prd_updated:
+                        logger.info(f"Updated PRD table with JIRA link for story {story_key}")
+                    else:
+                        logger.debug(f"PRD table not updated for story {story_key} (may not have PRD or no matching row)")
+                else:
+                    logger.debug(f"Cannot update PRD table: epic_key={epic_key}, story_summary={bool(story_summary)}")
+            else:
+                logger.debug("Confluence or LLM client not available, skipping PRD update")
+        except Exception as e:
+            # Don't fail story update if PRD update fails
+            logger.warning(f"Error updating PRD table for story {story_key}: {e}")
 
         return StoryUpdateResult(
             story_key=story_key,
@@ -1565,6 +1677,50 @@ async def bulk_create_stories(
                     links_created=[]
                 ))
                 failed += 1
+
+        # Update PRD tables with JIRA links (group by epic for efficiency)
+        try:
+            from ..dependencies import get_confluence_client, get_llm_client
+            from src.planning_service import PlanningService
+            
+            confluence_client = get_confluence_client()
+            llm_client = get_llm_client()
+            
+            if confluence_client and llm_client:
+                planning_service = PlanningService(jira_client, confluence_client, llm_client)
+                
+                # Group stories by epic for batch PRD updates
+                stories_by_epic = {}
+                for i, story_item in enumerate(request.stories):
+                    if i < len(created_ticket_keys):
+                        epic_key = story_item.parent_key
+                        if epic_key not in stories_by_epic:
+                            stories_by_epic[epic_key] = []
+                        stories_by_epic[epic_key].append({
+                            'story_item': story_item,
+                            'story_key': created_ticket_keys[i],
+                            'index': i
+                        })
+                
+                # Update PRD for each epic
+                for epic_key, epic_stories in stories_by_epic.items():
+                    for story_info in epic_stories:
+                        try:
+                            prd_updated = planning_service._update_prd_table_for_story(
+                                story_summary=story_info['story_item'].summary,
+                                story_key=story_info['story_key'],
+                                epic_key=epic_key,
+                                prd_row_uuid=story_info['story_item'].prd_row_uuid
+                            )
+                            if prd_updated:
+                                logger.info(f"Updated PRD table with JIRA link for story {story_info['story_key']}")
+                        except Exception as e:
+                            logger.warning(f"Error updating PRD table for story {story_info['story_key']}: {e}")
+            else:
+                logger.debug("Confluence or LLM client not available, skipping PRD updates")
+        except Exception as e:
+            # Don't fail bulk creation if PRD updates fail
+            logger.warning(f"Error updating PRD tables during bulk creation: {e}")
 
         message = f"Bulk creation completed: {successful} successful, {failed} failed"
         logger.info(message)

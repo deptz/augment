@@ -298,7 +298,8 @@ def extract_story_details_with_tests(planning_result) -> List[StoryDetail]:
                     jira_url=metadata_jira_url or jira_url,
                     ticket_source=ticket_source,
                     action_taken=action_taken,
-                    was_updated=was_updated
+                    was_updated=was_updated,
+                    prd_row_uuid=getattr(story, 'prd_row_uuid', None)  # Include UUID if available
                 )
                 story_details.append(story_detail)
                 

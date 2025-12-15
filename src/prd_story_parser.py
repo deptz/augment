@@ -274,14 +274,21 @@ class PRDStoryParser:
             # Story / description: use _clean_text (joins with spaces, matching simulation)
             story_text = self._clean_text(story_cell) if story_cell else ""
 
-            # Extract JIRA ticket key from JIRA ticket column if present
+            # Extract JIRA ticket key or UUID placeholder from JIRA ticket column if present
             jira_key = None
+            prd_row_uuid = None
             if idx_jira_ticket is not None:
                 jira_ticket_cell = cell(idx_jira_ticket)
                 if jira_ticket_cell:
+                    # First try to extract JIRA key
                     jira_key = self._extract_jira_key(jira_ticket_cell)
                     if jira_key:
                         logger.debug(f"Found JIRA ticket key in PRD table: {jira_key}")
+                    else:
+                        # If no JIRA key, check for UUID placeholder
+                        prd_row_uuid = self._extract_uuid_placeholder(jira_ticket_cell)
+                        if prd_row_uuid:
+                            logger.debug(f"Found UUID placeholder in PRD table: {prd_row_uuid}")
 
             # Acceptance criteria: extract text while preserving HTML structure
             ac_cell = cell(idx_ac)
@@ -295,6 +302,7 @@ class PRDStoryParser:
                 'acceptance_criteria': ac_text or '',
                 'mockup': mockup_raw or '',
                 'jira_key': jira_key,  # Include JIRA key if found
+                'prd_row_uuid': prd_row_uuid,  # Include UUID placeholder if found
             }
 
             row_data_list.append(row_data)
@@ -320,6 +328,10 @@ class PRDStoryParser:
                 if row_data.get('jira_key'):
                     story.key = row_data['jira_key']
                     logger.debug(f"Set story key from PRD table: {story.key}")
+                # Set UUID placeholder if found in PRD table (and no JIRA key exists)
+                if row_data.get('prd_row_uuid') and not story.key:
+                    story.prd_row_uuid = row_data['prd_row_uuid']
+                    logger.debug(f"Set story UUID from PRD table: {story.prd_row_uuid}")
                 stories.append(story)
             else:
                 logger.debug(f"Row {idx+1} did not produce a valid story (likely missing title)")
@@ -757,6 +769,34 @@ class PRDStoryParser:
                 if match:
                     return match.group(1)
 
+        return None
+
+    def _extract_uuid_placeholder(self, cell: Any) -> Optional[str]:
+        """
+        Extract UUID placeholder from a table cell
+        
+        Looks for format: [TEMP-{uuid}](placeholder)
+        
+        Args:
+            cell: BeautifulSoup cell element
+            
+        Returns:
+            UUID string if found, None otherwise
+        """
+        if cell is None:
+            return None
+        
+        # Get text content
+        cell_text = cell.get_text(" ", strip=True)
+        
+        # Pattern to match UUID placeholder: [TEMP-{uuid}](placeholder)
+        uuid_pattern = r'\[TEMP-([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\]\(placeholder\)'
+        
+        # Try to find UUID in text
+        match = re.search(uuid_pattern, cell_text, re.IGNORECASE)
+        if match:
+            return match.group(1)
+        
         return None
 
     def _create_story_from_row(self, row_data: Dict[str, str], epic_key: str) -> Optional[StoryPlan]:

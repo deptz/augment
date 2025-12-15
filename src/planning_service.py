@@ -2701,6 +2701,120 @@ class PlanningService:
                         # New story - needs to be created
                         stories_to_create.append(story)
             
+            # During dry run: Generate UUIDs and add placeholders to PRD
+            if dry_run and stories_to_create and self.confluence_client:
+                import uuid
+                from .prd_table_updater import add_uuid_placeholder_to_row, find_row_by_uuid
+                from bs4 import BeautifulSoup
+                
+                try:
+                    # Get current HTML content
+                    html_content = prd_content.get('body', {}).get('storage', {}).get('value', '')
+                    if html_content:
+                        soup = BeautifulSoup(html_content, 'html.parser')
+                        
+                        # Find story table to get row indices
+                        story_table = None
+                        for tbl in soup.find_all("table"):
+                            headers = [th.get_text(" ", strip=True) for th in tbl.find_all("th")]
+                            if not headers:
+                                first_row = tbl.find('tr')
+                                if first_row:
+                                    headers = [cell.get_text(" ", strip=True) for cell in first_row.find_all(['th', 'td'])]
+                            
+                            if headers:
+                                headers_lower = [h.lower() for h in headers]
+                                has_user_story = any("user story" in h or "user-story" in h for h in headers_lower)
+                                has_acceptance_criteria = any("acceptance criteria" in h or "acceptance-criteria" in h for h in headers_lower)
+                                if has_user_story and has_acceptance_criteria:
+                                    story_table = tbl
+                                    break
+                        
+                        if story_table:
+                            rows = story_table.find_all("tr")
+                            if len(rows) >= 2:
+                                # Get header to find story column
+                                header_row = rows[0]
+                                header_cells = header_row.find_all(['th', 'td'])
+                                header_texts = [cell.get_text(" ", strip=True) for cell in header_cells]
+                                
+                                story_col_idx = None
+                                for idx, header in enumerate(header_texts):
+                                    if "user story" in header.lower() or "user-story" in header.lower():
+                                        story_col_idx = idx
+                                        break
+                                
+                                if story_col_idx is not None:
+                                    updated_html = html_content
+                                    uuid_added_count = 0
+                                    
+                                    # Generate UUIDs and add to PRD rows
+                                    for story in stories_to_create:
+                                        # Skip if story already has a key
+                                        if story.key:
+                                            continue
+                                        
+                                        # Use existing UUID if already set (from previous dry run), otherwise generate new one
+                                        if not story.prd_row_uuid:
+                                            row_uuid = str(uuid.uuid4())
+                                            story.prd_row_uuid = row_uuid
+                                        else:
+                                            row_uuid = story.prd_row_uuid
+                                            logger.debug(f"Reusing existing UUID for story: {story.summary}")
+                                        
+                                        # Find matching row by story summary
+                                        matched_row_idx = None
+                                        for row_idx, row in enumerate(rows[1:], 0):  # Start from 0 for data rows
+                                            cells = row.find_all("td")
+                                            if story_col_idx < len(cells):
+                                                story_cell = cells[story_col_idx]
+                                                cell_text = story_cell.get_text(" ", strip=True)
+                                                # Match by checking if story summary is in cell text
+                                                if story.summary[:50].lower() in cell_text.lower() or cell_text[:50].lower() in story.summary.lower():
+                                                    matched_row_idx = row_idx
+                                                    break
+                                        
+                                        if matched_row_idx is not None:
+                                            # Add UUID placeholder to PRD row
+                                            updated_html = add_uuid_placeholder_to_row(
+                                                updated_html,
+                                                matched_row_idx,
+                                                row_uuid
+                                            )
+                                            if updated_html:
+                                                uuid_added_count += 1
+                                                logger.info(f"Added UUID placeholder to PRD row {matched_row_idx} for story: {story.summary}")
+                                            else:
+                                                logger.warning(f"Failed to add UUID placeholder to PRD row {matched_row_idx}")
+                                        else:
+                                            logger.warning(f"Could not find matching row in PRD table for story: {story.summary}")
+                                    
+                                    # Update PRD page if we added any UUIDs
+                                    if uuid_added_count > 0 and updated_html != html_content:
+                                        page_id = prd_content.get('id')
+                                        if page_id:
+                                            # Get current page version
+                                            url = f"{self.confluence_client.server_url}/rest/api/content/{page_id}"
+                                            params = {'expand': 'version'}
+                                            response = self.confluence_client.session.get(url, params=params, timeout=30)
+                                            response.raise_for_status()
+                                            full_page_data = response.json()
+                                            current_version = full_page_data.get('version', {}).get('number', 1)
+                                            
+                                            # Update the page
+                                            success = self.confluence_client.update_page_content(page_id, updated_html, current_version)
+                                            if success:
+                                                logger.info(f"Successfully updated PRD page with {uuid_added_count} UUID placeholders (dry run)")
+                                                # Update prd_content with new HTML for subsequent operations
+                                                prd_content['body']['storage']['value'] = updated_html
+                                            else:
+                                                logger.warning("Failed to update Confluence page with UUID placeholders")
+                except Exception as e:
+                    logger.warning(f"Error adding UUID placeholders during dry run: {e}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
+                    # Continue even if UUID addition fails
+            
             # Create/update stories (only if not dry run)
             created_tickets = {"stories": []}
             
@@ -2723,10 +2837,21 @@ class PlanningService:
                             if story.key in story_metadata:
                                 story_metadata[story.key]['was_updated'] = False
                 
+                # Update PRD table with JIRA links for updated stories
+                if stories_to_update and self.confluence_client:
+                    updated_story_keys = [story.key for story in stories_to_update if story.key]
+                    if updated_story_keys:
+                        self._update_prd_table_with_story_links_uuid(
+                            prd_content=prd_content,
+                            stories=stories_to_update,
+                            created_story_keys=updated_story_keys
+                        )
+                
                 # Update PRD table with JIRA links for newly created stories
                 if stories_to_create and self.confluence_client:
                     created_keys = created_tickets.get("stories", [])
-                    self._update_prd_table_with_story_links(
+                    # Use UUID-based update if available, otherwise fallback to fuzzy matching
+                    self._update_prd_table_with_story_links_uuid(
                         prd_content=prd_content,
                         stories=stories_to_create,
                         created_story_keys=created_keys
@@ -3063,6 +3188,364 @@ class PlanningService:
                 
         except Exception as e:
             logger.warning(f"Error updating PRD table with JIRA links: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            # Don't fail story creation if PRD update fails
+            return False
+    
+    def _update_prd_table_with_story_links_uuid(
+        self,
+        prd_content: Dict[str, Any],
+        stories: List[StoryPlan],
+        created_story_keys: List[str]
+    ) -> bool:
+        """
+        Update PRD table with JIRA ticket links using UUID placeholders (preferred method)
+        Falls back to fuzzy matching if UUID not found
+        
+        Args:
+            prd_content: PRD page data from Confluence
+            stories: List of stories that were created
+            created_story_keys: List of JIRA ticket keys that were created (in same order as stories)
+            
+        Returns:
+            True if update successful, False otherwise
+        """
+        if not self.confluence_client:
+            logger.warning("Confluence client not available, cannot update PRD table")
+            return False
+        
+        try:
+            page_id = prd_content.get('id')
+            if not page_id:
+                logger.warning("PRD content missing page ID, cannot update")
+                return False
+            
+            # Get current HTML content
+            html_content = prd_content.get('body', {}).get('storage', {}).get('value', '')
+            if not html_content:
+                logger.warning("PRD content missing HTML, cannot update")
+                return False
+            
+            # Get JIRA server URL for constructing links
+            jira_server_url = self.jira_client.server_url.rstrip('/')
+            
+            # Update HTML for each created story
+            from .prd_table_updater import find_row_by_uuid, replace_uuid_with_jira_link, update_story_row_with_jira_link
+            
+            updated_html = html_content
+            stories_updated = 0
+            
+            # Process each story
+            for story_idx, story in enumerate(stories):
+                if story_idx >= len(created_story_keys):
+                    break
+                
+                story_key = created_story_keys[story_idx]
+                if not story_key:
+                    continue
+                
+                jira_url = f"{jira_server_url}/browse/{story_key}"
+                row_updated = False
+                
+                # Try UUID-based matching first
+                if story.prd_row_uuid:
+                    row_idx = find_row_by_uuid(updated_html, story.prd_row_uuid)
+                    if row_idx is not None:
+                        # Replace UUID with JIRA link
+                        updated_html = replace_uuid_with_jira_link(
+                            updated_html,
+                            row_idx,
+                            story_key,
+                            jira_url
+                        )
+                        if updated_html:
+                            stories_updated += 1
+                            row_updated = True
+                            logger.info(f"Updated PRD table row {row_idx} with JIRA link using UUID: {story_key}")
+                        else:
+                            logger.warning(f"Failed to replace UUID with JIRA link for {story_key}")
+                    else:
+                        logger.warning(f"UUID {story.prd_row_uuid} not found in PRD table for story {story_key}, falling back to fuzzy matching")
+                
+                # Fallback to fuzzy matching if UUID not found or not available
+                if not row_updated:
+                    # Use existing fuzzy matching logic
+                    from bs4 import BeautifulSoup
+                    soup = BeautifulSoup(updated_html, 'html.parser')
+                    
+                    # Find story table
+                    story_table = None
+                    for tbl in soup.find_all("table"):
+                        headers = [th.get_text(" ", strip=True) for th in tbl.find_all("th")]
+                        if not headers:
+                            first_row = tbl.find('tr')
+                            if first_row:
+                                headers = [cell.get_text(" ", strip=True) for cell in first_row.find_all(['th', 'td'])]
+                        
+                        if headers:
+                            headers_lower = [h.lower() for h in headers]
+                            has_user_story = any("user story" in h or "user-story" in h for h in headers_lower)
+                            has_acceptance_criteria = any("acceptance criteria" in h or "acceptance-criteria" in h for h in headers_lower)
+                            if has_user_story and has_acceptance_criteria:
+                                story_table = tbl
+                                break
+                    
+                    if story_table:
+                        rows = story_table.find_all("tr")
+                        if len(rows) >= 2:
+                            # Get header to find story column
+                            header_row = rows[0]
+                            header_cells = header_row.find_all(['th', 'td'])
+                            header_texts = [cell.get_text(" ", strip=True) for cell in header_cells]
+                            
+                            story_col_idx = None
+                            for idx, header in enumerate(header_texts):
+                                if "user story" in header.lower() or "user-story" in header.lower():
+                                    story_col_idx = idx
+                                    break
+                            
+                            if story_col_idx is not None:
+                                # Find matching row by story summary
+                                matched_row_idx = None
+                                for row_idx, row in enumerate(rows[1:], 0):  # Start from 0 for data rows
+                                    cells = row.find_all("td")
+                                    if story_col_idx < len(cells):
+                                        story_cell = cells[story_col_idx]
+                                        cell_text = story_cell.get_text(" ", strip=True)
+                                        # Match by checking if story summary is in cell text
+                                        if story.summary[:50].lower() in cell_text.lower() or cell_text[:50].lower() in story.summary.lower():
+                                            matched_row_idx = row_idx
+                                            break
+                                
+                                if matched_row_idx is not None:
+                                    updated_html = update_story_row_with_jira_link(
+                                        updated_html,
+                                        matched_row_idx,
+                                        story_key,
+                                        jira_url
+                                    )
+                                    if updated_html:
+                                        stories_updated += 1
+                                        logger.info(f"Updated PRD table row {matched_row_idx} with JIRA link (fuzzy match): {story_key}")
+                                    else:
+                                        logger.warning(f"Failed to update PRD table row {matched_row_idx} for story {story_key}")
+                                else:
+                                    logger.warning(f"Could not find matching row in PRD table for story: {story.summary}")
+            
+            # Update Confluence page if we made any changes
+            if stories_updated > 0 and updated_html != html_content:
+                # Get current page version
+                page_data = self.confluence_client._get_page_by_id(page_id)
+                if page_data:
+                    # Get version from full page data
+                    url = f"{self.confluence_client.server_url}/rest/api/content/{page_id}"
+                    params = {'expand': 'version'}
+                    response = self.confluence_client.session.get(url, params=params, timeout=30)
+                    response.raise_for_status()
+                    full_page_data = response.json()
+                    current_version = full_page_data.get('version', {}).get('number', 1)
+                    
+                    # Update the page
+                    success = self.confluence_client.update_page_content(page_id, updated_html, current_version)
+                    if success:
+                        logger.info(f"Successfully updated PRD page with {stories_updated} JIRA ticket links")
+                        return True
+                    else:
+                        logger.warning("Failed to update Confluence page with PRD table changes")
+                        return False
+                else:
+                    logger.warning("Could not fetch page version for PRD update")
+                    return False
+            else:
+                logger.debug("No PRD table updates needed")
+                return True
+                
+        except Exception as e:
+            logger.warning(f"Error updating PRD table with JIRA links (UUID method): {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            # Don't fail story creation if PRD update fails
+            return False
+    
+    def _update_prd_table_for_story(
+        self,
+        story_summary: str,
+        story_key: str,
+        epic_key: str,
+        prd_row_uuid: Optional[str] = None
+    ) -> bool:
+        """
+        Update PRD table with JIRA link for a single story.
+        
+        Args:
+            story_summary: Story summary/title to match against PRD rows
+            story_key: JIRA ticket key (e.g., "STORY-123")
+            epic_key: Parent epic key to get PRD from
+            prd_row_uuid: Optional UUID for exact row matching (from dry run)
+            
+        Returns:
+            True if PRD was updated successfully, False otherwise
+        """
+        if not self.confluence_client:
+            logger.debug("Confluence client not available, cannot update PRD table")
+            return False
+        
+        try:
+            # Get epic issue to access PRD custom field
+            epic_issue = self.jira_client.get_ticket(epic_key)
+            if not epic_issue:
+                logger.debug(f"Epic {epic_key} not found, cannot get PRD")
+                return False
+            
+            # Get PRD URL from epic
+            prd_url = self._get_custom_field_value(epic_issue, 'PRD')
+            if not prd_url:
+                logger.debug(f"Epic {epic_key} does not have PRD custom field set")
+                return False
+            
+            # Get PRD content
+            prd_content = self.confluence_client.get_page_content(prd_url)
+            if not prd_content:
+                logger.warning(f"Failed to retrieve PRD content from {prd_url}")
+                return False
+            
+            page_id = prd_content.get('id')
+            if not page_id:
+                logger.warning("PRD content missing page ID, cannot update")
+                return False
+            
+            # Get current HTML content
+            html_content = prd_content.get('body', {}).get('storage', {}).get('value', '')
+            if not html_content:
+                logger.warning("PRD content missing HTML, cannot update")
+                return False
+            
+            # Get JIRA server URL for constructing links
+            jira_server_url = self.jira_client.server_url.rstrip('/')
+            jira_url = f"{jira_server_url}/browse/{story_key}"
+            
+            from .prd_table_updater import find_row_by_uuid, replace_uuid_with_jira_link, update_story_row_with_jira_link
+            from bs4 import BeautifulSoup
+            
+            updated_html = html_content
+            row_updated = False
+            
+            # Try UUID-based matching first if UUID provided
+            if prd_row_uuid:
+                row_idx = find_row_by_uuid(html_content, prd_row_uuid)
+                if row_idx is not None:
+                    # Replace UUID with JIRA link
+                    updated_html = replace_uuid_with_jira_link(
+                        html_content,
+                        row_idx,
+                        story_key,
+                        jira_url
+                    )
+                    if updated_html:
+                        row_updated = True
+                        logger.info(f"Updated PRD table row {row_idx} with JIRA link using UUID: {story_key}")
+                    else:
+                        logger.warning(f"Failed to replace UUID with JIRA link for {story_key}")
+                else:
+                    logger.warning(f"UUID {prd_row_uuid} not found in PRD table for story {story_key}, falling back to fuzzy matching")
+            
+            # Fallback to fuzzy matching if UUID not found or not provided
+            if not row_updated:
+                soup = BeautifulSoup(html_content, 'html.parser')
+                
+                # Find story table
+                story_table = None
+                for tbl in soup.find_all("table"):
+                    headers = [th.get_text(" ", strip=True) for th in tbl.find_all("th")]
+                    if not headers:
+                        first_row = tbl.find('tr')
+                        if first_row:
+                            headers = [cell.get_text(" ", strip=True) for cell in first_row.find_all(['th', 'td'])]
+                    
+                    if headers:
+                        headers_lower = [h.lower() for h in headers]
+                        has_user_story = any("user story" in h or "user-story" in h for h in headers_lower)
+                        has_acceptance_criteria = any("acceptance criteria" in h or "acceptance-criteria" in h for h in headers_lower)
+                        if has_user_story and has_acceptance_criteria:
+                            story_table = tbl
+                            break
+                
+                if not story_table:
+                    logger.warning("Could not find story table in PRD for updating")
+                    return False
+                
+                rows = story_table.find_all("tr")
+                if len(rows) < 2:
+                    logger.warning("Story table has no data rows")
+                    return False
+                
+                # Get header to find story column
+                header_row = rows[0]
+                header_cells = header_row.find_all(['th', 'td'])
+                header_texts = [cell.get_text(" ", strip=True) for cell in header_cells]
+                
+                story_col_idx = None
+                for idx, header in enumerate(header_texts):
+                    if "user story" in header.lower() or "user-story" in header.lower():
+                        story_col_idx = idx
+                        break
+                
+                if story_col_idx is None:
+                    logger.warning("Could not find 'User Story' column in PRD table")
+                    return False
+                
+                # Find matching row by story summary
+                matched_row_idx = None
+                for row_idx, row in enumerate(rows[1:], 0):  # Start from 0 for data rows
+                    cells = row.find_all("td")
+                    if story_col_idx < len(cells):
+                        story_cell = cells[story_col_idx]
+                        cell_text = story_cell.get_text(" ", strip=True)
+                        # Match by checking if story summary is in cell text
+                        if story_summary[:50].lower() in cell_text.lower() or cell_text[:50].lower() in story_summary.lower():
+                            matched_row_idx = row_idx
+                            break
+                
+                if matched_row_idx is not None:
+                    updated_html = update_story_row_with_jira_link(
+                        html_content,
+                        matched_row_idx,
+                        story_key,
+                        jira_url
+                    )
+                    if updated_html:
+                        row_updated = True
+                        logger.info(f"Updated PRD table row {matched_row_idx} with JIRA link (fuzzy match): {story_key}")
+                    else:
+                        logger.warning(f"Failed to update PRD table row {matched_row_idx} for story {story_key}")
+                else:
+                    logger.warning(f"Could not find matching row in PRD table for story: {story_summary}")
+                    return False
+            
+            # Update Confluence page if we made changes
+            if row_updated and updated_html != html_content:
+                # Get current page version
+                url = f"{self.confluence_client.server_url}/rest/api/content/{page_id}"
+                params = {'expand': 'version'}
+                response = self.confluence_client.session.get(url, params=params, timeout=30)
+                response.raise_for_status()
+                full_page_data = response.json()
+                current_version = full_page_data.get('version', {}).get('number', 1)
+                
+                # Update the page
+                success = self.confluence_client.update_page_content(page_id, updated_html, current_version)
+                if success:
+                    logger.info(f"Successfully updated PRD page with JIRA link for {story_key}")
+                    return True
+                else:
+                    logger.warning("Failed to update Confluence page with PRD table changes")
+                    return False
+            
+            return row_updated
+                
+        except Exception as e:
+            logger.warning(f"Error updating PRD table for story {story_key}: {e}")
             import traceback
             logger.debug(traceback.format_exc())
             # Don't fail story creation if PRD update fails

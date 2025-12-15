@@ -159,6 +159,10 @@ class CreateStoryTicketRequest(BaseModel):
         None,
         description="Test cases content for custom field (optional)"
     )
+    prd_row_uuid: Optional[str] = Field(
+        None,
+        description="Optional UUID for matching PRD table row (from dry run preview)"
+    )
     create_ticket: bool = Field(
         default=False,
         description="Create ticket in JIRA (default: false for preview mode)"
@@ -359,6 +363,10 @@ class BulkCreateStoryItem(BaseModel):
     test_cases: Optional[str] = Field(
         None,
         description="Test cases content for custom field (optional)"
+    )
+    prd_row_uuid: Optional[str] = Field(
+        None,
+        description="Optional UUID for matching PRD table row (from dry run preview)"
     )
 
 

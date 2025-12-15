@@ -219,6 +219,7 @@ class StoryPlan(BaseModel):
     tasks: List[TaskPlan] = Field(default_factory=list, description="Child tasks")
     epic_key: Optional[str] = Field(default=None, description="Parent epic JIRA key")
     priority: str = Field(default="medium", description="Story priority")
+    prd_row_uuid: Optional[str] = Field(default=None, description="Temporary UUID for matching PRD table row during sync")
     
     def format_description(self) -> str:
         """Format story description for JIRA (Markdown format - will be converted to ADF)"""
