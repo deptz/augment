@@ -213,10 +213,15 @@ MOONSHOT_MODEL=moonshot-v1-8k
 
 **Bitbucket (for code analysis):**
 ```bash
-BITBUCKET_WORKSPACE=your-workspace
+# For multiple workspaces (recommended):
+BITBUCKET_WORKSPACES=workspace1,workspace2,mid-kelola-indonesia
+# OR for single workspace (backward compatible):
+# BITBUCKET_WORKSPACE=your-workspace
 BITBUCKET_EMAIL=your-email@company.com
 BITBUCKET_API_TOKEN=your-atlassian-api-token
 ```
+
+> **Note:** Multiple workspaces support allows searching for pull requests and commits across different Bitbucket workspaces using the same credentials. Use `BITBUCKET_WORKSPACES` (comma-separated) for multiple workspaces, or `BITBUCKET_WORKSPACE` for a single workspace (backward compatible).
 
 **Confluence (for PRD/RFC content):**
 ```bash

@@ -12,7 +12,10 @@ jira:
 # Bitbucket Configuration (Optional)
 # Used for fetching pull requests and commit information
 bitbucket:
-  workspace: ${BITBUCKET_WORKSPACE}  # Your Bitbucket workspace name
+  # For multiple workspaces, use comma-separated list in BITBUCKET_WORKSPACES env var
+  workspaces: ${BITBUCKET_WORKSPACES:}  # Comma-separated list of workspace names (e.g., "workspace1,workspace2")
+  # OR for backward compatibility with single workspace:
+  workspace: ${BITBUCKET_WORKSPACE:}  # Single workspace name (deprecated, use workspaces instead)
   email: ${BITBUCKET_EMAIL}  # Your Atlassian account email
   api_token: ${BITBUCKET_API_TOKEN}  # Atlassian API token (same as JIRA token works)
 

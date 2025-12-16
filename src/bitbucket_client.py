@@ -10,9 +10,41 @@ logger = logging.getLogger(__name__)
 class BitbucketClient:
     """Bitbucket API client for fetching pull requests and commits via Jira Development Panel API"""
     
-    def __init__(self, workspace: str, email: str, api_token: str, jira_server_url: Optional[str] = None, jira_credentials: Optional[Dict[str, str]] = None):
-        """Initialize Bitbucket client with optional Jira credentials for Development Panel API"""
-        self.workspace = workspace
+    def __init__(self, workspaces: List[str] = None, workspace: str = None, email: str = None, api_token: str = None, jira_server_url: Optional[str] = None, jira_credentials: Optional[Dict[str, str]] = None):
+        """
+        Initialize Bitbucket client with optional Jira credentials for Development Panel API.
+        
+        Supports multiple workspaces. If workspaces is provided, it will search across all workspaces.
+        For backward compatibility, workspace (singular) can still be used.
+        
+        Args:
+            workspaces: List of workspace names to search across
+            workspace: Single workspace name (backward compatibility, ignored if workspaces is provided)
+            email: Atlassian account email
+            api_token: Atlassian API token
+            jira_server_url: Optional Jira server URL for Development Panel API
+            jira_credentials: Optional Jira credentials dict with 'username' and 'api_token'
+        """
+        # Handle workspace/workspaces parameter
+        if workspaces:
+            self.workspaces = workspaces if isinstance(workspaces, list) else [workspaces]
+        elif workspace:
+            # Backward compatibility: single workspace
+            self.workspaces = [workspace]
+        else:
+            raise ValueError("Either 'workspaces' or 'workspace' must be provided")
+        
+        # Remove empty strings and ensure all are strings
+        self.workspaces = [w.strip() for w in self.workspaces if w and isinstance(w, str) and w.strip()]
+        if not self.workspaces:
+            raise ValueError("At least one valid workspace must be provided")
+        
+        # Maintain backward compatibility: self.workspace points to first workspace
+        self.workspace = self.workspaces[0]
+        
+        if not email or not api_token:
+            raise ValueError("email and api_token are required")
+        
         self.email = email
         self.api_token = api_token
         self.jira_server_url = jira_server_url
@@ -221,69 +253,103 @@ class BitbucketClient:
             return None
     
     def _find_pull_requests_via_search(self, ticket_key: str, repo_slug: Optional[str] = None, include_diff: bool = False) -> List[Dict[str, Any]]:
-        """Fallback method: Find pull requests by searching repositories"""
+        """Fallback method: Find pull requests by searching repositories across all workspaces"""
         pull_requests = []
         
         if repo_slug:
-            repos = [repo_slug]
+            # If repo_slug is provided, search in all workspaces
+            repos = [(workspace, repo_slug) for workspace in self.workspaces]
         else:
             repos = self._get_repositories()
         
-        for repo in repos:
+        for repo_info in repos:
             try:
-                prs = self._search_pull_requests_in_repo(repo, ticket_key, include_diff)
+                if isinstance(repo_info, tuple):
+                    workspace, repo = repo_info
+                else:
+                    # Backward compatibility: if it's just a string, use first workspace
+                    workspace = self.workspace
+                    repo = repo_info
+                
+                prs = self._search_pull_requests_in_repo(workspace, repo, ticket_key, include_diff)
                 pull_requests.extend(prs)
             except Exception as e:
-                logger.error(f"Failed to search PRs in {repo}: {e}")
+                logger.error(f"Failed to search PRs in {repo_info}: {e}")
         
         return pull_requests
     
     def _find_commits_via_search(self, ticket_key: str, repo_slug: Optional[str] = None, include_diff: bool = False) -> List[Dict[str, Any]]:
-        """Fallback method: Find commits by searching repositories"""
+        """Fallback method: Find commits by searching repositories across all workspaces"""
         commits = []
         
         if repo_slug:
-            repos = [repo_slug]
+            # If repo_slug is provided, search in all workspaces
+            repos = [(workspace, repo_slug) for workspace in self.workspaces]
         else:
             repos = self._get_repositories()
         
-        for repo in repos:
+        for repo_info in repos:
             try:
-                repo_commits = self._search_commits_in_repo(repo, ticket_key, include_diff)
+                if isinstance(repo_info, tuple):
+                    workspace, repo = repo_info
+                else:
+                    # Backward compatibility: if it's just a string, use first workspace
+                    workspace = self.workspace
+                    repo = repo_info
+                
+                repo_commits = self._search_commits_in_repo(workspace, repo, ticket_key, include_diff)
                 commits.extend(repo_commits)
             except Exception as e:
-                logger.error(f"Failed to search commits in {repo}: {e}")
+                logger.error(f"Failed to search commits in {repo_info}: {e}")
         
         return commits
     
-    def _get_repositories(self) -> List[str]:
-        """Get list of repositories in the workspace"""
-        url = f"{self.base_url}/repositories/{self.workspace}"
+    def _get_repositories(self) -> List[tuple]:
+        """
+        Get list of repositories across all configured workspaces.
         
-        try:
-            response = self.session.get(url, timeout=30)
-            response.raise_for_status()
+        Returns:
+            List of tuples (workspace, repo_slug) for each repository found
+        """
+        all_repos = []
+        
+        for workspace in self.workspaces:
+            url = f"{self.base_url}/repositories/{workspace}"
             
-            data = response.json()
-            # Use 'full_name' or 'slug' instead of 'name' for URL-safe repository identifiers
-            repos = []
-            for repo in data.get('values', []):
-                # Use the slug or the second part of full_name (workspace/repo-slug)
-                repo_slug = repo.get('slug') or repo.get('full_name', '').split('/')[-1]
-                if repo_slug:
-                    repos.append(repo_slug)
-                    logger.debug(f"Found repository: {repo.get('name')} (slug: {repo_slug})")
-            
-            logger.info(f"Found {len(repos)} repositories in workspace '{self.workspace}'")
-            return repos
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to get repositories: {e}")
-            return []
+            try:
+                logger.debug(f"Fetching repositories from workspace: {workspace}")
+                response = self.session.get(url, timeout=30)
+                response.raise_for_status()
+                
+                data = response.json()
+                # Use 'full_name' or 'slug' instead of 'name' for URL-safe repository identifiers
+                workspace_repos = []
+                for repo in data.get('values', []):
+                    # Use the slug or the second part of full_name (workspace/repo-slug)
+                    repo_slug = repo.get('slug') or repo.get('full_name', '').split('/')[-1]
+                    if repo_slug:
+                        workspace_repos.append((workspace, repo_slug))
+                        logger.debug(f"Found repository: {repo.get('name')} (workspace: {workspace}, slug: {repo_slug})")
+                
+                all_repos.extend(workspace_repos)
+                logger.info(f"Found {len(workspace_repos)} repositories in workspace '{workspace}'")
+                
+            except requests.exceptions.HTTPError as e:
+                if e.response.status_code == 404:
+                    logger.warning(f"Workspace '{workspace}' not found or not accessible (404)")
+                elif e.response.status_code == 403:
+                    logger.warning(f"Access denied to workspace '{workspace}' (403)")
+                else:
+                    logger.error(f"Failed to get repositories from workspace '{workspace}': {e}")
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Failed to get repositories from workspace '{workspace}': {e}")
+        
+        logger.info(f"Found {len(all_repos)} total repositories across {len(self.workspaces)} workspace(s)")
+        return all_repos
     
-    def _search_pull_requests_in_repo(self, repo_slug: str, ticket_key: str, include_diff: bool = False) -> List[Dict[str, Any]]:
-        """Search for pull requests in a specific repository"""
-        url = f"{self.base_url}/repositories/{self.workspace}/{repo_slug}/pullrequests"
+    def _search_pull_requests_in_repo(self, workspace: str, repo_slug: str, ticket_key: str, include_diff: bool = False) -> List[Dict[str, Any]]:
+        """Search for pull requests in a specific repository within a workspace"""
+        url = f"{self.base_url}/repositories/{workspace}/{repo_slug}/pullrequests"
         
         # Search in title, description, and branch names
         params = {
@@ -314,7 +380,7 @@ class BitbucketClient:
                 
                 # Add diff content if requested
                 if include_diff:
-                    diff_content = self._get_pull_request_diff(repo_slug, pr['id'])
+                    diff_content = self._get_pull_request_diff(workspace, repo_slug, pr['id'])
                     if diff_content:
                         pr_data['diff'] = diff_content
                         pr_data['code_changes'] = self._analyze_diff_content(diff_content)
@@ -324,12 +390,12 @@ class BitbucketClient:
             return pull_requests
             
         except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to search PRs in {repo_slug}: {e}")
+            logger.error(f"Failed to search PRs in {workspace}/{repo_slug}: {e}")
             return []
     
-    def _search_commits_in_repo(self, repo_slug: str, ticket_key: str, include_diff: bool = False) -> List[Dict[str, Any]]:
-        """Search for commits in a specific repository"""
-        url = f"{self.base_url}/repositories/{self.workspace}/{repo_slug}/commits"
+    def _search_commits_in_repo(self, workspace: str, repo_slug: str, ticket_key: str, include_diff: bool = False) -> List[Dict[str, Any]]:
+        """Search for commits in a specific repository within a workspace"""
+        url = f"{self.base_url}/repositories/{workspace}/{repo_slug}/commits"
         
         # Search in commit messages
         params = {
@@ -356,7 +422,7 @@ class BitbucketClient:
                 
                 # Add diff content if requested
                 if include_diff:
-                    diff_content = self._get_commit_diff(repo_slug, commit['hash'])
+                    diff_content = self._get_commit_diff(workspace, repo_slug, commit['hash'])
                     if diff_content:
                         commit_data['diff'] = diff_content
                         commit_data['code_changes'] = self._analyze_diff_content(diff_content)
@@ -366,12 +432,12 @@ class BitbucketClient:
             return commits
             
         except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to search commits in {repo_slug}: {e}")
+            logger.error(f"Failed to search commits in {workspace}/{repo_slug}: {e}")
             return []
     
-    def _get_pull_request_diff(self, repo_slug: str, pr_id: str) -> Optional[str]:
-        """Get the diff content for a pull request"""
-        url = f"{self.base_url}/repositories/{self.workspace}/{repo_slug}/pullrequests/{pr_id}/diff"
+    def _get_pull_request_diff(self, workspace: str, repo_slug: str, pr_id: str) -> Optional[str]:
+        """Get the diff content for a pull request in a specific workspace"""
+        url = f"{self.base_url}/repositories/{workspace}/{repo_slug}/pullrequests/{pr_id}/diff"
         
         try:
             response = self.session.get(url, timeout=30)
@@ -381,12 +447,12 @@ class BitbucketClient:
             return response.text
             
         except requests.exceptions.RequestException as e:
-            logger.warning(f"Failed to get PR diff {repo_slug}/{pr_id}: {e}")
+            logger.warning(f"Failed to get PR diff {workspace}/{repo_slug}/{pr_id}: {e}")
             return None
     
-    def _get_commit_diff(self, repo_slug: str, commit_hash: str) -> Optional[str]:
-        """Get the diff content for a commit"""
-        url = f"{self.base_url}/repositories/{self.workspace}/{repo_slug}/diff/{commit_hash}"
+    def _get_commit_diff(self, workspace: str, repo_slug: str, commit_hash: str) -> Optional[str]:
+        """Get the diff content for a commit in a specific workspace"""
+        url = f"{self.base_url}/repositories/{workspace}/{repo_slug}/diff/{commit_hash}"
         
         try:
             response = self.session.get(url, timeout=30)
@@ -396,7 +462,7 @@ class BitbucketClient:
             return response.text
             
         except requests.exceptions.RequestException as e:
-            logger.warning(f"Failed to get commit diff {repo_slug}/{commit_hash}: {e}")
+            logger.warning(f"Failed to get commit diff {workspace}/{repo_slug}/{commit_hash}: {e}")
             return None
     
     def _analyze_pr_diff_from_url(self, pr_url: str) -> Optional[Dict[str, Any]]:
@@ -560,21 +626,9 @@ class BitbucketClient:
                 analysis['change_summary'].append(f"File types: {file_types_str}")
         
         return analysis
-        """Get detailed information for a specific pull request"""
-        url = f"{self.base_url}/repositories/{self.workspace}/{repo_slug}/pullrequests/{pr_id}"
-        
-        try:
-            response = self.session.get(url, timeout=30)
-            response.raise_for_status()
-            
-            return response.json()
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Failed to get PR details {repo_slug}/{pr_id}: {e}")
-            return None
     
     def test_connection(self) -> bool:
-        """Test the Bitbucket connection"""
+        """Test the Bitbucket connection and optionally verify workspace access"""
         try:
             url = f"{self.base_url}/user"
             logger.info(f"Testing Bitbucket connection to: {url}")
@@ -591,8 +645,33 @@ class BitbucketClient:
                 return False
                 
             response.raise_for_status()
-            logger.info("Bitbucket connection successful")
-            return True
+            logger.info("Bitbucket API connection successful")
+            
+            # Test access to each configured workspace
+            accessible_workspaces = []
+            for workspace in self.workspaces:
+                try:
+                    workspace_url = f"{self.base_url}/workspaces/{workspace}"
+                    ws_response = self.session.get(workspace_url, timeout=10)
+                    if ws_response.status_code == 200:
+                        accessible_workspaces.append(workspace)
+                        logger.info(f"✓ Workspace '{workspace}' is accessible")
+                    elif ws_response.status_code == 404:
+                        logger.warning(f"⚠ Workspace '{workspace}' not found (404)")
+                    elif ws_response.status_code == 403:
+                        logger.warning(f"⚠ Access denied to workspace '{workspace}' (403)")
+                    else:
+                        logger.warning(f"⚠ Workspace '{workspace}' returned status {ws_response.status_code}")
+                except Exception as e:
+                    logger.warning(f"⚠ Failed to test workspace '{workspace}': {e}")
+            
+            if accessible_workspaces:
+                logger.info(f"Successfully connected. {len(accessible_workspaces)}/{len(self.workspaces)} workspace(s) accessible")
+                return True
+            else:
+                logger.warning("Connection successful but no workspaces are accessible")
+                return False
+                
         except Exception as e:
             logger.error(f"Bitbucket connection test failed: {e}")
             return False

@@ -198,16 +198,23 @@ def initialize_services():
             mandays_custom_field=config.jira.get('mandays_custom_field')
         )
         
-        bitbucket_client = BitbucketClient(
-            workspace=config.bitbucket.get('workspace', ''),
-            email=config.bitbucket.get('email', ''),
-            api_token=config.bitbucket.get('api_token', ''),
-            jira_server_url=config.jira['server_url'],
-            jira_credentials={
-                'username': config.jira['username'],
-                'api_token': config.jira['api_token']
-            }
-        )
+        # Initialize Bitbucket client with multi-workspace support
+        workspaces = config.get_bitbucket_workspaces()
+        bitbucket_email = config.bitbucket.get('email', '')
+        bitbucket_api_token = config.bitbucket.get('api_token', '')
+        
+        bitbucket_client = None
+        if workspaces and bitbucket_email and bitbucket_api_token:
+            bitbucket_client = BitbucketClient(
+                workspaces=workspaces,
+                email=bitbucket_email,
+                api_token=bitbucket_api_token,
+                jira_server_url=config.jira['server_url'],
+                jira_credentials={
+                    'username': config.jira['username'],
+                    'api_token': config.jira['api_token']
+                }
+            )
         
         confluence_client = ConfluenceClient(
             server_url=config.confluence.get('server_url', ''),

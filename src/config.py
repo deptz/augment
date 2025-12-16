@@ -51,6 +51,38 @@ class Config:
     def bitbucket(self) -> Dict[str, Any]:
         return self._config.get('bitbucket', {})
     
+    def get_bitbucket_workspaces(self) -> List[str]:
+        """
+        Get list of Bitbucket workspaces from configuration.
+        
+        Supports both 'workspaces' (comma-separated string or list) and 'workspace' (single, backward compatibility).
+        Returns empty list if neither is configured.
+        """
+        bitbucket_config = self.bitbucket
+        
+        # Try workspaces first (multi-workspace support)
+        workspaces = bitbucket_config.get('workspaces', '')
+        if workspaces:
+            # Handle comma-separated string
+            if isinstance(workspaces, str):
+                # Split by comma and strip whitespace
+                workspaces_list = [w.strip() for w in workspaces.split(',') if w.strip()]
+                if workspaces_list:
+                    return workspaces_list
+            # Handle list
+            elif isinstance(workspaces, list):
+                # Filter out empty strings
+                workspaces_list = [w for w in workspaces if w and isinstance(w, str)]
+                if workspaces_list:
+                    return workspaces_list
+        
+        # Fallback to single workspace (backward compatibility)
+        workspace = bitbucket_config.get('workspace', '')
+        if workspace and isinstance(workspace, str) and workspace.strip():
+            return [workspace.strip()]
+        
+        return []
+    
     @property
     def confluence(self) -> Dict[str, Any]:
         return self._config.get('confluence', {})

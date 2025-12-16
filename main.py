@@ -58,18 +58,22 @@ def create_clients(config: Config):
         mandays_custom_field=config.jira.get('mandays_custom_field')
     )
     
-    # Bitbucket client (optional)
+    # Bitbucket client (optional) - supports multiple workspaces
     bitbucket_client = None
-    if all(config.bitbucket.get(key) for key in ['workspace', 'email', 'api_token']):
+    workspaces = config.get_bitbucket_workspaces()
+    bitbucket_email = config.bitbucket.get('email', '')
+    bitbucket_api_token = config.bitbucket.get('api_token', '')
+    
+    if workspaces and bitbucket_email and bitbucket_api_token:
         # Pass Jira credentials for Development Panel API
         jira_credentials = {
             'username': config.jira['username'],
             'api_token': config.jira['api_token']
         }
         bitbucket_client = BitbucketClient(
-            workspace=config.bitbucket['workspace'],
-            email=config.bitbucket['email'],
-            api_token=config.bitbucket['api_token'],
+            workspaces=workspaces,
+            email=bitbucket_email,
+            api_token=bitbucket_api_token,
             jira_server_url=config.jira['server_url'],
             jira_credentials=jira_credentials
         )
