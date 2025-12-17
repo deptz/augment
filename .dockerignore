@@ -1,3 +1,28 @@
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.swp
+*.tmp
+
+# Local environment and secrets
+.env
+.env.*
+
+# Git metadata
+.git
+.gitignore
+.dockerignore
+
+# Local artifacts not needed in image
+exports
+tests
+docs/
+
+# ---- Synced from .gitignore ----
+
 # Python
 __pycache__/
 *.py[cod]
@@ -21,12 +46,10 @@ wheels/
 *.egg
 
 # Virtual Environment
-venv/
 env/
 ENV/
 
 # Environment Variables
-.env
 .env.local
 .env.development
 .env.test
@@ -35,7 +58,6 @@ ENV/
 # IDE
 .vscode/
 .idea/
-*.swp
 *.swo
 *~
 
@@ -53,7 +75,6 @@ ehthumbs.db
 Thumbs.db
 
 # Temporary files
-*.tmp
 *.temp
 temp/
 tmp/
@@ -61,7 +82,6 @@ tmp/
 # Output files
 output/
 results/
-exports/
 *.csv
 *.xlsx
 
@@ -96,12 +116,8 @@ jira_descriptions_export_*.csv
 *_old.py
 *.bak
 *.backup
-*.swp
-*.swo
 
 # Keep .env.example but ignore all other .env files
-.env
-.env.*
 !.env.example
 
 # Tooling caches
@@ -123,3 +139,5 @@ data/*.db-journal
 data/*.db-wal
 data/*.db-shm
 openapi.json
+
+

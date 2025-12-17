@@ -12,6 +12,7 @@ Whether you're backfilling documentation for existing tickets or planning new fe
 - [Features](#features)
 - [Quick Start](#quick-start)
 - [Installation](#installation)
+- [Running with Docker (Docker Hub Image)](#running-with-docker-docker-hub-image)
 - [Configuration](#configuration)
 - [Usage](#usage)
 - [API Documentation](#api-documentation)
@@ -170,6 +171,99 @@ Before you begin, ensure you have:
    python main.py test
    ```
    This will test connections to all configured services.
+
+## Running with Docker (Docker Hub Image)
+
+You can run Augment without cloning the repository by using the prebuilt image from Docker Hub.
+
+### 1. Prerequisites
+
+- Docker installed and running
+- A Redis instance (can be a Docker container)
+- Your own `config.yaml` and `.env` files on the host
+
+At minimum, your `.env` should define:
+
+- Jira: `JIRA_SERVER_URL`, `JIRA_USERNAME`, `JIRA_API_TOKEN`
+- LLM: `LLM_PROVIDER` and the corresponding API key (e.g. `OPENAI_API_KEY`)
+- Redis: `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`
+
+### 2. Pull the Docker image
+
+```bash
+docker pull pujitriwibowo/augment:0.1.0
+# Or track the latest stable build:
+docker pull pujitriwibowo/augment:latest
+```
+
+### 3. Prepare configuration on the host
+
+In an empty directory on your machine:
+
+```bash
+curl -O https://raw.githubusercontent.com/deptz/augment/main/config.yaml
+curl -O https://raw.githubusercontent.com/deptz/augment/main/.env.example
+cp .env.example .env
+# Edit .env with your Jira, LLM, and Redis settings
+mkdir -p exports
+```
+
+Ensure your `.env` contains a Redis host reachable from inside Docker. For example, if you run Redis as a container named `augment-redis` on the same Docker network, set:
+
+```env
+REDIS_HOST=augment-redis
+REDIS_PORT=6379
+REDIS_DB=0
+```
+
+### 4. Start Redis (Docker)
+
+```bash
+docker network create augment-net
+
+docker run -d \
+  --name augment-redis \
+  --network augment-net \
+  redis:7-alpine
+```
+
+### 5. Run the API container
+
+From the directory containing your `config.yaml`, `.env`, and `exports`:
+
+```bash
+docker run --rm \
+  --name augment-api \
+  --network augment-net \
+  -p 8000:8000 \
+  -e PYTHONPATH=/app \
+  -v "$PWD/config.yaml:/app/config.yaml:ro" \
+  -v "$PWD/.env:/app/.env:ro" \
+  -v "$PWD/exports:/app/exports" \
+  pujitriwibowo/augment:0.1.0
+```
+
+This starts the FastAPI server inside the container. You can then access:
+
+- Swagger UI: http://localhost:8000/docs  
+- ReDoc: http://localhost:8000/redoc
+
+### 6. Run the background worker container
+
+In a separate terminal, from the same directory:
+
+```bash
+docker run --rm \
+  --name augment-worker \
+  --network augment-net \
+  -v "$PWD/config.yaml:/app/config.yaml:ro" \
+  -v "$PWD/.env:/app/.env:ro" \
+  -v "$PWD/exports:/app/exports" \
+  pujitriwibowo/augment:0.1.0 \
+  python run_worker.py
+```
+
+The worker container will connect to the same Redis instance and process background jobs created by the API.
 
 ## Configuration
 
