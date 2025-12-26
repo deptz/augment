@@ -1369,14 +1369,14 @@ class PlanningService:
             
             split_from_failed = False
             for i, link_type in enumerate(link_types_to_try):
-                logger.debug(f"Attempting to create {link_type} link: {parent_key} -> {child_key}")
+                logger.debug(f"Attempting to create {link_type} link: {child_key} split from {parent_key}")
                 success = self.jira_client.create_issue_link(
-                    inward_key=parent_key,
-                    outward_key=child_key,
+                    inward_key=child_key,    # Task is inward (split from)
+                    outward_key=parent_key,  # Story is outward (split to)
                     link_type=link_type
                 )
                 if success:
-                    logger.info(f"✅ Created {link_type} link: {parent_key} -> {child_key}")
+                    logger.info(f"✅ Created {link_type} link: {child_key} split from {parent_key}")
                     return True, link_type
                 else:
                     if link_type == "Work item split":

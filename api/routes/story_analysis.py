@@ -343,17 +343,17 @@ async def create_task_from_suggestion(
         
         # Link task to story using "Work item split" relationship
         link_created = jira_client.create_issue_link(
-            inward_key=request.story_key,
-            outward_key=task_key,
+            inward_key=task_key,      # Task is inward (split from)
+            outward_key=request.story_key,  # Story is outward (split to)
             link_type="Work item split"
         )
         
         if not link_created:
-            logger.warning(f"Failed to create 'Work item split' link between {request.story_key} and {task_key}")
+            logger.warning(f"Failed to create 'Work item split' link between {task_key} and {request.story_key}")
             # Try alternative link type
             jira_client.create_issue_link(
-                inward_key=request.story_key,
-                outward_key=task_key,
+                inward_key=task_key,      # Task is inward (split from)
+                outward_key=request.story_key,  # Story is outward (split to)
                 link_type="Relates"
             )
         

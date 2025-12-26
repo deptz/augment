@@ -175,10 +175,10 @@ async def update_jira_ticket(
                         if "task" in source_type and "story" in target_type:
                             direction = "inward"
                             logger.info(f"Task -> Story detected, using 'split from' (inward)")
-                        # Story -> Task: split to (outward)
+                        # Story -> Task: split to (inward - so Task is inward, Story is outward)
                         elif "story" in source_type and "task" in target_type:
-                            direction = "outward"
-                            logger.info(f"Story -> Task detected, using 'split to' (outward)")
+                            direction = "inward"
+                            logger.info(f"Story -> Task detected, using 'split to' (inward - Task split from Story)")
 
                 # Create the link
                 link_created = jira_client.create_issue_link_generic(
@@ -355,16 +355,16 @@ async def create_jira_ticket(
 
         # Link to story
         link_created = jira_client.create_issue_link(
-            inward_key=request.story_key,
-            outward_key=task_key,
+            inward_key=task_key,      # Task is inward (split from)
+            outward_key=request.story_key,  # Story is outward (split to)
             link_type="Work item split"
         )
 
         if link_created:
             links_created.append({
                 "link_type": "Work item split",
-                "source_key": request.story_key,
-                "target_key": task_key,
+                "source_key": task_key,
+                "target_key": request.story_key,
                 "status": "created"
             })
 
@@ -764,10 +764,10 @@ async def update_story_ticket(
                     if source_type and target_type:
                         logger.info(f"Source type: {source_type}, Target type: {target_type}")
 
-                        # Story -> Task: split to (outward)
+                        # Story -> Task: split to (inward - so Task is inward, Story is outward)
                         if "story" in source_type and "task" in target_type:
-                            direction = "outward"
-                            logger.info(f"Story -> Task detected, using 'split to' (outward)")
+                            direction = "inward"
+                            logger.info(f"Story -> Task detected, using 'split to' (inward - Task split from Story)")
 
                 # Create the link
                 link_created = jira_client.create_issue_link_generic(
@@ -1049,10 +1049,10 @@ def _process_single_story_update(
                     if source_type and target_type:
                         logger.info(f"Source type: {source_type}, Target type: {target_type}")
 
-                        # Story -> Task: split to (outward)
+                        # Story -> Task: split to (inward - so Task is inward, Story is outward)
                         if "story" in source_type and "task" in target_type:
-                            direction = "outward"
-                            logger.info(f"Story -> Task detected, using 'split to' (outward)")
+                            direction = "inward"
+                            logger.info(f"Story -> Task detected, using 'split to' (inward - Task split from Story)")
 
                 # Create the link
                 link_created = jira_client.create_issue_link_generic(

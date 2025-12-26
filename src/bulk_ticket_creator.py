@@ -255,6 +255,7 @@ class BulkTicketCreator:
             
             # Create tasks with story relationships
             task_mapping = {}  # task_plan_id -> created_key
+            story_task_mapping = {}  # task_key -> story_key
             story_index = 0
             
             for task_plan in tasks:
@@ -267,6 +268,7 @@ class BulkTicketCreator:
                 if task_key:
                     results["created_tickets"]["tasks"].append(task_key)
                     task_mapping[id(task_plan)] = task_key
+                    story_task_mapping[task_key] = story_key
                     logger.info(f"Created task {task_key} under story {story_key}")
                 else:
                     results["failed_creations"].append({
@@ -276,6 +278,29 @@ class BulkTicketCreator:
                         "error": "Failed to create task ticket"
                     })
                     results["success"] = False
+            
+            # Create story-task links for all created tasks
+            for task_key, story_key in story_task_mapping.items():
+                link_success = self.jira_client.create_issue_link(
+                    inward_key=task_key,      # Task is inward (split from)
+                    outward_key=story_key,    # Story is outward (split to)
+                    link_type="Work item split"
+                )
+                if link_success:
+                    results["relationships_created"].append({
+                        "from": task_key,
+                        "to": story_key,
+                        "type": "Work item split"
+                    })
+                    logger.info(f"Created story-task link: {task_key} split from {story_key}")
+                else:
+                    results["relationships_failed"].append({
+                        "from": task_key,
+                        "to": story_key,
+                        "type": "Work item split",
+                        "error": "Failed to create link"
+                    })
+                    logger.warning(f"Failed to create story-task link: {task_key} -> {story_key}")
             
             # Create dependency relationships if any tasks have dependencies
             if any(task.depends_on_tasks for task in tasks):
