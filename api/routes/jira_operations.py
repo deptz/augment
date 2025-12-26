@@ -1440,7 +1440,7 @@ async def bulk_create_tasks(
                     "from": None,  # Will be set after ticket creation
                     "to": task_item.story_key,
                     "type": "Work item split",
-                    "direction": "outward"
+                    "direction": "outward"  # Task (source) is inward (split from), Story (target) is outward (split to)
                 })
             
             if task_item.blocks:
@@ -1504,13 +1504,26 @@ async def bulk_create_tasks(
             link_type = link_info["type"]
             direction = link_info.get("direction", "outward")
             
-            # Create the link
-            link_success = jira_client.create_issue_link_generic(
-                source_key=source_key,
-                target_key=target_key,
-                link_type=link_type,
-                direction=direction
-            )
+            # For "Work item split", we need Task as inward (split from) and Story as outward (split to)
+            # With direction="inward": inwardIssue=target, outwardIssue=source
+            # So we swap: pass story as source, task as target, with direction="inward"
+            # This creates: inwardIssue=target (task), outwardIssue=source (story) ✓
+            if link_type == "Work item split":
+                # Swap source and target, use direction="inward" to get correct relationship
+                link_success = jira_client.create_issue_link_generic(
+                    source_key=target_key,  # Story as source
+                    target_key=source_key,  # Task as target
+                    link_type=link_type,
+                    direction="inward"  # This makes: inwardIssue=target (task), outwardIssue=source (story)
+                )
+            else:
+                # For other link types, use original parameters
+                link_success = jira_client.create_issue_link_generic(
+                    source_key=source_key,
+                    target_key=target_key,
+                    link_type=link_type,
+                    direction=direction
+                )
             
             if link_success:
                 results[index].links_created.append({
