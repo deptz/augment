@@ -1013,17 +1013,19 @@ async def process_bulk_task_creation_worker(ctx, job_id: str, tasks_data: List[D
             
             # If still not resolved, assume it's already a JIRA key (e.g., "BIF-1234")
             
-            # For "Work item split", we need Task as inward (split from) and Story as outward (split to)
-            # With direction="inward": inwardIssue=target, outwardIssue=source
-            # So we swap: pass story as source, task as target, with direction="inward"
-            # This creates: inwardIssue=target (task), outwardIssue=source (story) ✓
+            # For "Work item split", we need to swap source and target to get correct relationship
+            # With direction="outward": inwardIssue=source, outwardIssue=target
+            # So: source=story, target=task, direction="outward"
+            # This creates: inwardIssue=story, outwardIssue=task
+            # This makes Task show "split from" Story correctly
             if link_type == "Work item split":
-                # Swap source and target, use direction="inward" to get correct relationship
+                # Swap: Story as source, Task as target, direction="outward"
+                # This creates: inwardIssue=story, outwardIssue=task
                 link_success = jira_client.create_issue_link_generic(
                     source_key=target_key,  # Story as source
                     target_key=source_key,  # Task as target
                     link_type=link_type,
-                    direction="inward"  # This makes: inwardIssue=target (task), outwardIssue=source (story)
+                    direction="outward"  # This makes: inwardIssue=source (story), outwardIssue=target (task)
                 )
             else:
                 # For other link types, use original parameters

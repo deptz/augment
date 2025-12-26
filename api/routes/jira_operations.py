@@ -764,12 +764,18 @@ async def update_story_ticket(
                     if source_type and target_type:
                         logger.info(f"Source type: {source_type}, Target type: {target_type}")
 
-                        # Story -> Task: split to (inward - so Task is inward, Story is outward)
+                        # Story -> Task: need to swap to get correct relationship
+                        # With direction="outward": inwardIssue=source, outwardIssue=target
+                        # So: source=story, target=task, direction="outward"
+                        # This creates: inwardIssue=story, outwardIssue=task
                         if "story" in source_type and "task" in target_type:
-                            direction = "inward"
-                            logger.info(f"Story -> Task detected, using 'split to' (inward - Task split from Story)")
+                            direction = "outward"
+                            logger.info(f"Story -> Task detected, using 'split to' (outward - swapped for correct relationship)")
 
                 # Create the link
+                # Smart detection already sets direction="outward" for Story->Task with "Work item split"
+                # With direction="outward": inwardIssue=source, outwardIssue=target
+                # So: source=story, target=task, direction="outward" creates: inwardIssue=story, outwardIssue=task
                 link_created = jira_client.create_issue_link_generic(
                     source_key=request.story_key,
                     target_key=target_key,
@@ -1049,12 +1055,18 @@ def _process_single_story_update(
                     if source_type and target_type:
                         logger.info(f"Source type: {source_type}, Target type: {target_type}")
 
-                        # Story -> Task: split to (inward - so Task is inward, Story is outward)
+                        # Story -> Task: need to swap to get correct relationship
+                        # With direction="outward": inwardIssue=source, outwardIssue=target
+                        # So: source=story, target=task, direction="outward"
+                        # This creates: inwardIssue=story, outwardIssue=task
                         if "story" in source_type and "task" in target_type:
-                            direction = "inward"
-                            logger.info(f"Story -> Task detected, using 'split to' (inward - Task split from Story)")
+                            direction = "outward"
+                            logger.info(f"Story -> Task detected, using 'split to' (outward - swapped for correct relationship)")
 
                 # Create the link
+                # Smart detection already sets direction="outward" for Story->Task with "Work item split"
+                # With direction="outward": inwardIssue=source, outwardIssue=target
+                # So: source=story, target=task, direction="outward" creates: inwardIssue=story, outwardIssue=task
                 link_created = jira_client.create_issue_link_generic(
                     source_key=story_key,
                     target_key=target_key,
@@ -1504,17 +1516,19 @@ async def bulk_create_tasks(
             link_type = link_info["type"]
             direction = link_info.get("direction", "outward")
             
-            # For "Work item split", we need Task as inward (split from) and Story as outward (split to)
-            # With direction="inward": inwardIssue=target, outwardIssue=source
-            # So we swap: pass story as source, task as target, with direction="inward"
-            # This creates: inwardIssue=target (task), outwardIssue=source (story) ✓
+            # For "Work item split", we need to swap source and target to get correct relationship
+            # With direction="outward": inwardIssue=source, outwardIssue=target
+            # So: source=story, target=task, direction="outward"
+            # This creates: inwardIssue=story, outwardIssue=task
+            # This makes Task show "split from" Story correctly
             if link_type == "Work item split":
-                # Swap source and target, use direction="inward" to get correct relationship
+                # Swap: Story as source, Task as target, direction="outward"
+                # This creates: inwardIssue=story, outwardIssue=task
                 link_success = jira_client.create_issue_link_generic(
                     source_key=target_key,  # Story as source
                     target_key=source_key,  # Task as target
                     link_type=link_type,
-                    direction="inward"  # This makes: inwardIssue=target (task), outwardIssue=source (story)
+                    direction="outward"  # This makes: inwardIssue=source (story), outwardIssue=target (task)
                 )
             else:
                 # For other link types, use original parameters

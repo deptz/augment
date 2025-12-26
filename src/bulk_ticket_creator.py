@@ -119,8 +119,11 @@ class BulkTicketCreator:
             
             # Create "Split From" relationships
             for link_info in pending_links:
+                # Swap: Story as inward, Task as outward to get correct relationship
+                # link_info["from"] is task_key, link_info["to"] is story_key
+                # We need to swap them for correct relationship
                 link_success = self.jira_client.create_issue_link(
-                    link_info["from"], link_info["to"], link_info["type"]
+                    link_info["to"], link_info["from"], link_info["type"]  # Swapped: story as inward, task as outward
                 )
                 if link_success:
                     results["relationships_created"].append(link_info)
@@ -281,9 +284,11 @@ class BulkTicketCreator:
             
             # Create story-task links for all created tasks
             for task_key, story_key in story_task_mapping.items():
+                # Swap: Story as inward, Task as outward to get correct relationship
+                # This makes Task show "split from" Story correctly
                 link_success = self.jira_client.create_issue_link(
-                    inward_key=task_key,      # Task is inward (split from)
-                    outward_key=story_key,    # Story is outward (split to)
+                    inward_key=story_key,    # Story is inward
+                    outward_key=task_key,    # Task is outward (shows "split from" Story)
                     link_type="Work item split"
                 )
                 if link_success:
