@@ -1190,11 +1190,11 @@ class PlanningService:
         
         # Remove team prefixes (case-insensitive)
         normalized = summary.strip()
-        # Match [BE], [FE], [QA] at the start (with optional whitespace)
-        normalized = re.sub(r'^\s*\[(BE|FE|QA)\]\s*', '', normalized, flags=re.IGNORECASE)
-        # Also handle without brackets: BE, FE, QA at start
-        normalized = re.sub(r'^\s*(BE|FE|QA):\s*', '', normalized, flags=re.IGNORECASE)
-        normalized = re.sub(r'^\s*(BE|FE|QA)\s+', '', normalized, flags=re.IGNORECASE)
+        # Match [BE], [FE], [QA], [MOBILE] at the start (with optional whitespace)
+        normalized = re.sub(r'^\s*\[(BE|FE|QA|MOBILE)\]\s*', '', normalized, flags=re.IGNORECASE)
+        # Also handle without brackets: BE, FE, QA, MOBILE at start
+        normalized = re.sub(r'^\s*(BE|FE|QA|MOBILE):\s*', '', normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r'^\s*(BE|FE|QA|MOBILE)\s+', '', normalized, flags=re.IGNORECASE)
         
         # Normalize whitespace and case
         normalized = ' '.join(normalized.split())  # Collapse multiple spaces

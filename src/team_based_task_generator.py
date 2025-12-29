@@ -59,12 +59,19 @@ class TeamBasedTaskGenerator:
                                     rfc_content: Optional[Dict[str, Any]] = None,
                                     additional_context: Optional[str] = None) -> List[TaskPlan]:
         """
-        Generate tasks with proper Backend/Frontend/QA separation
+        Generate tasks with proper team separation based on requirements
+        
+        Only generates tasks for teams (Backend/Frontend/Mobile/QA) that are actually
+        needed based on the story requirements. The LLM analyzes the story to determine
+        which teams are relevant, and if force_separation=True, missing teams are only
+        added if they are detected as needed through keyword analysis.
         
         Args:
             story: Story to break down into tasks
             max_cycle_days: Maximum days per task
-            force_separation: Whether to force 3-team separation
+            force_separation: If True, ensures teams are present, but only adds teams
+                            that are detected as needed from requirements analysis.
+                            If False, uses only what the LLM generates.
             prd_content: Optional PRD document content
             rfc_content: Optional RFC document content
             additional_context: Optional additional context to guide generation
@@ -119,6 +126,7 @@ class TeamBasedTaskGenerator:
             logger.info(f"Generated {len(dependent_tasks)} team-separated tasks: "
                        f"Backend: {len([t for t in dependent_tasks if t.team == TaskTeam.BACKEND])}, "
                        f"Frontend: {len([t for t in dependent_tasks if t.team == TaskTeam.FRONTEND])}, "
+                       f"Mobile: {len([t for t in dependent_tasks if t.team == TaskTeam.MOBILE])}, "
                        f"QA: {len([t for t in dependent_tasks if t.team == TaskTeam.QA])}")
             
             return dependent_tasks
@@ -192,6 +200,7 @@ class TeamBasedTaskGenerator:
             logger.info(f"Generated {len(dependent_tasks)} unified tasks with tests: "
                        f"Backend: {len([t for t in dependent_tasks if t.team == TaskTeam.BACKEND])}, "
                        f"Frontend: {len([t for t in dependent_tasks if t.team == TaskTeam.FRONTEND])}, "
+                       f"Mobile: {len([t for t in dependent_tasks if t.team == TaskTeam.MOBILE])}, "
                        f"QA: {len([t for t in dependent_tasks if t.team == TaskTeam.QA])}")
             
             return dependent_tasks
@@ -384,6 +393,8 @@ class TeamBasedTaskGenerator:
                     team = TaskTeam.FRONTEND
                 elif 'qa' in team_str:
                     team = TaskTeam.QA
+                elif 'mobile' in team_str:
+                    team = TaskTeam.MOBILE
                 else:
                     logger.warning(f"DEBUG: Unknown team: {task_dict.get('team')}, defaulting to Backend")
                     team = TaskTeam.BACKEND
@@ -441,6 +452,8 @@ class TeamBasedTaskGenerator:
                     blocked_by_team_enums.append(TaskTeam.FRONTEND)
                 elif 'qa' in team_lower:
                     blocked_by_team_enums.append(TaskTeam.QA)
+                elif 'mobile' in team_lower:
+                    blocked_by_team_enums.append(TaskTeam.MOBILE)
             
             logger.info(f"DEBUG: Task '{title}' depends on: {depends_on_tasks}, blocked by teams: {blocked_by_teams}")
             
@@ -546,29 +559,101 @@ class TeamBasedTaskGenerator:
         
         return tasks
     
+    def _analyze_required_teams_from_story(self, story: StoryPlan, story_type: StoryType) -> set:
+        """
+        Analyze story content to determine which teams are actually needed.
+        
+        Uses keyword detection in story summary, description, and acceptance criteria
+        to identify which teams (Backend/Frontend/Mobile/QA) are mentioned or required.
+        
+        Args:
+            story: Story to analyze
+            story_type: Detected story type (used as hint, not definitive)
+            
+        Returns:
+            Set of TaskTeam enums that should be present
+        """
+        required_teams = set()
+        
+        # Combine all text content for analysis
+        text_content = f"{story.summary} {story.description}".lower()
+        
+        # Add acceptance criteria text
+        for criteria in story.acceptance_criteria:
+            text_content += f" {criteria.given} {criteria.when} {criteria.then}".lower()
+        
+        # Keyword detection for each team
+        backend_keywords = ["api", "endpoint", "backend", "database", "service", "server", "server-side", "rest", "graphql"]
+        frontend_keywords = ["web", "ui", "interface", "frontend", "browser", "website", "html", "css", "javascript", "react", "vue", "angular"]
+        mobile_keywords = ["mobile", "app", "ios", "android", "native", "device", "iphone", "ipad", "tablet", "smartphone"]
+        qa_keywords = ["test", "testing", "qa", "quality", "validation", "verify", "check"]
+        
+        # Detect Backend
+        if any(keyword in text_content for keyword in backend_keywords):
+            required_teams.add(TaskTeam.BACKEND)
+            logger.debug(f"Detected Backend team needed (keywords found in: {story.summary[:50]}...)")
+        
+        # Detect Frontend
+        if any(keyword in text_content for keyword in frontend_keywords):
+            required_teams.add(TaskTeam.FRONTEND)
+            logger.debug(f"Detected Frontend team needed (keywords found in: {story.summary[:50]}...)")
+        
+        # Detect Mobile
+        if any(keyword in text_content for keyword in mobile_keywords):
+            required_teams.add(TaskTeam.MOBILE)
+            logger.debug(f"Detected Mobile team needed (keywords found in: {story.summary[:50]}...)")
+        
+        # QA: Always include if any implementation teams are present, or if explicitly mentioned
+        if any(keyword in text_content for keyword in qa_keywords) or len(required_teams) > 0:
+            required_teams.add(TaskTeam.QA)
+            if len(required_teams) == 1:  # Only QA was added
+                logger.debug(f"Detected QA team needed (keywords found or implementation teams present)")
+        
+        # Use story_type as additional hint (but don't override explicit detection)
+        if story_type == StoryType.API_FEATURE and TaskTeam.BACKEND not in required_teams:
+            # API features typically need backend, even if not explicitly mentioned
+            required_teams.add(TaskTeam.BACKEND)
+            logger.debug("Added Backend team based on API_FEATURE story type")
+        elif story_type == StoryType.UI_FEATURE:
+            # UI features might need frontend or mobile, but we rely on keyword detection
+            # If neither detected, don't force it
+            pass
+        elif story_type == StoryType.DATA_FEATURE and TaskTeam.BACKEND not in required_teams:
+            # Data features typically need backend
+            required_teams.add(TaskTeam.BACKEND)
+            logger.debug("Added Backend team based on DATA_FEATURE story type")
+        
+        # If no teams detected at all, default to Backend + QA (conservative approach)
+        if len(required_teams) == 0:
+            required_teams = {TaskTeam.BACKEND, TaskTeam.QA}
+            logger.warning(f"No teams detected from story analysis, defaulting to Backend + QA for: {story.summary[:50]}...")
+        else:
+            logger.info(f"Detected required teams from story analysis: {[team.value for team in required_teams]}")
+        
+        return required_teams
+    
     def _ensure_team_separation(self, 
                                tasks: List[TaskPlan], 
                                story: StoryPlan, 
                                story_type: StoryType) -> List[TaskPlan]:
-        """Ensure at least one task for each team when applicable"""
+        """Ensure tasks exist for teams that are needed based on requirements analysis"""
         existing_teams = {task.team for task in tasks}
         
-        # For most story types, we want Backend, Frontend, and QA representation
-        required_teams = {TaskTeam.BACKEND, TaskTeam.FRONTEND, TaskTeam.QA}
-        
-        # Adjust required teams based on story type
-        if story_type == StoryType.API_FEATURE:
-            required_teams = {TaskTeam.BACKEND, TaskTeam.QA}  # API might not need frontend
-        elif story_type == StoryType.CONFIGURATION:
-            required_teams = {TaskTeam.BACKEND, TaskTeam.QA}  # Config typically backend-only
+        # Analyze story to determine which teams are actually needed
+        required_teams = self._analyze_required_teams_from_story(story, story_type)
         
         missing_teams = required_teams - existing_teams
         
-        for team in missing_teams:
-            # Add a basic task for the missing team
-            basic_task = self._create_basic_team_task(team, story, story_type)
-            if basic_task:
-                tasks.append(basic_task)
+        if missing_teams:
+            logger.info(f"Adding missing teams based on requirements analysis: {[team.value for team in missing_teams]}")
+            for team in missing_teams:
+                # Add a basic task for the missing team
+                basic_task = self._create_basic_team_task(team, story, story_type)
+                if basic_task:
+                    tasks.append(basic_task)
+                    logger.info(f"Added {team.value} task: {basic_task.summary}")
+        else:
+            logger.info(f"All required teams present. Required: {[team.value for team in required_teams]}, Existing: {[team.value for team in existing_teams]}")
         
         return tasks
     
@@ -598,6 +683,13 @@ class TeamBasedTaskGenerator:
                 'scope': 'Create and execute test cases for the feature',
                 'deliverable': 'Test results and quality validation',
                 'outcomes': ['Test cases executed', 'Quality validated', 'Bugs identified and tracked']
+            },
+            TaskTeam.MOBILE: {
+                'summary': f'Mobile implementation for {story.summary}',
+                'purpose': 'Implement mobile app features and user experience',
+                'scope': 'Develop mobile UI components and native features',
+                'deliverable': 'Working mobile implementation',
+                'outcomes': ['Mobile components implemented', 'Mobile features functional']
             }
         }
         
@@ -628,6 +720,7 @@ class TeamBasedTaskGenerator:
         base_estimates = {
             TaskTeam.BACKEND: {'dev': 2.0, 'test': 0.5, 'review': 0.5, 'deploy': 0.5},
             TaskTeam.FRONTEND: {'dev': 1.5, 'test': 0.5, 'review': 0.5, 'deploy': 0.25},
+            TaskTeam.MOBILE: {'dev': 2.0, 'test': 0.75, 'review': 0.5, 'deploy': 0.5},
             TaskTeam.QA: {'dev': 0.5, 'test': 2.0, 'review': 0.25, 'deploy': 0.25}
         }
         
@@ -1001,6 +1094,16 @@ class TeamBasedTaskGenerator:
                 "Regression testing",
                 "User acceptance testing coordination",
                 "Bug tracking and validation"
+            ],
+            TaskTeam.MOBILE: [
+                "Mobile app UI/UX implementation",
+                "Native mobile components and screens",
+                "Mobile platform-specific features (iOS/Android)",
+                "Mobile integrations (push notifications, device APIs, sensors)",
+                "Mobile performance optimization",
+                "Mobile app store compliance",
+                "Mobile-specific testing and validation",
+                "Platform-specific implementations and optimizations"
             ]
         }
     
@@ -1032,6 +1135,7 @@ class TeamBasedTaskGenerator:
         # Group tasks by team for easier analysis
         backend_tasks = [t for t in tasks if t.team == TaskTeam.BACKEND]
         frontend_tasks = [t for t in tasks if t.team == TaskTeam.FRONTEND]
+        mobile_tasks = [t for t in tasks if t.team == TaskTeam.MOBILE]
         qa_tasks = [t for t in tasks if t.team == TaskTeam.QA]
         
         # Create task ID mapping for easier reference
@@ -1050,9 +1154,23 @@ class TeamBasedTaskGenerator:
                         if TaskTeam.BACKEND not in task.blocked_by_teams:
                             task.blocked_by_teams.append(TaskTeam.BACKEND)
                             
+            elif task.team == TaskTeam.MOBILE:
+                # Mobile tasks are typically blocked by backend tasks (APIs)
+                for backend_task in backend_tasks:
+                    if self._has_dependency_relationship(backend_task, task):
+                        task.depends_on_tasks.append(task_ids[id(backend_task)])
+                        if TaskTeam.BACKEND not in task.blocked_by_teams:
+                            task.blocked_by_teams.append(TaskTeam.BACKEND)
+                # Mobile tasks may also depend on Frontend for design patterns
+                for frontend_task in frontend_tasks:
+                    if self._has_dependency_relationship(frontend_task, task):
+                        task.depends_on_tasks.append(task_ids[id(frontend_task)])
+                        if TaskTeam.FRONTEND not in task.blocked_by_teams:
+                            task.blocked_by_teams.append(TaskTeam.FRONTEND)
+                            
             elif task.team == TaskTeam.QA:
                 # QA tasks are typically blocked by implementation tasks
-                for impl_task in backend_tasks + frontend_tasks:
+                for impl_task in backend_tasks + frontend_tasks + mobile_tasks:
                     if self._has_dependency_relationship(impl_task, task):
                         task.depends_on_tasks.append(task_ids[id(impl_task)])
                         if impl_task.team not in task.blocked_by_teams:
@@ -1139,9 +1257,9 @@ class TeamBasedTaskGenerator:
         import re
         normalized = summary.strip()
         # Remove team prefixes
-        normalized = re.sub(r'^\s*\[(BE|FE|QA)\]\s*', '', normalized, flags=re.IGNORECASE)
-        normalized = re.sub(r'^\s*(BE|FE|QA):\s*', '', normalized, flags=re.IGNORECASE)
-        normalized = re.sub(r'^\s*(BE|FE|QA)\s+', '', normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r'^\s*\[(BE|FE|QA|MOBILE)\]\s*', '', normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r'^\s*(BE|FE|QA|MOBILE):\s*', '', normalized, flags=re.IGNORECASE)
+        normalized = re.sub(r'^\s*(BE|FE|QA|MOBILE)\s+', '', normalized, flags=re.IGNORECASE)
         normalized = ' '.join(normalized.split())
         normalized = normalized.lower()
         return normalized
@@ -1177,6 +1295,20 @@ class TeamBasedTaskGenerator:
             dependent_task.team == TaskTeam.FRONTEND):
             # API/service tasks block UI tasks
             if any(keyword in dep_summary for keyword in ['api', 'service', 'endpoint', 'data', 'backend']):
+                return True
+                
+        # Mobile depends on Backend for same feature (APIs)
+        if (dependency_task.team == TaskTeam.BACKEND and 
+            dependent_task.team == TaskTeam.MOBILE):
+            # API/service tasks block mobile tasks
+            if any(keyword in dep_summary for keyword in ['api', 'service', 'endpoint', 'data', 'backend']):
+                return True
+                
+        # Mobile may depend on Frontend for design patterns
+        if (dependency_task.team == TaskTeam.FRONTEND and 
+            dependent_task.team == TaskTeam.MOBILE):
+            # Frontend design patterns can inform mobile implementation
+            if any(keyword in dep_summary for keyword in ['ui', 'design', 'component', 'interface']):
                 return True
                 
         # QA depends on implementation tasks for same feature  
@@ -1483,7 +1615,8 @@ class TeamBasedTaskGenerator:
             team_mapping = {
                 'backend': TaskTeam.BACKEND,
                 'frontend': TaskTeam.FRONTEND,
-                'qa': TaskTeam.QA
+                'qa': TaskTeam.QA,
+                'mobile': TaskTeam.MOBILE
             }
             team = team_mapping.get(team_str, TaskTeam.BACKEND)
             

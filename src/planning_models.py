@@ -20,6 +20,7 @@ class TaskTeam(str, Enum):
     BACKEND = "backend"
     FRONTEND = "frontend" 
     QA = "qa"
+    MOBILE = "mobile"
     DEVOPS = "devops"
     FULLSTACK = "fullstack"
 
