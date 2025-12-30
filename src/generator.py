@@ -1194,7 +1194,8 @@ class DescriptionGenerator:
     def generate_stories_for_epic(
         self, 
         epic_key: str, 
-        dry_run: bool = True
+        dry_run: bool = True,
+        generate_test_cases: bool = False
     ) -> PlanningResult:
         """
         Generate only stories for an epic (without tasks)
@@ -1202,6 +1203,7 @@ class DescriptionGenerator:
         Args:
             epic_key: JIRA epic key
             dry_run: If True, don't actually create tickets
+            generate_test_cases: If True, generate test cases for stories (default: False)
             
         Returns:
             PlanningResult with generated stories
@@ -1221,7 +1223,8 @@ class DescriptionGenerator:
             epic_key=epic_key,
             create_missing_stories=True,
             create_missing_tasks=False,
-            dry_run=dry_run
+            dry_run=dry_run,
+            generate_test_cases=generate_test_cases
         )
         
         return self.planning_service.generate_stories_for_epic(context)
@@ -1235,7 +1238,8 @@ class DescriptionGenerator:
         max_task_cycle_days: float = 3.0,
         max_tasks_per_story: int = 10,
         custom_llm_client: Optional['LLMClient'] = None,
-        additional_context: Optional[str] = None
+        additional_context: Optional[str] = None,
+        generate_test_cases: bool = False
     ) -> PlanningResult:
         """
         Generate tasks for specific stories
@@ -1249,6 +1253,7 @@ class DescriptionGenerator:
             max_tasks_per_story: Maximum number of tasks per story
             custom_llm_client: Optional custom LLM client to use for generation
             additional_context: Optional additional context to guide task generation
+            generate_test_cases: If True, generate test cases for tasks (default: False)
             
         Returns:
             PlanningResult with generated tasks
@@ -1289,7 +1294,7 @@ class DescriptionGenerator:
             max_task_cycle_days=max_task_cycle_days,
             max_tasks_per_story=max_tasks_per_story,
             split_oversized_tasks=split_oversized_tasks,
-            generate_test_cases=True,
+            generate_test_cases=generate_test_cases,
             create_missing_stories=False,
             create_missing_tasks=True,
             dry_run=dry_run,

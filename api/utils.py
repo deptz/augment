@@ -66,8 +66,13 @@ def create_custom_llm_client_with_prompts(
         raise
 
 
-def extract_task_details_with_tests(planning_result) -> List[TaskDetail]:
-    """Helper function to extract task details with test cases from planning result"""
+def extract_task_details_with_tests(planning_result, generate_test_cases: bool = False) -> List[TaskDetail]:
+    """Helper function to extract task details with test cases from planning result
+    
+    Args:
+        planning_result: Planning result object
+        generate_test_cases: Whether to generate test cases if not already present (default: False)
+    """
     task_details = []
     generator = get_generator()
     
@@ -93,8 +98,8 @@ def extract_task_details_with_tests(planning_result) -> List[TaskDetail]:
                         )
                         for tc in task.test_cases
                     ]
-                elif generator and hasattr(generator, 'planning_service') and hasattr(task, 'key') and task.key:
-                    # Generate test cases if not already present (only for existing JIRA tasks)
+                elif generate_test_cases and generator and hasattr(generator, 'planning_service') and hasattr(task, 'key') and task.key:
+                    # Generate test cases if not already present (only for existing JIRA tasks) and if enabled
                     try:
                         from src.enhanced_test_generator import TestCoverageLevel
                         test_results = generator.planning_service.generate_task_tests(
@@ -136,8 +141,13 @@ def extract_task_details_with_tests(planning_result) -> List[TaskDetail]:
     return task_details
 
 
-def extract_story_details_with_tests(planning_result) -> List[StoryDetail]:
-    """Helper function to extract story details with test cases from planning result"""
+def extract_story_details_with_tests(planning_result, generate_test_cases: bool = False) -> List[StoryDetail]:
+    """Helper function to extract story details with test cases from planning result
+    
+    Args:
+        planning_result: Planning result object
+        generate_test_cases: Whether to generate test cases if not already present (default: False)
+    """
     story_details = []
     generator = get_generator()
     
@@ -171,8 +181,8 @@ def extract_story_details_with_tests(planning_result) -> List[StoryDetail]:
                         )
                         for tc in story.test_cases
                     ]
-                elif generator and hasattr(generator, 'planning_service') and hasattr(story, 'key') and story.key:
-                    # Generate test cases if not already present (only for existing JIRA stories)
+                elif generate_test_cases and generator and hasattr(generator, 'planning_service') and hasattr(story, 'key') and story.key:
+                    # Generate test cases if not already present (only for existing JIRA stories) and if enabled
                     try:
                         from src.enhanced_test_generator import TestCoverageLevel
                         test_results = generator.planning_service.generate_story_tests(
@@ -218,8 +228,8 @@ def extract_story_details_with_tests(planning_result) -> List[StoryDetail]:
                                 )
                                 for tc in task.test_cases
                             ]
-                        elif generator and hasattr(generator, 'planning_service'):
-                            # Generate test cases if not already present
+                        elif generate_test_cases and generator and hasattr(generator, 'planning_service'):
+                            # Generate test cases if not already present and if enabled
                             try:
                                 from src.enhanced_test_generator import TestCoverageLevel
                                 test_results = generator.planning_service.generate_task_tests(

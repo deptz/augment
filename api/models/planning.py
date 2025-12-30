@@ -79,6 +79,11 @@ class StoryGenerationRequest(BaseModel):
         description="LLM model to use (uses default for provider if not specified)",
         example="gpt-5-mini"
     )
+    generate_test_cases: bool = Field(
+        default=False,
+        description="Generate test cases for stories (default: false)",
+        example=False
+    )
 
 
 class TaskGenerationRequest(BaseModel):
@@ -129,6 +134,11 @@ class TaskGenerationRequest(BaseModel):
         default=None,
         description="Additional context for task generation (e.g., technical constraints, architecture decisions)",
         example="Use PostgreSQL for data storage. Follow REST API conventions. Implement rate limiting."
+    )
+    generate_test_cases: bool = Field(
+        default=False,
+        description="Generate test cases for tasks (default: false)",
+        example=False
     )
 
 

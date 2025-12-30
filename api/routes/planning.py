@@ -87,8 +87,8 @@ async def plan_epic_complete(request: EpicPlanRequest, current_user: str = Depen
         )
         
         # Convert to API response format
-        story_details = extract_story_details_with_tests(planning_result)
-        task_details = extract_task_details_with_tests(planning_result)
+        story_details = extract_story_details_with_tests(planning_result, generate_test_cases=request.generate_test_cases)
+        task_details = extract_task_details_with_tests(planning_result, generate_test_cases=request.generate_test_cases)
         
         response = PlanningResultResponse(
             epic_key=planning_result.epic_key,
@@ -173,6 +173,7 @@ async def generate_stories_for_epic(request: StoryGenerationRequest, current_use
                 dry_run=request.dry_run,
                 llm_model=request.llm_model,
                 llm_provider=request.llm_provider,
+                generate_test_cases=request.generate_test_cases,
                 _job_id=job_id
             )
             
@@ -196,12 +197,13 @@ async def generate_stories_for_epic(request: StoryGenerationRequest, current_use
         
         planning_result = generator.generate_stories_for_epic(
             epic_key=request.epic_key,
-            dry_run=request.dry_run
+            dry_run=request.dry_run,
+            generate_test_cases=request.generate_test_cases
         )
         
         # Convert to API response format
-        story_details = extract_story_details_with_tests(planning_result)
-        task_details = extract_task_details_with_tests(planning_result)
+        story_details = extract_story_details_with_tests(planning_result, generate_test_cases=request.generate_test_cases)
+        task_details = extract_task_details_with_tests(planning_result, generate_test_cases=request.generate_test_cases)
         
         response = PlanningResultResponse(
             epic_key=planning_result.epic_key,
@@ -300,6 +302,7 @@ async def generate_tasks_for_stories(request: TaskGenerationRequest, current_use
                 llm_model=request.llm_model,
                 llm_provider=request.llm_provider,
                 additional_context=request.additional_context,
+                generate_test_cases=request.generate_test_cases,
                 _job_id=job_id
             )
             
@@ -329,12 +332,13 @@ async def generate_tasks_for_stories(request: TaskGenerationRequest, current_use
             max_task_cycle_days=request.max_task_cycle_days,
             max_tasks_per_story=config.get_max_tasks_per_story(),
             custom_llm_client=custom_llm_client,
-            additional_context=request.additional_context
+            additional_context=request.additional_context,
+            generate_test_cases=request.generate_test_cases
         )
         
         # Convert to API response format
-        story_details = extract_story_details_with_tests(planning_result)
-        task_details = extract_task_details_with_tests(planning_result)
+        story_details = extract_story_details_with_tests(planning_result, generate_test_cases=request.generate_test_cases)
+        task_details = extract_task_details_with_tests(planning_result, generate_test_cases=request.generate_test_cases)
         
         response = PlanningResultResponse(
             epic_key=planning_result.epic_key,
@@ -451,11 +455,12 @@ async def generate_team_based_tasks(
             split_oversized_tasks=request.split_oversized_tasks,
             max_task_cycle_days=request.max_task_cycle_days,
             max_tasks_per_story=config.get_max_tasks_per_story(),
-            custom_llm_client=custom_llm_client
+            custom_llm_client=custom_llm_client,
+            generate_test_cases=request.generate_test_cases
         )
         
         # Convert to API response format
-        task_details = extract_task_details_with_tests(planning_result)
+        task_details = extract_task_details_with_tests(planning_result, generate_test_cases=request.generate_test_cases)
         
         response = PlanningResultResponse(
             epic_key=planning_result.epic_key,
@@ -629,9 +634,9 @@ async def sync_stories_from_prd(request: PRDStorySyncRequest, current_user: str 
             existing_ticket_action=request.existing_ticket_action
         )
         
-        # Convert to API response format
-        story_details = extract_story_details_with_tests(planning_result)
-        task_details = extract_task_details_with_tests(planning_result)
+        # Convert to API response format (PRD sync doesn't have generate_test_cases, default to False)
+        story_details = extract_story_details_with_tests(planning_result, generate_test_cases=False)
+        task_details = extract_task_details_with_tests(planning_result, generate_test_cases=False)
         
         response = PRDStorySyncResponse(
             epic_key=planning_result.epic_key,

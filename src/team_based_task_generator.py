@@ -57,7 +57,8 @@ class TeamBasedTaskGenerator:
                                     force_separation: bool = True,
                                     prd_content: Optional[Dict[str, Any]] = None,
                                     rfc_content: Optional[Dict[str, Any]] = None,
-                                    additional_context: Optional[str] = None) -> List[TaskPlan]:
+                                    additional_context: Optional[str] = None,
+                                    generate_test_cases: bool = False) -> List[TaskPlan]:
         """
         Generate tasks with proper team separation based on requirements
         
@@ -89,7 +90,8 @@ class TeamBasedTaskGenerator:
             # 2. Generate AI-powered task breakdown with team awareness
             ai_tasks = self._generate_ai_team_tasks(
                 story, story_type, max_cycle_days,
-                prd_content, rfc_content, additional_context
+                prd_content, rfc_content, additional_context,
+                generate_test_cases
             )
             logger.info(f"DEBUG: AI generated {len(ai_tasks)} tasks")
             
@@ -104,7 +106,7 @@ class TeamBasedTaskGenerator:
             else:
                 logger.info("DEBUG: AI generation failed - using pattern generation as fallback")
                 # 3. Generate pattern-based tasks as fallback
-                pattern_tasks = self._generate_pattern_team_tasks(story, story_type, complexity_analysis)
+                pattern_tasks = self._generate_pattern_team_tasks(story, story_type, complexity_analysis, generate_test_cases)
                 logger.info(f"DEBUG: Pattern generated {len(pattern_tasks)} tasks")
                 all_tasks = pattern_tasks
             
@@ -112,7 +114,7 @@ class TeamBasedTaskGenerator:
             
             # 4. Ensure proper team distribution (if needed)
             if force_separation:
-                all_tasks = self._ensure_team_separation(all_tasks, story, story_type)
+                all_tasks = self._ensure_team_separation(all_tasks, story, story_type, generate_test_cases)
                 logger.info(f"DEBUG: After team separation: {len(all_tasks)} tasks")
             
             # 5. Validate cycle times and split if needed (AI tasks will skip splitting)
@@ -134,7 +136,7 @@ class TeamBasedTaskGenerator:
         except Exception as e:
             logger.error(f"Error in team-separated task generation: {str(e)}")
             # Fallback to basic pattern-based generation
-            return self._generate_fallback_team_tasks(story)
+            return self._generate_fallback_team_tasks(story, generate_test_cases)
     
     def generate_team_separated_tasks_with_tests(self, 
                                                story: StoryPlan,
@@ -180,10 +182,11 @@ class TeamBasedTaskGenerator:
                 all_tasks = ai_tasks_with_tests
             else:
                 logger.info("Unified generation failed - falling back to separate generation")
-                # Fallback: Generate tasks first, then add tests separately
+                # Fallback: Generate tasks first (without tests), then add tests separately
                 all_tasks = self.generate_team_separated_tasks(
                     story, max_cycle_days, force_separation,
-                    prd_content, rfc_content, additional_context
+                    prd_content, rfc_content, additional_context,
+                    generate_test_cases=False  # Don't generate tests here, we'll add them explicitly
                 )
                 # Add test cases using fallback method
                 for task in all_tasks:
@@ -191,7 +194,7 @@ class TeamBasedTaskGenerator:
             
             # 3. Ensure proper team distribution if needed
             if force_separation:
-                all_tasks = self._ensure_team_separation(all_tasks, story, story_type)
+                all_tasks = self._ensure_team_separation(all_tasks, story, story_type, True)  # Always generate tests in unified mode
             
             # 4. Validate and set up dependencies
             validated_tasks = self._validate_and_split_tasks(all_tasks, max_cycle_days)
@@ -271,7 +274,8 @@ class TeamBasedTaskGenerator:
                               max_cycle_days: int,
                               prd_content: Optional[Dict[str, Any]] = None,
                               rfc_content: Optional[Dict[str, Any]] = None,
-                              additional_context: Optional[str] = None) -> List[TaskPlan]:
+                              additional_context: Optional[str] = None,
+                              generate_test_cases: bool = True) -> List[TaskPlan]:
         """Generate tasks using AI with team-awareness"""
         try:
             # Create team-aware prompt
@@ -303,7 +307,7 @@ class TeamBasedTaskGenerator:
             logger.info("=" * 80)
             
             # Parse response into team-assigned tasks
-            parsed_tasks = self._parse_team_task_response(response, story)
+            parsed_tasks = self._parse_team_task_response(response, story, generate_test_cases)
             
             if not parsed_tasks:
                 logger.error("DEBUG: AI task parsing returned empty list - falling back to pattern generation")
@@ -346,7 +350,7 @@ class TeamBasedTaskGenerator:
         
         return prompt
     
-    def _parse_team_task_response(self, response: str, story: StoryPlan) -> List[TaskPlan]:
+    def _parse_team_task_response(self, response: str, story: StoryPlan, generate_test_cases: bool = True) -> List[TaskPlan]:
         """Parse AI JSON response into team-assigned TaskPlan objects"""
         try:
             import json
@@ -400,7 +404,7 @@ class TeamBasedTaskGenerator:
                     team = TaskTeam.BACKEND
                 
                 # Create task plan from JSON data
-                task_plan = self._create_task_plan_from_json(task_dict, team, story)
+                task_plan = self._create_task_plan_from_json(task_dict, team, story, generate_test_cases)
                 if task_plan:
                     tasks.append(task_plan)
                     logger.info(f"DEBUG: Successfully created task: {task_plan.summary}")
@@ -419,7 +423,7 @@ class TeamBasedTaskGenerator:
             logger.error(f"DEBUG: Response was: {response[:500]}...")
             return []
     
-    def _create_task_plan_from_json(self, task_dict: Dict[str, Any], team: TaskTeam, story: StoryPlan) -> Optional[TaskPlan]:
+    def _create_task_plan_from_json(self, task_dict: Dict[str, Any], team: TaskTeam, story: StoryPlan, generate_test_cases: bool = True) -> Optional[TaskPlan]:
         """Create TaskPlan from JSON dictionary"""
         try:
             title = task_dict.get('title', f"{team.value.title()} Task")
@@ -469,7 +473,7 @@ class TeamBasedTaskGenerator:
             cycle_estimate = self._estimate_cycle_time_by_team(team, scope_description)
             
             # Create test cases based on team
-            test_cases = self._generate_team_test_cases(team, title)
+            test_cases = self._generate_team_test_cases(team, title, generate_test_cases)
             
             import uuid
             return TaskPlan(
@@ -491,7 +495,7 @@ class TeamBasedTaskGenerator:
             logger.error(f"Error creating TaskPlan from JSON: {str(e)}")
             return None
 
-    def _create_task_plan_from_dict(self, task_dict: Dict[str, Any], story: StoryPlan) -> Optional[TaskPlan]:
+    def _create_task_plan_from_dict(self, task_dict: Dict[str, Any], story: StoryPlan, generate_test_cases: bool = True) -> Optional[TaskPlan]:
         """Create TaskPlan from parsed dictionary (legacy method)"""
         try:
             # Create task scope
@@ -507,7 +511,7 @@ class TeamBasedTaskGenerator:
             cycle_estimate = self._estimate_cycle_time_by_team(task_dict['team'], scope_description)
             
             # Create test cases based on team
-            test_cases = self._generate_team_test_cases(task_dict['team'], task_dict.get('title', 'Task'))
+            test_cases = self._generate_team_test_cases(task_dict['team'], task_dict.get('title', 'Task'), generate_test_cases)
             
             import uuid
             return TaskPlan(
@@ -530,7 +534,8 @@ class TeamBasedTaskGenerator:
     def _generate_pattern_team_tasks(self, 
                                    story: StoryPlan, 
                                    story_type: StoryType,
-                                   complexity_analysis: Dict[str, str]) -> List[TaskPlan]:
+                                   complexity_analysis: Dict[str, str],
+                                   generate_test_cases: bool = True) -> List[TaskPlan]:
         """Generate pattern-based tasks with team separation"""
         tasks = []
         
@@ -550,7 +555,7 @@ class TeamBasedTaskGenerator:
                 )],
                 expected_outcomes=pattern['expected_outcomes'],
                 team=pattern['team'],
-                test_cases=self._generate_team_test_cases(pattern['team'], pattern['summary']),
+                test_cases=self._generate_team_test_cases(pattern['team'], pattern['summary'], generate_test_cases),
                 cycle_time_estimate=self._estimate_cycle_time_by_team(pattern['team'], pattern['scope_description']),
                 epic_key=story.epic_key,
                 story_key=getattr(story, 'key', None)
@@ -635,7 +640,8 @@ class TeamBasedTaskGenerator:
     def _ensure_team_separation(self, 
                                tasks: List[TaskPlan], 
                                story: StoryPlan, 
-                               story_type: StoryType) -> List[TaskPlan]:
+                               story_type: StoryType,
+                               generate_test_cases: bool = True) -> List[TaskPlan]:
         """Ensure tasks exist for teams that are needed based on requirements analysis"""
         existing_teams = {task.team for task in tasks}
         
@@ -648,7 +654,7 @@ class TeamBasedTaskGenerator:
             logger.info(f"Adding missing teams based on requirements analysis: {[team.value for team in missing_teams]}")
             for team in missing_teams:
                 # Add a basic task for the missing team
-                basic_task = self._create_basic_team_task(team, story, story_type)
+                basic_task = self._create_basic_team_task(team, story, story_type, generate_test_cases)
                 if basic_task:
                     tasks.append(basic_task)
                     logger.info(f"Added {team.value} task: {basic_task.summary}")
@@ -660,7 +666,8 @@ class TeamBasedTaskGenerator:
     def _create_basic_team_task(self, 
                               team: TaskTeam, 
                               story: StoryPlan, 
-                              story_type: StoryType) -> Optional[TaskPlan]:
+                              story_type: StoryType,
+                              generate_test_cases: bool = True) -> Optional[TaskPlan]:
         """Create a basic task for a missing team"""
         team_templates = {
             TaskTeam.BACKEND: {
@@ -708,7 +715,7 @@ class TeamBasedTaskGenerator:
             )],
             expected_outcomes=template['outcomes'],
             team=team,
-            test_cases=self._generate_team_test_cases(team, template['summary']),
+            test_cases=self._generate_team_test_cases(team, template['summary'], generate_test_cases),
             cycle_time_estimate=self._estimate_cycle_time_by_team(team, template['scope']),
             epic_key=story.epic_key,
             story_key=getattr(story, 'key', None)
@@ -749,8 +756,11 @@ class TeamBasedTaskGenerator:
             exceeds_limit=total_days > 3.0
         )
     
-    def _generate_team_test_cases(self, team: TaskTeam, task_summary: str) -> List[TestCase]:
+    def _generate_team_test_cases(self, team: TaskTeam, task_summary: str, generate_test_cases: bool = True) -> List[TestCase]:
         """Generate appropriate test cases based on team"""
+        if not generate_test_cases:
+            return []
+        
         if team == TaskTeam.QA:
             return [
                 TestCase(
@@ -927,7 +937,7 @@ class TeamBasedTaskGenerator:
                 )
             ]
     
-    def _generate_fallback_team_tasks(self, story: StoryPlan) -> List[TaskPlan]:
+    def _generate_fallback_team_tasks(self, story: StoryPlan, generate_test_cases: bool = True) -> List[TaskPlan]:
         """Generate basic fallback tasks when all else fails"""
         return [
             TaskPlan(
@@ -941,7 +951,7 @@ class TeamBasedTaskGenerator:
                 )],
                 expected_outcomes=["Backend services implemented"],
                 team=TaskTeam.BACKEND,
-                test_cases=self._generate_team_test_cases(TaskTeam.BACKEND, "Backend implementation"),
+                test_cases=self._generate_team_test_cases(TaskTeam.BACKEND, "Backend implementation", generate_test_cases),
                 cycle_time_estimate=self._estimate_cycle_time_by_team(TaskTeam.BACKEND, "backend implementation"),
                 epic_key=story.epic_key
             ),
@@ -956,7 +966,7 @@ class TeamBasedTaskGenerator:
                 )],
                 expected_outcomes=["Frontend implemented"],
                 team=TaskTeam.FRONTEND,
-                test_cases=self._generate_team_test_cases(TaskTeam.FRONTEND, "Frontend implementation"),
+                test_cases=self._generate_team_test_cases(TaskTeam.FRONTEND, "Frontend implementation", generate_test_cases),
                 cycle_time_estimate=self._estimate_cycle_time_by_team(TaskTeam.FRONTEND, "frontend implementation"),
                 epic_key=story.epic_key
             ),
@@ -971,7 +981,7 @@ class TeamBasedTaskGenerator:
                 )],
                 expected_outcomes=["Quality validated", "Test cases executed"],
                 team=TaskTeam.QA,
-                test_cases=self._generate_team_test_cases(TaskTeam.QA, "Quality assurance"),
+                test_cases=self._generate_team_test_cases(TaskTeam.QA, "Quality assurance", generate_test_cases),
                 cycle_time_estimate=self._estimate_cycle_time_by_team(TaskTeam.QA, "quality assurance"),
                 epic_key=story.epic_key
             )

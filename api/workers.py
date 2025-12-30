@@ -320,7 +320,8 @@ async def process_batch_tickets_worker(ctx, job_id: str, jql: str, max_results: 
 
 
 async def process_story_generation_worker(ctx, job_id: str, epic_key: str, dry_run: bool,
-                                         llm_model: Optional[str] = None, llm_provider: Optional[str] = None):
+                                         llm_model: Optional[str] = None, llm_provider: Optional[str] = None,
+                                         generate_test_cases: bool = False):
     """ARQ worker function for generating stories for an epic"""
     _initialize_services_if_needed()
     generator = get_generator()
@@ -345,13 +346,14 @@ async def process_story_generation_worker(ctx, job_id: str, epic_key: str, dry_r
         
         planning_result = generator.generate_stories_for_epic(
             epic_key=epic_key,
-            dry_run=dry_run
+            dry_run=dry_run,
+            generate_test_cases=generate_test_cases
         )
         
         # Convert to dict for storage
         from .routes.planning import extract_story_details_with_tests, extract_task_details_with_tests
-        story_details = extract_story_details_with_tests(planning_result)
-        task_details = extract_task_details_with_tests(planning_result)
+        story_details = extract_story_details_with_tests(planning_result, generate_test_cases=generate_test_cases)
+        task_details = extract_task_details_with_tests(planning_result, generate_test_cases=generate_test_cases)
         
         job.status = "completed"
         job.completed_at = datetime.now()
@@ -397,7 +399,8 @@ async def process_story_generation_worker(ctx, job_id: str, epic_key: str, dry_r
 async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str], epic_key: str,
                                         dry_run: bool, split_oversized_tasks: bool,
                                         max_task_cycle_days: float, llm_model: Optional[str] = None,
-                                        llm_provider: Optional[str] = None, additional_context: Optional[str] = None):
+                                        llm_provider: Optional[str] = None, additional_context: Optional[str] = None,
+                                        generate_test_cases: bool = False):
     """ARQ worker function for generating tasks for stories"""
     _initialize_services_if_needed()
     generator = get_generator()
@@ -432,12 +435,13 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
             max_task_cycle_days=max_task_cycle_days,
             max_tasks_per_story=config.get_max_tasks_per_story(),
             custom_llm_client=custom_llm_client,
-            additional_context=additional_context
+            additional_context=additional_context,
+            generate_test_cases=generate_test_cases
         )
         
         from .routes.planning import extract_story_details_with_tests, extract_task_details_with_tests
-        story_details = extract_story_details_with_tests(planning_result)
-        task_details = extract_task_details_with_tests(planning_result)
+        story_details = extract_story_details_with_tests(planning_result, generate_test_cases=generate_test_cases)
+        task_details = extract_task_details_with_tests(planning_result, generate_test_cases=generate_test_cases)
         
         job.status = "completed"
         job.completed_at = datetime.now()
@@ -617,8 +621,8 @@ async def process_prd_story_sync_worker(ctx, job_id: str, epic_key: str, prd_url
         
         # Convert to dict for storage
         from .routes.planning import extract_story_details_with_tests, extract_task_details_with_tests
-        story_details = extract_story_details_with_tests(planning_result)
-        task_details = extract_task_details_with_tests(planning_result)
+        story_details = extract_story_details_with_tests(planning_result, generate_test_cases=generate_test_cases)
+        task_details = extract_task_details_with_tests(planning_result, generate_test_cases=generate_test_cases)
         
         logger.info(f"Extracted {len(story_details)} story details and {len(task_details)} task details")
         

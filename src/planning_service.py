@@ -143,7 +143,7 @@ class PlanningService:
             gap_analysis = self.analysis_engine.analyze_epic_structure(context.epic_key)
             
             # Generate stories only
-            stories = self._generate_stories_for_epic_plan(context.epic_key, epic_description, gap_analysis, prd_content, rfc_content)
+            stories = self._generate_stories_for_epic_plan(context.epic_key, epic_description, gap_analysis, prd_content, rfc_content, context.generate_test_cases)
             
             epic_plan = EpicPlan(
                 epic_key=context.epic_key,
@@ -247,21 +247,25 @@ class PlanningService:
             
             # Check if tasks already have test cases from unified generation
             # If they do, skip redundant test generation to avoid multiple LLM calls
-            tasks_with_tests = [task for task in all_tasks if hasattr(task, 'test_cases') and task.test_cases]
-            tasks_without_tests = [task for task in all_tasks if not (hasattr(task, 'test_cases') and task.test_cases)]
-            
-            if tasks_without_tests:
-                # Only generate tests for tasks that don't already have them
-                logger.info(f"Generating enhanced test cases for {len(tasks_without_tests)} tasks (skipping {len(tasks_with_tests)} tasks that already have tests)...")
-                task_tests = self.generate_test_cases_for_tasks(
-                    tasks=tasks_without_tests,
-                    coverage_level=TestCoverageLevel.STANDARD,
-                    include_in_task_objects=True,
-                    custom_llm_client=custom_llm_client
-                )
-                logger.info(f"Enhanced test generation completed for {len(tasks_without_tests)} tasks")
+            # Only generate test cases if explicitly requested via context.generate_test_cases
+            if context.generate_test_cases:
+                tasks_with_tests = [task for task in all_tasks if hasattr(task, 'test_cases') and task.test_cases]
+                tasks_without_tests = [task for task in all_tasks if not (hasattr(task, 'test_cases') and task.test_cases)]
+                
+                if tasks_without_tests:
+                    # Only generate tests for tasks that don't already have them
+                    logger.info(f"Generating enhanced test cases for {len(tasks_without_tests)} tasks (skipping {len(tasks_with_tests)} tasks that already have tests)...")
+                    task_tests = self.generate_test_cases_for_tasks(
+                        tasks=tasks_without_tests,
+                        coverage_level=TestCoverageLevel.STANDARD,
+                        include_in_task_objects=True,
+                        custom_llm_client=custom_llm_client
+                    )
+                    logger.info(f"Enhanced test generation completed for {len(tasks_without_tests)} tasks")
+                else:
+                    logger.info(f"All {len(all_tasks)} tasks already have test cases from unified generation - skipping redundant test generation")
             else:
-                logger.info(f"All {len(all_tasks)} tasks already have test cases from unified generation - skipping redundant test generation")
+                logger.info(f"Test case generation disabled (generate_test_cases=False) - skipping test generation for {len(all_tasks)} tasks")
             
             # ✅ CRITICAL: Update JIRA with test cases for all created tasks
             if not context.dry_run:
@@ -357,14 +361,15 @@ class PlanningService:
         epic_description: str,
         gap_analysis: GapAnalysis,
         prd_content: Optional[Dict[str, Any]] = None,
-        rfc_content: Optional[Dict[str, Any]] = None
+        rfc_content: Optional[Dict[str, Any]] = None,
+        generate_test_cases: bool = False
     ) -> List[StoryPlan]:
         """Generate stories for an epic"""
         stories = []
         
         # Generate stories for missing areas
         for missing_area in gap_analysis.missing_stories:
-            story = self._generate_story_from_area(missing_area, epic_key, prd_content, rfc_content)
+            story = self._generate_story_from_area(missing_area, epic_key, prd_content, rfc_content, generate_test_cases)
             stories.append(story)
         
         return stories
@@ -374,7 +379,8 @@ class PlanningService:
         area: str,
         epic_key: str,
         prd_content: Optional[Dict[str, Any]] = None,
-        rfc_content: Optional[Dict[str, Any]] = None
+        rfc_content: Optional[Dict[str, Any]] = None,
+        generate_test_cases: bool = False
     ) -> StoryPlan:
         """Generate a story for a specific functional area using enhanced AI prompting"""
         logger.info(f"Generating story for area: {area}")
@@ -411,7 +417,7 @@ class PlanningService:
             )
             
             # Parse the LLM response into structured story
-            story = self._parse_story_response(response, area, epic_key)
+            story = self._parse_story_response(response, area, epic_key, generate_test_cases)
             if story:
                 logger.info(f"Successfully generated story for {area}: {story.summary}")
                 return story
@@ -420,9 +426,9 @@ class PlanningService:
             logger.warning(f"LLM story generation failed for {area}: {str(e)}, falling back to template")
         
         # Fallback to template-based generation
-        return self._generate_story_from_template(area, epic_key, prd_content, rfc_content)
+        return self._generate_story_from_template(area, epic_key, prd_content, rfc_content, generate_test_cases)
     
-    def _parse_story_response(self, response: str, area: str, epic_key: str) -> Optional[StoryPlan]:
+    def _parse_story_response(self, response: str, area: str, epic_key: str, generate_test_cases: bool = False) -> Optional[StoryPlan]:
         """Parse LLM response into StoryPlan structure"""
         try:
             # This would be enhanced with more sophisticated parsing
@@ -451,15 +457,17 @@ class PlanningService:
                 )
             ]
             
-            # Create test cases
-            test_cases = [
-                TestCase(
-                    title=f"Test {area} functionality",
-                    type="integration",
-                    description=f"Verify {area} works as expected",
-                    expected_result="Feature functions correctly"
-                )
-            ]
+            # Create test cases only if requested
+            test_cases = []
+            if generate_test_cases:
+                test_cases = [
+                    TestCase(
+                        title=f"Test {area} functionality",
+                        type="integration",
+                        description=f"Verify {area} works as expected",
+                        expected_result="Feature functions correctly"
+                    )
+                ]
             
             # Create cycle time estimate
             cycle_estimate = CycleTimeEstimate(
@@ -491,7 +499,8 @@ class PlanningService:
         area: str,
         epic_key: str,
         prd_content: Optional[Dict[str, Any]] = None,
-        rfc_content: Optional[Dict[str, Any]] = None
+        rfc_content: Optional[Dict[str, Any]] = None,
+        generate_test_cases: bool = False
     ) -> StoryPlan:
         """Generate a story using templates (fallback method)"""
         story_templates = {
@@ -540,14 +549,16 @@ class PlanningService:
             ]
         })
         
-        # Generate test cases
-        test_cases = [
-            TestCase(
-                title=f"Test {area} functionality",
-                description=f"Verify that {area.lower()} works correctly",
-                expected_result=f"{area} functions as designed"
-            )
-        ]
+        # Generate test cases only if requested
+        test_cases = []
+        if generate_test_cases:
+            test_cases = [
+                TestCase(
+                    title=f"Test {area} functionality",
+                    description=f"Verify that {area.lower()} works correctly",
+                    expected_result=f"{area} functions as designed"
+                )
+            ]
         
         return StoryPlan(
             summary=template["summary"],
@@ -558,8 +569,11 @@ class PlanningService:
         )
     
     def _generate_tasks_for_story_plan(self, story: StoryPlan, context: PlanningContext, custom_llm_client: Optional['LLMClient'] = None) -> List[TaskPlan]:
-        """Generate tasks with embedded test cases using unified generation approach"""
-        logger.info(f"Generating unified tasks with tests for story: {story.summary}")
+        """Generate tasks with optional embedded test cases"""
+        if context.generate_test_cases:
+            logger.info(f"Generating unified tasks with tests for story: {story.summary}")
+        else:
+            logger.info(f"Generating tasks without tests for story: {story.summary}")
         
         try:
             # Create a custom team task generator if custom LLM client is provided
@@ -567,20 +581,33 @@ class PlanningService:
                 from .team_based_task_generator import TeamBasedTaskGenerator
                 custom_team_generator = TeamBasedTaskGenerator(custom_llm_client, self.prompt_engine)
                 task_generator = custom_team_generator
-                logger.info("Using custom LLM client for unified task+test generation")
+                logger.info("Using custom LLM client for task generation")
             else:
                 task_generator = self.team_task_generator
             
-            # ✅ Use unified generation: tasks WITH embedded test cases
-            tasks = task_generator.generate_team_separated_tasks_with_tests(
-                story=story,
-                max_cycle_days=context.max_task_cycle_days,
-                test_coverage_level=TestCoverageLevel.STANDARD,  # Could be configurable via context
-                force_separation=True,
-                prd_content=context.prd_content,
-                rfc_content=context.rfc_content,
-                additional_context=context.additional_context
-            )
+            # Conditionally use unified generation with tests or task-only generation
+            if context.generate_test_cases:
+                # ✅ Use unified generation: tasks WITH embedded test cases
+                tasks = task_generator.generate_team_separated_tasks_with_tests(
+                    story=story,
+                    max_cycle_days=context.max_task_cycle_days,
+                    test_coverage_level=TestCoverageLevel.STANDARD,  # Could be configurable via context
+                    force_separation=True,
+                    prd_content=context.prd_content,
+                    rfc_content=context.rfc_content,
+                    additional_context=context.additional_context
+                )
+            else:
+                # Use task-only generation (no test cases)
+                tasks = task_generator.generate_team_separated_tasks(
+                    story=story,
+                    max_cycle_days=context.max_task_cycle_days,
+                    force_separation=True,
+                    prd_content=context.prd_content,
+                    rfc_content=context.rfc_content,
+                    additional_context=context.additional_context,
+                    generate_test_cases=False
+                )
             
             # Limit number of tasks per story
             limited_tasks = tasks[:context.max_tasks_per_story]
@@ -588,15 +615,21 @@ class PlanningService:
             # Count test cases for logging
             total_tests = sum(len(task.test_cases) for task in limited_tasks)
             
-            logger.info(f"Generated {len(limited_tasks)} unified tasks with {total_tests} embedded tests for story {story.summary}: "
-                       f"Backend: {len([t for t in limited_tasks if t.team == TaskTeam.BACKEND])}, "
-                       f"Frontend: {len([t for t in limited_tasks if t.team == TaskTeam.FRONTEND])}, "
-                       f"QA: {len([t for t in limited_tasks if t.team == TaskTeam.QA])}")
+            if context.generate_test_cases:
+                logger.info(f"Generated {len(limited_tasks)} unified tasks with {total_tests} embedded tests for story {story.summary}: "
+                           f"Backend: {len([t for t in limited_tasks if t.team == TaskTeam.BACKEND])}, "
+                           f"Frontend: {len([t for t in limited_tasks if t.team == TaskTeam.FRONTEND])}, "
+                           f"QA: {len([t for t in limited_tasks if t.team == TaskTeam.QA])}")
+            else:
+                logger.info(f"Generated {len(limited_tasks)} tasks without tests for story {story.summary}: "
+                           f"Backend: {len([t for t in limited_tasks if t.team == TaskTeam.BACKEND])}, "
+                           f"Frontend: {len([t for t in limited_tasks if t.team == TaskTeam.FRONTEND])}, "
+                           f"QA: {len([t for t in limited_tasks if t.team == TaskTeam.QA])}")
             
             return limited_tasks
             
         except Exception as e:
-            logger.error(f"Unified task+test generation failed for story {story.summary}: {str(e)}, using fallback")
+            logger.error(f"Task generation failed for story {story.summary}: {str(e)}, using fallback")
             # Fallback to separate generation
             return self._generate_fallback_tasks_with_tests(story, context, custom_llm_client)
     
@@ -622,33 +655,37 @@ class PlanningService:
                 additional_context=context.additional_context
             )
             
-            # Add test cases separately using enhanced test generator
-            for task in tasks:
-                try:
-                    task.test_cases = self.test_generator.generate_task_test_cases(
-                        task=task,
-                        coverage_level=TestCoverageLevel.STANDARD,
-                        technical_context=None
-                    )
-                    logger.info(f"Added {len(task.test_cases)} test cases to task: {task.summary}")
-                except Exception as test_e:
-                    logger.warning(f"Failed to generate test cases for task {task.summary}: {test_e}")
-                    # Use minimal fallback tests
-                    task.test_cases = [
-                        TestCase(
-                            title=f"Basic Test: {task.summary}",
-                            type="unit",
-                            description="Basic functionality test",
-                            expected_result="Basic functionality works",
-                            source="minimal_fallback"
+            # Add test cases separately only if requested
+            if context.generate_test_cases:
+                for task in tasks:
+                    try:
+                        task.test_cases = self.test_generator.generate_task_test_cases(
+                            task=task,
+                            coverage_level=TestCoverageLevel.STANDARD,
+                            technical_context=None
                         )
-                    ]
+                        logger.info(f"Added {len(task.test_cases)} test cases to task: {task.summary}")
+                    except Exception as test_e:
+                        logger.warning(f"Failed to generate test cases for task {task.summary}: {test_e}")
+                        # Use minimal fallback tests
+                        task.test_cases = [
+                            TestCase(
+                                title=f"Basic Test: {task.summary}",
+                                type="unit",
+                                description="Basic functionality test",
+                                expected_result="Basic functionality works",
+                                source="minimal_fallback"
+                            )
+                        ]
             
             # Limit tasks
             limited_tasks = tasks[:context.max_tasks_per_story]
-            total_tests = sum(len(task.test_cases) for task in limited_tasks)
+            total_tests = sum(len(task.test_cases) for task in limited_tasks) if context.generate_test_cases else 0
             
-            logger.info(f"Fallback generation completed: {len(limited_tasks)} tasks with {total_tests} test cases")
+            if context.generate_test_cases:
+                logger.info(f"Fallback generation completed: {len(limited_tasks)} tasks with {total_tests} test cases")
+            else:
+                logger.info(f"Fallback generation completed: {len(limited_tasks)} tasks without test cases")
             return limited_tasks
             
         except Exception as e:
