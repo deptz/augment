@@ -746,7 +746,7 @@ class DescriptionGenerator:
         for pr in pull_requests[:5]:  # Limit to 5
             title_line = f"- {pr.title}"
             if pr.code_changes and pr.code_changes.get('change_summary'):
-                summary = ', '.join(pr.code_changes['change_summary'])
+                summary = ', '.join(str(x) for x in pr.code_changes['change_summary'])
                 title_line += f" ({summary})"
             titles.append(title_line)
         
@@ -762,7 +762,7 @@ class DescriptionGenerator:
             first_line = commit.message.split('\n')[0]
             message_line = f"- {first_line}"
             if commit.code_changes and commit.code_changes.get('change_summary'):
-                summary = ', '.join(commit.code_changes['change_summary'])
+                summary = ', '.join(str(x) for x in commit.code_changes['change_summary'])
                 message_line += f" ({summary})"
             messages.append(message_line)
         
@@ -827,7 +827,7 @@ class DescriptionGenerator:
             
             if all_file_types:
                 file_types_list = list(all_file_types)[:5]  # Limit to 5
-                file_types_str = ', '.join(file_types_list)
+                file_types_str = ', '.join(str(x) for x in file_types_list)
                 if len(all_file_types) > 5:
                     file_types_str += f" and {len(all_file_types) - 5} more"
                 summary_parts.append(f"File types: {file_types_str}")
@@ -835,7 +835,7 @@ class DescriptionGenerator:
             # Add actual file names (limited to prevent prompt overflow)
             if all_files_changed:
                 files_list = list(all_files_changed)[:10]  # Limit to 10 files
-                files_str = ', '.join(files_list)
+                files_str = ', '.join(str(x) for x in files_list)
                 if len(all_files_changed) > 10:
                     files_str += f" and {len(all_files_changed) - 10} more files"
                 summary_parts.append(f"Affected files: {files_str}")
@@ -1004,7 +1004,7 @@ class DescriptionGenerator:
             
             # Add code changes summary if available
             if pr.code_changes and pr.code_changes.get('change_summary'):
-                summary = ', '.join(pr.code_changes['change_summary'])
+                summary = ', '.join(str(x) for x in pr.code_changes['change_summary'])
                 detail_line += f" (Changes: {summary})"
             
             # Add PR description if available and meaningful

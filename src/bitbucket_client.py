@@ -607,8 +607,8 @@ class BitbucketClient:
                 'deletions': file_deletions
             })
         
-        # Convert set to list for JSON serialization
-        analysis['file_types'] = list(analysis['file_types'])
+        # Convert set to list for JSON serialization, ensuring all items are strings
+        analysis['file_types'] = [str(ft) for ft in analysis['file_types']]
         
         # Generate summary
         total_files = len(analysis['files_changed'])
@@ -620,7 +620,7 @@ class BitbucketClient:
             
             # Add file type summary
             if analysis['file_types']:
-                file_types_str = ', '.join(analysis['file_types'][:5])  # Limit to 5 types
+                file_types_str = ', '.join(str(ft) for ft in analysis['file_types'][:5])  # Limit to 5 types
                 if len(analysis['file_types']) > 5:
                     file_types_str += f" and {len(analysis['file_types']) - 5} more"
                 analysis['change_summary'].append(f"File types: {file_types_str}")

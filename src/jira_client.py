@@ -38,16 +38,20 @@ class JiraClient:
     def _get_fields_list(self) -> str:
         """Get the list of fields to fetch from Jira API"""
         base_fields = ['key', 'summary', 'description', 'status', 'parent', 'assignee', 'created', 'updated', 'issuetype']
-        custom_fields = [self.prd_custom_field]
+        custom_fields = []
+        
+        # Only add custom fields that are not None and convert to string
+        if self.prd_custom_field:
+            custom_fields.append(str(self.prd_custom_field))
         
         if self.rfc_custom_field:
-            custom_fields.append(self.rfc_custom_field)
+            custom_fields.append(str(self.rfc_custom_field))
             
         if self.test_case_custom_field:
-            custom_fields.append(self.test_case_custom_field)
+            custom_fields.append(str(self.test_case_custom_field))
             
         if self.mandays_custom_field:
-            custom_fields.append(self.mandays_custom_field)
+            custom_fields.append(str(self.mandays_custom_field))
             
         return ','.join(base_fields + custom_fields)
     
