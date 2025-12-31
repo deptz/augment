@@ -306,7 +306,7 @@ async def create_tasks_for_stories(
                 processed_tickets=0,
                 successful_tickets=0,
                 failed_tickets=0,
-                ticket_keys=request.story_keys.copy()
+                story_keys=request.story_keys.copy()
             )
             
             # Register all story keys for duplicate prevention

@@ -410,7 +410,8 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
     try:
         job = _get_or_create_job(job_id, "task_generation", f"Generating tasks for {len(story_keys)} stories...")
         # Track all story keys for this job
-        job.ticket_keys = story_keys.copy()
+        job.ticket_key = epic_key
+        job.story_keys = story_keys.copy()
         
         if hasattr(ctx, 'job') and ctx.job.cancelled:
             job.status = "cancelled"
@@ -481,9 +482,12 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
             job.error = str(e)
             job.progress = {"message": f"Job failed: {str(e)}"}
             # Unregister all story keys on failure
-            if job.ticket_keys:
-                for story_key in job.ticket_keys:
+            if job.story_keys:
+                for story_key in job.story_keys:
                     unregister_ticket_job(story_key)
+            elif job.ticket_keys:
+                for ticket_key in job.ticket_keys:
+                    unregister_ticket_job(ticket_key)
         raise
 
 
@@ -498,11 +502,11 @@ async def process_test_generation_worker(ctx, job_id: str, test_type: str, epic_
     
     try:
         job = _get_or_create_job(job_id, "test_generation", f"Generating {test_type} tests...")
-        # Track the relevant ticket key based on test type
+        # Track the relevant ticket key and story key based on test type
         if task_key:
             job.ticket_key = task_key
         elif story_key:
-            job.ticket_key = story_key
+            job.story_key = story_key
         elif epic_key:
             job.ticket_key = epic_key
         
@@ -1109,7 +1113,7 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
     
     try:
         job = _get_or_create_job(job_id, "story_coverage", f"Analyzing coverage for story {story_key}...")
-        job.ticket_key = story_key
+        job.story_key = story_key
         
         # Check if cancelled
         if hasattr(ctx, 'job') and ctx.job.cancelled:
@@ -1372,7 +1376,7 @@ async def process_task_creation_worker(ctx, job_id: str, story_keys: List[str], 
     
     try:
         job = _get_or_create_job(job_id, "task_creation", f"Creating tasks for {len(story_keys)} stories...")
-        job.ticket_keys = story_keys.copy()
+        job.story_keys = story_keys.copy()
         
         if hasattr(ctx, 'job') and ctx.job.cancelled:
             job.status = "cancelled"
@@ -1467,9 +1471,12 @@ async def process_task_creation_worker(ctx, job_id: str, story_keys: List[str], 
             job.error = str(e)
             job.progress = {"message": f"Job failed: {str(e)}"}
             # Unregister all story keys on failure
-            if job.ticket_keys:
-                for story_key in job.ticket_keys:
+            if job.story_keys:
+                for story_key in job.story_keys:
                     unregister_ticket_job(story_key)
+            elif job.ticket_keys:
+                for ticket_key in job.ticket_keys:
+                    unregister_ticket_job(ticket_key)
         raise
 
 

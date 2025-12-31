@@ -1194,7 +1194,7 @@ async def bulk_update_stories(
                 processed_tickets=0,
                 successful_tickets=0,
                 failed_tickets=0,
-                ticket_keys=[item.story_key for item in request.stories]
+                story_keys=[item.story_key for item in request.stories]
             )
 
             redis_pool = await get_redis_pool()
@@ -1319,7 +1319,7 @@ async def bulk_create_tasks(
                 processed_tickets=0,
                 successful_tickets=0,
                 failed_tickets=0,
-                ticket_keys=story_keys
+                story_keys=story_keys
             )
             
             # Register all story keys for duplicate prevention

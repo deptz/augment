@@ -80,7 +80,7 @@ async def analyze_story_coverage(
                 processed_tickets=0,
                 successful_tickets=0,
                 failed_tickets=0,
-                ticket_key=request.story_key
+                story_key=request.story_key
             )
             
             # Register story key for duplicate prevention

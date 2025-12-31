@@ -4,7 +4,7 @@ Endpoints for job tracking and status
 """
 from fastapi import APIRouter, HTTPException, Query, Depends
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Literal
 import logging
 
 from ..models.generation import JobStatus
@@ -134,9 +134,11 @@ async def _reconstruct_job_from_redis(job_id: str) -> Optional[JobStatus]:
             else:
                 progress_msg = "Job status unknown"
             
-            # Extract ticket keys
-            ticket_key = kwargs.get('ticket_key') or kwargs.get('story_key') or kwargs.get('epic_key')
-            ticket_keys = kwargs.get('story_keys') or (kwargs.get('ticket_keys') if 'ticket_keys' in kwargs else None)
+            # Extract ticket keys and story keys separately
+            ticket_key = kwargs.get('ticket_key') or kwargs.get('epic_key')
+            ticket_keys = kwargs.get('ticket_keys')
+            story_key = kwargs.get('story_key')
+            story_keys = kwargs.get('story_keys')
             
             # Only use arq_results if it's a valid dict (for successful jobs)
             # For failed jobs, arq_results contains the exception object, not actual results
@@ -151,12 +153,14 @@ async def _reconstruct_job_from_redis(job_id: str) -> Optional[JobStatus]:
                 results=results_for_job,
                 started_at=start_time if start_time else enqueue_time,
                 completed_at=finish_time if status in ["completed", "failed", "cancelled"] else None,
-                processed_tickets=1 if job_type in ['single', 'story_coverage'] else (len(ticket_keys) if ticket_keys else 0),
+                processed_tickets=1 if job_type in ['single', 'story_coverage'] else (len(story_keys) if story_keys else (len(ticket_keys) if ticket_keys else 0)),
                 successful_tickets=1 if status == "completed" and job_type in ['single', 'story_coverage'] else 0,
                 failed_tickets=1 if status == "failed" and job_type in ['single', 'story_coverage'] else 0,
                 error=error,
                 ticket_key=ticket_key,
-                ticket_keys=ticket_keys
+                ticket_keys=ticket_keys,
+                story_key=story_key,
+                story_keys=story_keys
             )
             
             # Store in memory for future requests
@@ -206,6 +210,12 @@ async def _reconstruct_job_from_redis(job_id: str) -> Optional[JobStatus]:
                 # For failed jobs, arq_results contains the exception object, not actual results
                 results_for_job = arq_results if isinstance(arq_results, dict) else None
                 
+                # Extract ticket keys and story keys separately
+                ticket_key = kwargs.get('ticket_key') or kwargs.get('epic_key')
+                ticket_keys = kwargs.get('ticket_keys')
+                story_key = kwargs.get('story_key')
+                story_keys = kwargs.get('story_keys')
+                
                 # Reconstruct JobStatus
                 reconstructed_job = JobStatus(
                     job_id=job_id,
@@ -215,12 +225,14 @@ async def _reconstruct_job_from_redis(job_id: str) -> Optional[JobStatus]:
                     results=results_for_job,
                     started_at=job_result.start_time if job_result.start_time else job_result.enqueue_time,
                     completed_at=job_result.finish_time,
-                    processed_tickets=1 if job_type in ['single', 'story_coverage'] else 0,
+                    processed_tickets=1 if job_type in ['single', 'story_coverage'] else (len(story_keys) if story_keys else (len(ticket_keys) if ticket_keys else 0)),
                     successful_tickets=1 if job_result.success else 0,
                     failed_tickets=0 if job_result.success else 1,
                     error=str(job_result.result) if not job_result.success and job_result.result else None,
-                    ticket_key=kwargs.get('ticket_key') or kwargs.get('story_key') or kwargs.get('epic_key'),
-                    ticket_keys=kwargs.get('story_keys')
+                    ticket_key=ticket_key,
+                    ticket_keys=ticket_keys,
+                    story_key=story_key,
+                    story_keys=story_keys
                 )
                 
                 # Store in memory for future requests
@@ -271,10 +283,16 @@ async def get_job_status(job_id: str, current_user: str = Depends(get_current_us
 @router.get("/jobs",
          tags=["Jobs"],
          summary="List all jobs",
-         description="List all background jobs with their status. Filter by status or job_type.")
+         description="List all background jobs with their status. Filter by status, job_type, job_id, ticket_key, or story_key. Sort by any field with ascending or descending order.")
 async def list_jobs(
     status: Optional[str] = Query(None, description="Filter by job status (started, processing, completed, failed, cancelled)"),
-    job_type: Optional[str] = Query(None, description="Filter by job type (batch, single, story_coverage, story_generation, task_generation, test_generation, prd_story_sync)"),
+    job_type: Optional[str] = Query(None, description="Filter by job type (batch, single, story_coverage, story_generation, task_generation, test_generation, prd_story_sync, sprint_planning, timeline_planning, bulk_story_update, bulk_task_creation, epic_creation, story_creation, task_creation)"),
+    job_id: Optional[str] = Query(None, description="Filter by job ID (exact match)"),
+    ticket_key: Optional[str] = Query(None, description="Filter by ticket key (matches ticket_key field or ticket_keys list)"),
+    story_key: Optional[str] = Query(None, description="Filter by story key (matches story_key field or story_keys list)"),
+    sort_by: Optional[Literal["started_at", "completed_at", "status", "job_type", "job_id", "processed_tickets", "successful_tickets", "failed_tickets"]] = Query("started_at", description="Field to sort by (started_at, completed_at, status, job_type, job_id, processed_tickets, successful_tickets, failed_tickets)"),
+    sort_order: Optional[Literal["asc", "desc"]] = Query("desc", description="Sort order (asc for ascending, desc for descending)"),
+    offset: Optional[int] = Query(0, ge=0, description="Number of jobs to skip for pagination"),
     limit: int = Query(50, ge=1, le=200, description="Maximum number of jobs to return"),
     current_user: str = Depends(get_current_user)
 ):
@@ -313,18 +331,57 @@ async def list_jobs(
     if job_type:
         job_list = [job for job in job_list if job.job_type == job_type]
     
-    # Sort by start time (most recent first)
-    # Normalize datetimes to UTC-aware for comparison
-    job_list.sort(key=lambda x: _normalize_datetime(x.started_at) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
+    # Filter by job_id if provided
+    if job_id:
+        job_list = [job for job in job_list if job.job_id == job_id]
     
-    # Apply limit
-    job_list = job_list[:limit]
+    # Filter by ticket_key if provided
+    if ticket_key:
+        job_list = [job for job in job_list if 
+                   job.ticket_key == ticket_key or 
+                   (job.ticket_keys and ticket_key in job.ticket_keys)]
+    
+    # Filter by story_key if provided
+    if story_key:
+        job_list = [job for job in job_list if 
+                   job.story_key == story_key or 
+                   (job.story_keys and story_key in job.story_keys)]
+    
+    # Sort by specified field
+    reverse = sort_order == "desc"
+    
+    if sort_by == "started_at":
+        # Normalize datetimes to UTC-aware for comparison
+        job_list.sort(key=lambda x: _normalize_datetime(x.started_at) or datetime.min.replace(tzinfo=timezone.utc), reverse=reverse)
+    elif sort_by == "completed_at":
+        # For completed_at, None values should go to the end (or beginning depending on sort order)
+        job_list.sort(key=lambda x: _normalize_datetime(x.completed_at) or (datetime.max.replace(tzinfo=timezone.utc) if reverse else datetime.min.replace(tzinfo=timezone.utc)), reverse=reverse)
+    elif sort_by in ["status", "job_type", "job_id"]:
+        # String fields - handle None values
+        job_list.sort(key=lambda x: getattr(x, sort_by, "") or "", reverse=reverse)
+    elif sort_by in ["processed_tickets", "successful_tickets", "failed_tickets"]:
+        # Integer fields
+        job_list.sort(key=lambda x: getattr(x, sort_by, 0), reverse=reverse)
+    else:
+        # Fallback to started_at if invalid sort_by (shouldn't happen due to Literal type, but just in case)
+        job_list.sort(key=lambda x: _normalize_datetime(x.started_at) or datetime.min.replace(tzinfo=timezone.utc), reverse=reverse)
+    
+    # Apply offset and limit for pagination
+    total_count = len(job_list)
+    job_list = job_list[offset:offset + limit]
     
     return {
         "jobs": job_list,
-        "total": len(job_list),
+        "total": total_count,
+        "offset": offset,
+        "limit": limit,
         "filtered_by_status": status,
-        "filtered_by_job_type": job_type
+        "filtered_by_job_type": job_type,
+        "filtered_by_job_id": job_id,
+        "filtered_by_ticket_key": ticket_key,
+        "filtered_by_story_key": story_key,
+        "sorted_by": sort_by,
+        "sort_order": sort_order
     }
 
 
@@ -377,13 +434,18 @@ async def cancel_job(job_id: str, current_user: str = Depends(get_current_user))
         job.completed_at = datetime.now()
         job.progress = {"message": "Job was cancelled by user"}
         
-        # Unregister ticket keys when job is cancelled
+        # Unregister ticket keys and story keys when job is cancelled
         from ..dependencies import unregister_ticket_job
         if job.ticket_key:
             unregister_ticket_job(job.ticket_key)
         if job.ticket_keys:
             for ticket_key in job.ticket_keys:
                 unregister_ticket_job(ticket_key)
+        if job.story_key:
+            unregister_ticket_job(job.story_key)
+        if job.story_keys:
+            for story_key in job.story_keys:
+                unregister_ticket_job(story_key)
         
         return {"message": f"Job {job_id} cancelled successfully", "status": "cancelled"}
     except Exception as e:
