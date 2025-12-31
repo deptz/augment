@@ -16,8 +16,9 @@ logger = logging.getLogger(__name__)
 class WorkerSettings:
     """ARQ worker configuration"""
     redis_settings = None  # Will be set at startup
-    max_jobs = 10
-    job_timeout = 3600  # 1 hour
+    max_jobs = 10  # Default, will be overridden by config
+    job_timeout = 3600  # Default 1 hour, will be overridden by config
+    keep_result = 3600  # Default 1 hour, will be overridden by config
 
 
 def _initialize_services_if_needed():

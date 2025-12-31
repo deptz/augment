@@ -79,6 +79,13 @@ redis:
   password: ${REDIS_PASSWORD:}  # Redis password (optional, leave empty if no password)
   database: ${REDIS_DB:0}  # Redis database number (0-15)
 
+# Worker Configuration
+# ARQ worker process settings
+worker:
+  max_jobs: ${WORKER_MAX_JOBS:10}  # Maximum concurrent jobs per worker
+  job_timeout: ${WORKER_JOB_TIMEOUT:3600}  # Job timeout in seconds (1 hour)
+  keep_result: ${WORKER_KEEP_RESULT:3600}  # How long to keep job results in Redis in seconds (1 hour)
+
 # Sprint Planning Configuration
 sprint_planning:
   default_sprint_duration_days: ${SPRINT_DURATION_DAYS:14}  # Default sprint length in days

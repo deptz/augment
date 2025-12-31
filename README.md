@@ -339,6 +339,13 @@ REDIS_PASSWORD=
 REDIS_DB=0
 ```
 
+**Worker Configuration (Optional):**
+```bash
+WORKER_MAX_JOBS=10  # Maximum concurrent jobs per worker instance
+WORKER_JOB_TIMEOUT=3600  # Job timeout in seconds (1 hour)
+WORKER_KEEP_RESULT=3600  # How long to keep job results in Redis in seconds (1 hour)
+```
+
 **LLM Advanced Settings (Optional):**
 ```bash
 LLM_SYSTEM_PROMPT=You are a technical documentation assistant...  # Custom system prompt
@@ -814,6 +821,14 @@ Augment supports asynchronous background processing for all generation endpoints
 python run_worker.py
 ```
 
+**Worker Configuration:**
+The worker can be configured via `config.yaml` or environment variables:
+- `max_jobs`: Maximum concurrent jobs per worker (default: 10)
+- `job_timeout`: Job timeout in seconds (default: 3600)
+- `keep_result`: How long to keep job results in Redis in seconds (default: 3600)
+
+You can run multiple worker instances for increased throughput. Each worker instance will process jobs independently from the shared Redis queue. The total concurrent job capacity is `max_jobs × number_of_workers`.
+
 **Use Async Mode:**
 ```bash
 # Single ticket generation (async)
@@ -895,6 +910,13 @@ For more details, see [Background Jobs Documentation](docs/api/API_DOCUMENTATION
    - Ensure `run_worker.py` is running in a separate terminal
    - Check worker logs for errors
    - Verify Redis connection from worker process
+   - Check worker configuration: `max_jobs`, `job_timeout`, and `keep_result` settings
+
+10. **Jobs processing slowly or timing out**
+   - Increase `WORKER_MAX_JOBS` to allow more concurrent jobs per worker
+   - Increase `WORKER_JOB_TIMEOUT` if jobs are timing out before completion
+   - Run multiple worker instances for increased throughput
+   - Check Redis performance and connection
 
 10. **Duplicate request rejected (409 Conflict)**
     - This is expected behavior - the ticket is already being processed

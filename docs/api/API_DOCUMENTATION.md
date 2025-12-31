@@ -472,6 +472,28 @@ All generation endpoints support asynchronous background processing using ARQ (a
    python run_worker.py
    ```
 
+3. **Configure Worker Settings (Optional):**
+   
+   Worker configuration can be set in `config.yaml` or via environment variables:
+   
+   ```yaml
+   # config.yaml
+   worker:
+     max_jobs: 10  # Maximum concurrent jobs per worker
+     job_timeout: 3600  # Job timeout in seconds (1 hour)
+     keep_result: 3600  # How long to keep job results in Redis (1 hour)
+   ```
+   
+   Or via environment variables:
+   ```bash
+   WORKER_MAX_JOBS=10
+   WORKER_JOB_TIMEOUT=3600
+   WORKER_KEEP_RESULT=3600
+   ```
+   
+   **Multiple Workers:**
+   You can run multiple worker instances for increased throughput. Each worker processes jobs independently from the shared Redis queue. Total concurrent capacity = `max_jobs × number_of_workers`.
+
 ### Supported Endpoints
 
 All these endpoints support `async_mode: true` parameter:
@@ -2122,8 +2144,10 @@ Get all issues in a sprint
 3. **Large Batches**: For very large batches, consider processing in smaller chunks or use async mode
 4. **Redis Connection Errors**: Verify Redis is running (`redis-cli ping`) and check `REDIS_HOST`, `REDIS_PORT` in `.env`
 5. **Background Jobs Not Processing**: Ensure `run_worker.py` is running in a separate terminal
-6. **Authentication Issues**: Verify password hash was generated correctly and environment variables are set
-7. **Model Selection Errors**: Check `/models` endpoint for available models and verify API keys are set
+6. **Jobs Processing Slowly**: Increase `WORKER_MAX_JOBS` to allow more concurrent jobs, or run multiple worker instances
+7. **Job Timeouts**: Increase `WORKER_JOB_TIMEOUT` if jobs are timing out before completion
+8. **Authentication Issues**: Verify password hash was generated correctly and environment variables are set
+9. **Model Selection Errors**: Check `/models` endpoint for available models and verify API keys are set
 
 ### Error Responses
 
@@ -2169,7 +2193,7 @@ For production deployment, consider:
 7. **Job Persistence**: Jobs are stored in Redis and persist across restarts
 8. **Worker Process**: Run `run_worker.py` as a systemd service or in a container
 9. **Redis High Availability**: Use Redis Sentinel or Cluster for production
-10. **Scaling**: Run multiple worker processes for parallel job processing
+10. **Scaling**: Run multiple worker processes for parallel job processing. Configure `max_jobs` per worker to control concurrency. Total capacity = `max_jobs × number_of_workers`
 
 ---
 

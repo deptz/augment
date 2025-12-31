@@ -53,7 +53,22 @@ async def main():
             database=int(redis_config.get('database', os.getenv('REDIS_DB', 0)))
         )
         
+        # Load worker config from _config dict
+        worker_config = config._config.get('worker', {}) if hasattr(config, '_config') else {}
+        
+        # Set worker settings with precedence: env var -> config.yaml -> default
+        WorkerSettings.max_jobs = int(
+            os.getenv('WORKER_MAX_JOBS', worker_config.get('max_jobs', WorkerSettings.max_jobs))
+        )
+        WorkerSettings.job_timeout = int(
+            os.getenv('WORKER_JOB_TIMEOUT', worker_config.get('job_timeout', WorkerSettings.job_timeout))
+        )
+        WorkerSettings.keep_result = int(
+            os.getenv('WORKER_KEEP_RESULT', worker_config.get('keep_result', WorkerSettings.keep_result))
+        )
+        
         logger.info(f"Starting ARQ worker with Redis: {WorkerSettings.redis_settings.host}:{WorkerSettings.redis_settings.port}")
+        logger.info(f"Worker configuration: max_jobs={WorkerSettings.max_jobs}, job_timeout={WorkerSettings.job_timeout}s, keep_result={WorkerSettings.keep_result}s")
         
         # Create worker with all worker functions
         worker = Worker(
@@ -76,7 +91,7 @@ async def main():
             redis_settings=WorkerSettings.redis_settings,
             max_jobs=WorkerSettings.max_jobs,
             job_timeout=WorkerSettings.job_timeout,
-            keep_result=3600  # Keep results for 1 hour
+            keep_result=WorkerSettings.keep_result
         )
         
         logger.info("ARQ worker started. Waiting for jobs...")
