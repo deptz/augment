@@ -14,6 +14,9 @@ from .routes import api_router
 
 logger = logging.getLogger(__name__)
 
+# Import Config for CORS configuration (needed at module level)
+from src.config import Config
+
 # Create FastAPI app
 app = FastAPI(
     title="Augment",
@@ -34,21 +37,41 @@ app = FastAPI(
 )
 
 # Configure CORS
-# More permissive for development - allows all localhost origins
-cors_origins = [
-    "http://localhost:5173",  # Vite default dev server
-    "http://localhost:3000",  # Common React/Next.js dev server
-    "http://127.0.0.1:5173",
-    "http://127.0.0.1:3000",
-    "https://augment.triwibowo.com"
-]
-
-# Allow all localhost ports for development (add more if needed)
-for port in [5173, 3000, 5174, 5175, 5176, 5177, 5178, 5179, 8080, 8081, 5000, 5001, 4000, 4001, 4002, 4003]:
-    cors_origins.extend([
-        f"http://localhost:{port}",
-        f"http://127.0.0.1:{port}"
-    ])
+# Try to read from config, fallback to default hardcoded origins
+try:
+    config = Config()
+    cors_origins = config.get_cors_origins()
+    if cors_origins:
+        logger.info(f"CORS: Using {len(cors_origins)} configured origins from config.yaml")
+    else:
+        # Fallback to default hardcoded origins
+        cors_origins = [
+            "http://localhost:5173",  # Vite default dev server
+            "http://localhost:3000",  # Common React/Next.js dev server
+            "http://127.0.0.1:5173",
+            "http://127.0.0.1:3000",
+        ]
+        # Allow all localhost ports for development (add more if needed)
+        for port in [5173, 3000, 5174, 5175, 5176, 5177, 5178, 5179, 8080, 8081, 5000, 5001, 4000, 4001, 4002, 4003]:
+            cors_origins.extend([
+                f"http://localhost:{port}",
+                f"http://127.0.0.1:{port}"
+            ])
+        logger.info(f"CORS: Using default {len(cors_origins)} hardcoded origins (no CORS config found)")
+except Exception as e:
+    # If config loading fails, use default hardcoded origins
+    logger.warning(f"CORS: Failed to load config, using default origins: {e}")
+    cors_origins = [
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
+    ]
+    for port in [5173, 3000, 5174, 5175, 5176, 5177, 5178, 5179, 8080, 8081, 5000, 5001, 4000, 4001, 4002, 4003]:
+        cors_origins.extend([
+            f"http://localhost:{port}",
+            f"http://127.0.0.1:{port}"
+        ])
 
 # CORS configuration - use permissive mode in development
 is_development = os.getenv("ENVIRONMENT", "development").lower() == "development"

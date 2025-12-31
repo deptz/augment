@@ -107,6 +107,37 @@ class Config:
     def auth(self) -> Dict[str, Any]:
         return self._config.get('auth', {})
     
+    @property
+    def cors(self) -> Dict[str, Any]:
+        return self._config.get('cors', {})
+    
+    def get_cors_origins(self) -> List[str]:
+        """
+        Get list of CORS allowed origins from configuration.
+        
+        Supports both 'allowed_origins' as comma-separated string or YAML list.
+        Returns empty list if not configured (for fallback to defaults).
+        """
+        cors_config = self.cors
+        
+        # Try allowed_origins
+        allowed_origins = cors_config.get('allowed_origins', '')
+        if allowed_origins:
+            # Handle comma-separated string
+            if isinstance(allowed_origins, str):
+                # Split by comma and strip whitespace
+                origins_list = [o.strip() for o in allowed_origins.split(',') if o.strip()]
+                if origins_list:
+                    return origins_list
+            # Handle list
+            elif isinstance(allowed_origins, list):
+                # Filter out empty strings
+                origins_list = [o for o in allowed_origins if o and isinstance(o, str)]
+                if origins_list:
+                    return origins_list
+        
+        return []
+    
     def get_supported_providers(self) -> List[str]:
         """Get list of supported LLM providers"""
         return ['openai', 'claude', 'gemini', 'kimi']

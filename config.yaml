@@ -71,6 +71,13 @@ auth:
   username: ${AUTH_USERNAME:admin}  # Username for API authentication
   password_hash: ${AUTH_PASSWORD_HASH:}  # SHA-256 hash of password (use generate_password_hash.py)
 
+# CORS Configuration (Optional)
+# Configure allowed origins for Cross-Origin Resource Sharing
+# Supports both comma-separated string and YAML list formats
+# If not configured, defaults to common localhost ports for development
+cors:
+  allowed_origins: ${CORS_ALLOWED_ORIGINS:}  # Comma-separated list of allowed origins (e.g., "http://localhost:5173,http://localhost:3000")
+
 # Redis Configuration
 # Used for ARQ background job queue
 redis:

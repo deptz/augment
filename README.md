@@ -376,6 +376,14 @@ AUTO_CREATE_SPRINTS=false  # Auto-create sprints if needed
 ENVIRONMENT=development  # Set to "production" for production mode
 ```
 
+**CORS Configuration (Optional):**
+```bash
+# Comma-separated list of allowed origins for Cross-Origin Resource Sharing
+# Example: http://localhost:5173,http://localhost:3000,https://example.com
+# If not set, defaults to common localhost ports for development
+CORS_ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000
+```
+
 **Team Member Database (Optional):**
 ```bash
 TEAM_MEMBER_DB_PATH=data/team_members.db  # Custom database path (absolute or relative to project root)

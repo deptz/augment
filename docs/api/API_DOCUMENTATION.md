@@ -189,6 +189,48 @@ JIRA_RFC_CUSTOM_FIELD=customfield_10002
      | jq '.[] | select(.name | contains("PRD") or contains("RFC")) | {id, name}'
    ```
 
+### CORS Configuration
+
+The API supports configurable Cross-Origin Resource Sharing (CORS) settings to control which origins can access the API.
+
+**Configuration Options:**
+
+1. **Via Environment Variable:**
+   ```bash
+   # .env
+   CORS_ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000,https://example.com
+   ```
+
+2. **Via config.yaml:**
+   ```yaml
+   cors:
+     allowed_origins: ${CORS_ALLOWED_ORIGINS:http://localhost:5173,http://localhost:3000}
+   ```
+   
+   Or as a YAML list:
+   ```yaml
+   cors:
+     allowed_origins:
+       - http://localhost:5173
+       - http://localhost:3000
+       - https://example.com
+   ```
+
+**Default Behavior:**
+- If `CORS_ALLOWED_ORIGINS` is not configured, the API defaults to allowing common localhost ports (5173, 3000, and others) for development
+- In development mode (`ENVIRONMENT=development`), all origins are allowed (`allow_origins=["*"]`)
+- In production mode (`ENVIRONMENT=production`), only configured origins are allowed
+
+**Format:**
+- Comma-separated string: `http://localhost:5173,http://localhost:3000`
+- YAML list: `- http://localhost:5173`
+
+**Best Practices:**
+- In production, explicitly configure allowed origins for security
+- Use environment variables for sensitive or environment-specific origins
+- Include both `http://localhost` and `http://127.0.0.1` variants if needed
+- Always use HTTPS for production origins
+
 ---
 
 ## Authentication
