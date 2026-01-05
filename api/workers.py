@@ -8,7 +8,7 @@ from typing import Optional, List, Dict, Any
 import logging
 from .dependencies import get_jira_client, get_llm_client, get_generator, jobs, get_config, unregister_ticket_job, get_active_job_for_ticket, register_ticket_job
 from .models.generation import TicketResponse, JobStatus
-from .utils import create_custom_llm_client
+from .utils import create_custom_llm_client, extract_story_details_with_tests, extract_task_details_with_tests
 
 logger = logging.getLogger(__name__)
 
@@ -352,7 +352,6 @@ async def process_story_generation_worker(ctx, job_id: str, epic_key: str, dry_r
         )
         
         # Convert to dict for storage
-        from .routes.planning import extract_story_details_with_tests, extract_task_details_with_tests
         story_details = extract_story_details_with_tests(planning_result, generate_test_cases=generate_test_cases)
         task_details = extract_task_details_with_tests(planning_result, generate_test_cases=generate_test_cases)
         
@@ -441,7 +440,6 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
             generate_test_cases=generate_test_cases
         )
         
-        from .routes.planning import extract_story_details_with_tests, extract_task_details_with_tests
         story_details = extract_story_details_with_tests(planning_result, generate_test_cases=generate_test_cases)
         task_details = extract_task_details_with_tests(planning_result, generate_test_cases=generate_test_cases)
         
@@ -625,9 +623,9 @@ async def process_prd_story_sync_worker(ctx, job_id: str, epic_key: str, prd_url
         job.progress = {"message": "Processing stories..."}
         
         # Convert to dict for storage
-        from .routes.planning import extract_story_details_with_tests, extract_task_details_with_tests
-        story_details = extract_story_details_with_tests(planning_result, generate_test_cases=generate_test_cases)
-        task_details = extract_task_details_with_tests(planning_result, generate_test_cases=generate_test_cases)
+        # PRD sync doesn't have generate_test_cases, default to False
+        story_details = extract_story_details_with_tests(planning_result, generate_test_cases=False)
+        task_details = extract_task_details_with_tests(planning_result, generate_test_cases=False)
         
         logger.info(f"Extracted {len(story_details)} story details and {len(task_details)} task details")
         
@@ -1132,7 +1130,6 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
         # Create custom LLM client if specified
         analysis_llm_client = llm_client
         if llm_provider or llm_model:
-            from .utils import create_custom_llm_client
             analysis_llm_client = create_custom_llm_client(llm_provider, llm_model)
         
         job.progress = {"message": "Initializing analyzer..."}
