@@ -38,10 +38,13 @@ This task implements user authentication to improve application security.
     mock_provider.model = "gpt-4o"
     mock_provider.system_prompt = "Test system prompt"
     mock_provider.temperature = 0.7
+    mock_provider.config_max_tokens = 2000  # Add config_max_tokens for token calculation
     
     client.provider = mock_provider
     client.provider_name = "openai"
+    client.default_max_tokens = 2000  # Add default_max_tokens for token calculation
     client.generate_description.return_value = mock_provider.generate_description.return_value
+    client.get_system_prompt.return_value = "Test system prompt"  # Add get_system_prompt mock
     
     return client
 
@@ -112,11 +115,12 @@ class TestDescriptionGenerator:
         assert result.error == "Failed to fetch ticket data"
     
     def test_process_ticket_should_not_update(self, description_generator, mock_jira_client, sample_ticket_data):
-        """Test skipping tickets that should not be updated"""
+        """Test skipping tickets that should not be updated (only in live mode, not dry_run)"""
         mock_jira_client.get_ticket.return_value = sample_ticket_data
         mock_jira_client.should_update_ticket.return_value = False
         
-        result = description_generator.process_ticket('TEST-123', dry_run=True)
+        # Skip logic only applies when dry_run=False (live mode)
+        result = description_generator.process_ticket('TEST-123', dry_run=False)
         
         assert result.success is False
         assert result.skipped_reason == "Ticket already has description"

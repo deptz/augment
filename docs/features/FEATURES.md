@@ -600,6 +600,88 @@ The PRD story sync integrates with:
 
 ---
 
+## Dynamic Additional Context Management
+
+### Overview
+
+Augment includes intelligent dynamic token-based management for `additional_context` parameters. Instead of using a fixed character limit, the system automatically calculates the optimal limit based on actual token usage and available budget, maximizing context utilization while respecting LLM token constraints.
+
+### Key Features
+
+- **Token-Based Calculation**: Dynamically calculates character limits based on actual token usage
+- **No Hard Caps**: Removes arbitrary character limits, trusting the dynamic calculation
+- **Provider-Aware**: Adapts to different LLM provider token limits (OpenAI: 2k-16k, Claude: 8k, Gemini: 8k, Kimi: 8k)
+- **Smart Budget Allocation**: Reserves 30% of tokens for response generation, allocates remaining to additional context
+- **Automatic Fallback**: Falls back to 1000 characters if token information is unavailable
+
+### How It Works
+
+1. **Token Counting**: System counts tokens used by base prompt (system prompt + user prompt without additional_context)
+2. **Budget Calculation**: Calculates remaining budget after reserving 30% for response generation
+3. **Character Conversion**: Converts remaining tokens to characters (3.5 chars per token, conservative estimate)
+4. **Dynamic Truncation**: Truncates additional_context to fit calculated limit with smart sentence boundaries
+
+### Token Calculation Formula
+
+```
+1. Get max_tokens (from config or provider default)
+2. Build base prompt without additional_context
+3. Count tokens: system_prompt + base_prompt
+4. Reserve 30% of max_tokens for response generation
+5. Calculate: remaining = (max_tokens - 30%) - tokens_used - 100 buffer
+6. Convert to chars: char_limit = remaining * 3.5
+7. Truncate additional_context to char_limit
+```
+
+### Examples
+
+**Large Token Budget (20k tokens):**
+- System prompt: ~500 tokens
+- Base prompt: ~3,000 tokens
+- Response reserve (30%): 6,000 tokens
+- Available for prompt: 14,000 tokens
+- Remaining for additional_context: ~10,400 tokens
+- **Character limit: ~36,400 characters**
+
+**Medium Token Budget (8k tokens):**
+- System prompt: ~500 tokens
+- Base prompt: ~2,000 tokens
+- Response reserve (30%): 2,400 tokens
+- Available for prompt: 5,600 tokens
+- Remaining for additional_context: ~3,000 tokens
+- **Character limit: ~10,500 characters**
+
+**Small Token Budget (2k tokens with large prompt):**
+- System prompt: ~500 tokens
+- Base prompt: ~1,000 tokens
+- Response reserve (30%): 600 tokens
+- Available for prompt: 1,400 tokens
+- Remaining for additional_context: 0 tokens (no room)
+- **Character limit: 0 characters** (gracefully handles no space)
+
+### Where It's Applied
+
+This dynamic limit calculation is applied to:
+- **Single Ticket Description Generation** (`POST /generate/single`)
+- **Task Breakdown Prompts** (`POST /plan/tasks/team-based`)
+- **Unified Task/Test Generation** (internal task generation with test cases)
+
+### Benefits
+
+1. **Maximizes Context**: Uses all available token budget for additional context
+2. **Prevents Overflow**: Automatically prevents token limit violations
+3. **Provider Flexibility**: Adapts to different LLM provider capabilities
+4. **No Manual Tuning**: Automatically adjusts based on prompt size and token budget
+
+### Configuration
+
+The system uses your configured `LLM_MAX_TOKENS` setting or provider defaults:
+- If `LLM_MAX_TOKENS` is set, uses that value
+- If not set, uses provider-specific defaults (OpenAI: 2000/16000 for GPT-5, Claude: 8000, Gemini: 8192, Kimi: 8000)
+- Falls back to 1000 characters if token information is unavailable
+
+---
+
 ## Related Documentation
 
 - [API Documentation](../api/API_DOCUMENTATION.md) - Complete API reference

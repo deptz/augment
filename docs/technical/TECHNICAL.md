@@ -201,6 +201,87 @@ Complete integration of RFC (Request for Comments) document support into the sys
 
 ---
 
+## Dynamic Token-Based Context Management
+
+### Overview
+
+The system implements intelligent token-based calculation for `additional_context` parameters, dynamically determining character limits based on actual token usage and available budget. This replaces fixed character limits with adaptive sizing that maximizes context utilization.
+
+### Implementation Details
+
+**Token Estimation:**
+- Uses conservative estimate: ~4 characters per token
+- Accounts for spaces, punctuation, and formatting
+- Can be enhanced with tiktoken library for more accuracy
+
+**Token Budget Calculation:**
+```python
+# 1. Count tokens used by base prompt
+system_tokens = estimate_tokens(system_prompt)
+prompt_tokens = estimate_tokens(base_prompt_without_additional)
+total_tokens_used = system_tokens + prompt_tokens
+
+# 2. Calculate available budget
+response_reserve = int(max_tokens * 0.3)  # 30% for response
+available_for_prompt = max_tokens - response_reserve
+
+# 3. Calculate remaining for additional_context
+remaining_tokens = available_for_prompt - total_tokens_used - 100  # 100 token buffer
+remaining_tokens = max(0, remaining_tokens)  # Ensure non-negative
+
+# 4. Convert to characters
+char_limit = int(remaining_tokens * 3.5)  # 3.5 chars per token
+char_limit = max(0, char_limit)  # No hard cap
+```
+
+**Max Tokens Resolution:**
+The system resolves `max_tokens` in this priority order:
+1. Per-request override (if provided)
+2. Config `LLM_MAX_TOKENS` setting
+3. Provider-specific defaults:
+   - OpenAI GPT-5: 16,000 tokens
+   - OpenAI other: 2,000 tokens
+   - Claude: 8,000 tokens
+   - Gemini: 8,192 tokens
+   - Kimi: 8,000 tokens
+4. Fallback: 1,000 characters (if unable to determine)
+
+### Applied To
+
+**DescriptionGenerator (`src/generator.py`):**
+- `_build_prompt()`: Counts tokens before building final prompt
+- `_format_additional_context()`: Accepts dynamic `char_limit` parameter
+- Used in single ticket description generation
+
+**TeamBasedTaskGenerator (`src/team_based_task_generator.py`):**
+- `_create_team_separation_prompt()`: Dynamic limit for team-based task breakdown
+- `_create_unified_task_test_prompt()`: Dynamic limit for unified task/test generation
+- Both methods use same token calculation logic
+
+### Benefits
+
+1. **Maximizes Context**: Uses all available token budget efficiently
+2. **Prevents Overflow**: Automatically prevents token limit violations
+3. **Provider Flexibility**: Adapts to different LLM capabilities
+4. **No Manual Tuning**: Automatically adjusts based on prompt complexity
+
+### Edge Cases Handled
+
+- **No Token Info**: Falls back to 1000 characters
+- **Negative Budget**: Returns 0 characters (no additional context)
+- **Very Large Budgets**: No hard cap, uses full calculated limit
+- **Small Budgets**: Gracefully reduces or eliminates additional context
+
+### Debug Logging
+
+The system includes comprehensive debug logging:
+- Token usage breakdown (system, prompt, total)
+- Remaining budget calculation
+- Final character limit applied
+- Truncation details when context is cut
+
+---
+
 ## Team Member Database
 
 ### Overview

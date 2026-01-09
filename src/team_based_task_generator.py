@@ -330,14 +330,68 @@ class TeamBasedTaskGenerator:
                                      prd_content: Optional[Dict[str, Any]] = None,
                                      rfc_content: Optional[Dict[str, Any]] = None,
                                      additional_context: Optional[str] = None) -> str:
-        """Create AI prompt for team-separated task generation"""
+        """Create AI prompt for team-separated task generation
+        
+        Uses dynamic token-based calculation for additional_context limit.
+        """
         acceptance_criteria_text = [ac.format_gwt() for ac in story.acceptance_criteria]
+        
+        # Get max_tokens for dynamic additional context limit
+        max_tokens = self._get_effective_max_tokens()
         
         # Get centralized template and format it
         template = Prompts.get_team_separation_prompt_template()
         document_context = self._format_document_context(prd_content, rfc_content, story_type) if prd_content or rfc_content else ""
-        additional_context_str = self._format_additional_context(additional_context) if additional_context else ""
         
+        # Build prompt WITHOUT additional_context first (use empty placeholder)
+        prompt_without_additional = template.format(
+            story_summary=story.summary,
+            story_description=story.description,
+            story_type=story_type.value,
+            max_cycle_days=max_cycle_days,
+            acceptance_criteria=chr(10).join(acceptance_criteria_text),
+            document_context=document_context,
+            additional_context=""  # Placeholder
+        )
+        
+        # Get system prompt for token counting
+        system_prompt = Prompts.get_team_task_system_prompt()
+        
+        # Count tokens used so far (system prompt + user prompt without additional_context)
+        system_tokens = self._estimate_tokens(system_prompt)
+        prompt_tokens = self._estimate_tokens(prompt_without_additional)
+        total_tokens_used = system_tokens + prompt_tokens
+        
+        logger.debug(f"Token usage (team separation): system={system_tokens}, prompt={prompt_tokens}, total={total_tokens_used}")
+        
+        # Calculate remaining budget for additional_context
+        if max_tokens is not None:
+            # Reserve 30% of max_tokens for response generation
+            response_reserve = int(max_tokens * 0.3)
+            available_for_prompt = max_tokens - response_reserve
+            
+            # Calculate remaining tokens for additional_context
+            remaining_tokens = available_for_prompt - total_tokens_used
+            
+            # Ensure we have at least some buffer (don't use 100% of available)
+            remaining_tokens = max(0, remaining_tokens - 100)  # 100 token buffer
+            
+            # Convert tokens to characters (3.5 chars per token, conservative)
+            char_limit = int(remaining_tokens * 3.5)
+            
+            # Ensure non-negative (no cap - trust the dynamic calculation)
+            char_limit = max(0, char_limit)
+            
+            logger.debug(f"Additional context budget (team separation): {remaining_tokens} tokens = ~{char_limit} chars (max_tokens={max_tokens}, available_for_prompt={available_for_prompt})")
+        else:
+            # Fallback to default if max_tokens not available
+            char_limit = 1000
+            logger.debug(f"Using default additional context limit: {char_limit} chars (max_tokens not available)")
+        
+        # Format additional_context with calculated limit
+        additional_context_str = self._format_additional_context(additional_context, char_limit=char_limit) if additional_context else ""
+        
+        # Build final prompt with properly sized additional_context
         prompt = template.format(
             story_summary=story.summary,
             story_description=story.description,
@@ -1489,17 +1543,77 @@ class TeamBasedTaskGenerator:
         else:
             return content[:max_length - 3] + "..."
     
-    def _format_additional_context(self, additional_context: str) -> str:
-        """Format additional context for the prompt"""
+    def _format_additional_context(self, additional_context: str, char_limit: int = 1000) -> str:
+        """Format additional context for the prompt
+        
+        Args:
+            additional_context: The additional context string
+            char_limit: Maximum characters allowed (calculated dynamically based on token budget)
+        """
         if not additional_context:
             return ""
         
-        # Truncate additional context to 1000 chars max
-        truncated_context = additional_context[:1000]
-        if len(additional_context) > 1000:
-            truncated_context += "... [truncated]"
+        # Truncate to calculated limit with smart boundary
+        if len(additional_context) > char_limit:
+            truncated_context = self._truncate_content_smart(additional_context, char_limit)
+            logger.debug(f"Truncated additional_context from {len(additional_context)} to {len(truncated_context)} chars (limit={char_limit})")
+        else:
+            truncated_context = additional_context
         
         return f"**ADDITIONAL CONTEXT:**\n{truncated_context}\n"
+    
+    def _estimate_tokens(self, text: str) -> int:
+        """Estimate token count from text (rough approximation)
+        
+        Uses ~4 characters per token as a conservative estimate.
+        For more accuracy, could use tiktoken library.
+        
+        Args:
+            text: Text to estimate tokens for
+            
+        Returns:
+            Estimated token count
+        """
+        if not text:
+            return 0
+        # Conservative estimate: 4 chars per token (accounts for spaces, punctuation)
+        return len(text) // 4
+    
+    def _get_effective_max_tokens(self) -> Optional[int]:
+        """Get effective max_tokens from llm_client config or provider defaults
+        
+        Returns:
+            Effective max_tokens from config or provider defaults, or None if unable to determine
+        """
+        try:
+            # Try to get from llm_client's default_max_tokens
+            if self.llm_client and hasattr(self.llm_client, 'default_max_tokens'):
+                if self.llm_client.default_max_tokens is not None:
+                    return self.llm_client.default_max_tokens
+            
+            # Fallback: try to get from provider
+            if self.llm_client and hasattr(self.llm_client, 'provider'):
+                provider = self.llm_client.provider
+                if hasattr(provider, 'config_max_tokens') and provider.config_max_tokens:
+                    return provider.config_max_tokens
+                
+                # Use provider-specific defaults
+                provider_name = self.llm_client.provider_name.lower() if hasattr(self.llm_client, 'provider_name') else ''
+                if provider_name == 'openai':
+                    model = provider.model.lower() if hasattr(provider, 'model') else ''
+                    if 'gpt-5' in model:
+                        return 16000
+                    return 2000
+                elif provider_name == 'claude':
+                    return 8000
+                elif provider_name == 'gemini':
+                    return 8192
+                elif provider_name == 'kimi':
+                    return 8000
+        except Exception as e:
+            logger.warning(f"Failed to get effective max_tokens: {e}")
+        
+        return None
     
     # =============================================================================
     # UNIFIED TASK + TEST GENERATION METHODS
@@ -1551,15 +1665,71 @@ class TeamBasedTaskGenerator:
                                        prd_content: Optional[Dict[str, Any]] = None,
                                        rfc_content: Optional[Dict[str, Any]] = None,
                                        additional_context: Optional[str] = None) -> str:
-        """Create comprehensive prompt for unified task and test generation"""
+        """Create comprehensive prompt for unified task and test generation
+        
+        Uses dynamic token-based calculation for additional_context limit.
+        """
         acceptance_criteria_text = [ac.format_gwt() for ac in story.acceptance_criteria]
         test_count = self._get_test_count_for_coverage(test_coverage_level)
+        
+        # Get max_tokens for dynamic additional context limit
+        max_tokens = self._get_effective_max_tokens()
         
         # Get centralized template and format it
         template = Prompts.get_unified_task_test_prompt_template()
         document_context = self._format_document_context(prd_content, rfc_content, story_type) if prd_content or rfc_content else ""
-        additional_context_str = self._format_additional_context(additional_context) if additional_context else ""
         
+        # Build prompt WITHOUT additional_context first (use empty placeholder)
+        prompt_without_additional = template.format(
+            story_summary=story.summary,
+            story_description=story.description,
+            story_type=story_type.value,
+            max_cycle_days=max_cycle_days,
+            test_coverage_level=test_coverage_level.value,
+            test_count=test_count,
+            acceptance_criteria=chr(10).join(acceptance_criteria_text),
+            document_context=document_context,
+            additional_context=""  # Placeholder
+        )
+        
+        # Get system prompt for token counting (use same system prompt as team task)
+        system_prompt = Prompts.get_team_task_system_prompt()
+        
+        # Count tokens used so far (system prompt + user prompt without additional_context)
+        system_tokens = self._estimate_tokens(system_prompt)
+        prompt_tokens = self._estimate_tokens(prompt_without_additional)
+        total_tokens_used = system_tokens + prompt_tokens
+        
+        logger.debug(f"Token usage (unified task/test): system={system_tokens}, prompt={prompt_tokens}, total={total_tokens_used}")
+        
+        # Calculate remaining budget for additional_context
+        if max_tokens is not None:
+            # Reserve 30% of max_tokens for response generation
+            response_reserve = int(max_tokens * 0.3)
+            available_for_prompt = max_tokens - response_reserve
+            
+            # Calculate remaining tokens for additional_context
+            remaining_tokens = available_for_prompt - total_tokens_used
+            
+            # Ensure we have at least some buffer (don't use 100% of available)
+            remaining_tokens = max(0, remaining_tokens - 100)  # 100 token buffer
+            
+            # Convert tokens to characters (3.5 chars per token, conservative)
+            char_limit = int(remaining_tokens * 3.5)
+            
+            # Ensure non-negative (no cap - trust the dynamic calculation)
+            char_limit = max(0, char_limit)
+            
+            logger.debug(f"Additional context budget (unified task/test): {remaining_tokens} tokens = ~{char_limit} chars (max_tokens={max_tokens}, available_for_prompt={available_for_prompt})")
+        else:
+            # Fallback to default if max_tokens not available
+            char_limit = 1000
+            logger.debug(f"Using default additional context limit: {char_limit} chars (max_tokens not available)")
+        
+        # Format additional_context with calculated limit
+        additional_context_str = self._format_additional_context(additional_context, char_limit=char_limit) if additional_context else ""
+        
+        # Build final prompt with properly sized additional_context
         prompt = template.format(
             story_summary=story.summary,
             story_description=story.description,

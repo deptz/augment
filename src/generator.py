@@ -576,8 +576,8 @@ class DescriptionGenerator:
         try:
             logger.debug(f"Generating description for {context.ticket.key}")
             
-            # Build prompt using template (this is the user prompt)
-            user_prompt = self._build_prompt(context, dry_run)
+            # Build prompt using template (pass llm_model/llm_provider for token calculation)
+            user_prompt = self._build_prompt(context, dry_run, llm_model, llm_provider)
             
             # Generate description using the prompt
             used_provider = None
@@ -639,18 +639,25 @@ class DescriptionGenerator:
             logger.error(f"Failed to generate description for {context.ticket.key}: {e}")
             return None
     
-    def _build_prompt(self, context: GenerationContext, dry_run: bool = True) -> str:
+    def _build_prompt(self, context: GenerationContext, dry_run: bool = True,
+                     llm_model: Optional[str] = None, 
+                     llm_provider: Optional[str] = None) -> str:
         """Build the prompt for LLM
         
         Args:
             context: Generation context with ticket info, PRD, PRs, etc.
             dry_run: Whether this is a dry run (preview mode). When True and ticket has existing description, it will be explicitly included.
+            llm_model: Optional LLM model to override default (used to get max_tokens)
+            llm_provider: Optional LLM provider to override default (used to get max_tokens)
         """
+        # Get max_tokens for dynamic additional context limit
+        max_tokens = self._get_effective_max_tokens(llm_provider, llm_model)
+        
         # Format ticket description - when in dry_run mode and description exists, ensure it's included
         ticket_description = self._format_ticket_description(context.ticket.description, dry_run)
         
-        # Prepare template variables - prioritizing ticket-specific information
-        template_vars = {
+        # Prepare template variables WITHOUT additional_context first (use placeholder)
+        template_vars_base = {
             'ticket_key': context.ticket.key,
             'ticket_title': context.ticket.title,
             'ticket_description': ticket_description,
@@ -666,10 +673,68 @@ class DescriptionGenerator:
             'commit_messages': self._format_commit_messages(context.commits),
             'changed_files': self._format_changed_files(context.pull_requests, context.commits),
             'code_changes_summary': self._format_code_changes_summary(context.pull_requests, context.commits),
-            'additional_context': self._format_additional_context(context.additional_context)
+            'additional_context': 'N/A'  # Placeholder
         }
         
-        # Replace template variables
+        # Build prompt without additional_context to count tokens
+        prompt_without_additional = self.prompt_template
+        for var, value in template_vars_base.items():
+            prompt_without_additional = prompt_without_additional.replace(f'{{{{{var}}}}}', str(value))
+        
+        # Get system prompt for token counting
+        system_prompt = None
+        if llm_model or llm_provider:
+            from .config import Config
+            config = Config()
+            current_config = config.get_llm_config(llm_provider, llm_model)
+            from .llm_client import LLMClient
+            temp_client = LLMClient(current_config)
+            system_prompt = temp_client.get_system_prompt()
+        else:
+            system_prompt = self.llm_client.get_system_prompt()
+        
+        # Count tokens used so far (system prompt + user prompt without additional_context)
+        system_tokens = self._estimate_tokens(system_prompt)
+        prompt_tokens = self._estimate_tokens(prompt_without_additional)
+        total_tokens_used = system_tokens + prompt_tokens
+        
+        logger.debug(f"Token usage: system={system_tokens}, prompt={prompt_tokens}, total={total_tokens_used}")
+        
+        # Calculate remaining budget for additional_context
+        if max_tokens is not None:
+            # Reserve 30% of max_tokens for response generation
+            response_reserve = int(max_tokens * 0.3)
+            available_for_prompt = max_tokens - response_reserve
+            
+            # Calculate remaining tokens for additional_context
+            remaining_tokens = available_for_prompt - total_tokens_used
+            
+            # Ensure we have at least some buffer (don't use 100% of available)
+            remaining_tokens = max(0, remaining_tokens - 100)  # 100 token buffer
+            
+            # Convert tokens to characters (3.5 chars per token, conservative)
+            char_limit = int(remaining_tokens * 3.5)
+            
+            # Ensure non-negative (no cap - trust the dynamic calculation)
+            char_limit = max(0, char_limit)
+            
+            logger.debug(f"Additional context budget: {remaining_tokens} tokens = ~{char_limit} chars (max_tokens={max_tokens}, available_for_prompt={available_for_prompt})")
+        else:
+            # Fallback to default if max_tokens not available
+            char_limit = 1000
+            logger.debug(f"Using default additional context limit: {char_limit} chars (max_tokens not available)")
+        
+        # Format additional_context with calculated limit
+        formatted_additional_context = self._format_additional_context(
+            context.additional_context, 
+            char_limit=char_limit
+        )
+        
+        # Now build final prompt with properly sized additional_context
+        template_vars = template_vars_base.copy()
+        template_vars['additional_context'] = formatted_additional_context
+        
+        # Replace template variables with final values
         prompt = self.prompt_template
         for var, value in template_vars.items():
             prompt = prompt.replace(f'{{{{{var}}}}}', str(value))
@@ -726,16 +791,104 @@ class DescriptionGenerator:
         
         return rfc.get_security_and_performance_summary()
 
-    def _format_additional_context(self, additional_context: Optional[str]) -> str:
-        """Format additional context for the prompt"""
+    def _format_additional_context(self, additional_context: Optional[str], char_limit: int = 1000) -> str:
+        """Format additional context for the prompt
+        
+        Args:
+            additional_context: The additional context string
+            char_limit: Maximum characters allowed (calculated dynamically based on token budget)
+        """
         if not additional_context:
             return "N/A"
         
-        # Truncate to 1000 chars max with smart boundary
-        if len(additional_context) > 1000:
-            return self._smart_truncate(additional_context, 1000)
+        # Truncate to calculated limit with smart boundary
+        if len(additional_context) > char_limit:
+            truncated = self._smart_truncate(additional_context, char_limit)
+            logger.debug(f"Truncated additional_context from {len(additional_context)} to {len(truncated)} chars (limit={char_limit})")
+            return truncated
         
         return additional_context
+    
+    def _estimate_tokens(self, text: str) -> int:
+        """Estimate token count from text (rough approximation)
+        
+        Uses ~4 characters per token as a conservative estimate.
+        For more accuracy, could use tiktoken library.
+        
+        Args:
+            text: Text to estimate tokens for
+            
+        Returns:
+            Estimated token count
+        """
+        if not text:
+            return 0
+        # Conservative estimate: 4 chars per token (accounts for spaces, punctuation)
+        return len(text) // 4
+    
+    def _get_effective_max_tokens(self, llm_provider: Optional[str] = None,
+                                  llm_model: Optional[str] = None) -> Optional[int]:
+        """Get effective max_tokens for the given provider/model
+        
+        Args:
+            llm_provider: Optional LLM provider name
+            llm_model: Optional LLM model name
+            
+        Returns:
+            Effective max_tokens from config or provider defaults, or None if unable to determine
+        """
+        try:
+            if llm_provider or llm_model:
+                from .config import Config
+                config = Config()
+                current_config = config.get_llm_config(llm_provider, llm_model)
+                max_tokens = current_config.get('max_tokens')
+                
+                # If max_tokens is None, use provider defaults
+                if max_tokens is None:
+                    provider_name = (llm_provider or self.llm_client.provider_name).lower()
+                    model_name = current_config.get('model', '').lower()
+                    
+                    if provider_name == 'openai':
+                        # Check if GPT-5 variant
+                        if 'gpt-5' in model_name:
+                            return 16000
+                        return 2000
+                    elif provider_name == 'claude':
+                        return 8000
+                    elif provider_name == 'gemini':
+                        return 8192
+                    elif provider_name == 'kimi':
+                        return 8000
+                return max_tokens
+            else:
+                # Use default client's max_tokens
+                if self.llm_client and hasattr(self.llm_client, 'default_max_tokens'):
+                    return self.llm_client.default_max_tokens
+                
+                # Fallback: try to get from provider
+                if self.llm_client and hasattr(self.llm_client, 'provider'):
+                    provider = self.llm_client.provider
+                    if hasattr(provider, 'config_max_tokens') and provider.config_max_tokens:
+                        return provider.config_max_tokens
+                    
+                    # Use provider-specific defaults
+                    provider_name = self.llm_client.provider_name.lower()
+                    if provider_name == 'openai':
+                        model = provider.model.lower() if hasattr(provider, 'model') else ''
+                        if 'gpt-5' in model:
+                            return 16000
+                        return 2000
+                    elif provider_name == 'claude':
+                        return 8000
+                    elif provider_name == 'gemini':
+                        return 8192
+                    elif provider_name == 'kimi':
+                        return 8000
+        except Exception as e:
+            logger.warning(f"Failed to get effective max_tokens: {e}")
+        
+        return None
 
     def _format_pull_request_titles(self, pull_requests: List[PullRequest]) -> str:
         """Format pull request titles for the prompt"""

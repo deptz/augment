@@ -353,6 +353,20 @@ LLM_TEMPERATURE=0.7  # LLM temperature (0.0-1.0, higher = more creative)
 LLM_MAX_TOKENS=  # Global max_tokens override (empty = use provider defaults)
 ```
 
+**Dynamic Additional Context Management:**
+The system automatically calculates the optimal character limit for `additional_context` based on:
+- Actual token usage of the prompt (system + base prompt)
+- Configured `max_tokens` or provider defaults
+- Reserved tokens for response generation (30% of max_tokens)
+- Remaining token budget after prompt construction
+
+This ensures `additional_context` is dynamically sized to fit within your token budget:
+- **Large token budgets** (e.g., 20k tokens): Can accommodate ~36k+ characters of additional context
+- **Medium token budgets** (e.g., 8k tokens): Can accommodate ~10k+ characters of additional context
+- **Small token budgets** (e.g., 2k tokens): Automatically reduces or eliminates additional context if prompt is too large
+
+The system counts tokens used by the base prompt first, then allocates remaining budget to `additional_context` with no hard cap, maximizing context utilization while respecting token limits.
+
 **Processing Settings (Optional):**
 ```bash
 MAX_CONCURRENT_REQUESTS=5  # Max parallel API requests
