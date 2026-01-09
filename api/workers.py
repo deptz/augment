@@ -51,6 +51,34 @@ def _get_or_create_job(job_id: str, job_type: str, initial_message: str) -> JobS
     return job
 
 
+async def check_cancellation(job_id: str, job: JobStatus) -> bool:
+    """
+    Check if job cancellation was requested via Redis flag.
+    This works across process boundaries (API sets flag, worker checks it).
+    
+    Args:
+        job_id: The ID of the job to check
+        job: The JobStatus object to update if cancelled
+        
+    Returns:
+        True if the job should be cancelled, False otherwise
+    """
+    from .job_queue import is_job_cancelled, clear_cancellation_flag
+    
+    try:
+        if await is_job_cancelled(job_id):
+            job.status = "cancelled"
+            job.completed_at = datetime.now()
+            job.progress = {"message": "Job was cancelled"}
+            await clear_cancellation_flag(job_id)
+            logger.info(f"Job {job_id} cancelled via Redis flag")
+            return True
+    except Exception as e:
+        logger.warning(f"Error checking cancellation for job {job_id}: {e}")
+    
+    return False
+
+
 async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update_jira: bool,
                                      llm_model: Optional[str] = None, llm_provider: Optional[str] = None,
                                      additional_context: Optional[str] = None):
@@ -63,11 +91,8 @@ async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update
         job = _get_or_create_job(job_id, "single", f"Processing ticket {ticket_key}...")
         job.ticket_key = ticket_key
         
-        # Check if cancelled
-        if hasattr(ctx, 'job') and ctx.job.cancelled:
-            job.status = "cancelled"
-            job.completed_at = datetime.now()
-            job.progress = {"message": "Job was cancelled"}
+        # Check if cancelled via Redis flag
+        if await check_cancellation(job_id, job):
             unregister_ticket_job(ticket_key)
             return
         
@@ -191,11 +216,8 @@ async def process_batch_tickets_worker(ctx, job_id: str, jql: str, max_results: 
         results = []
         for i, ticket in enumerate(tickets):
             try:
-                # Check if job was cancelled (via ctx)
-                if hasattr(ctx, 'job') and ctx.job.cancelled:
-                    job.status = "cancelled"
-                    job.completed_at = datetime.now()
-                    job.progress = {"message": "Job was cancelled"}
+                # Check if job was cancelled via Redis flag
+                if await check_cancellation(job_id, job):
                     # Unregister all ticket keys
                     for ticket_key in ticket_keys_list:
                         unregister_ticket_job(ticket_key)
@@ -332,10 +354,9 @@ async def process_story_generation_worker(ctx, job_id: str, epic_key: str, dry_r
         # Epic key is tracked as ticket_key for story generation
         job.ticket_key = epic_key
         
-        if hasattr(ctx, 'job') and ctx.job.cancelled:
-            job.status = "cancelled"
-            job.completed_at = datetime.now()
-            job.progress = {"message": "Job was cancelled"}
+        # Check if cancelled via Redis flag
+        if await check_cancellation(job_id, job):
+            unregister_ticket_job(epic_key)
             return
         
         if not generator.planning_service:
@@ -412,10 +433,8 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
         job.ticket_key = epic_key
         job.story_keys = story_keys.copy()
         
-        if hasattr(ctx, 'job') and ctx.job.cancelled:
-            job.status = "cancelled"
-            job.completed_at = datetime.now()
-            job.progress = {"message": "Job was cancelled"}
+        # Check if cancelled via Redis flag
+        if await check_cancellation(job_id, job):
             # Unregister all story keys
             for story_key in story_keys:
                 unregister_ticket_job(story_key)
@@ -508,10 +527,8 @@ async def process_test_generation_worker(ctx, job_id: str, test_type: str, epic_
         elif epic_key:
             job.ticket_key = epic_key
         
-        if hasattr(ctx, 'job') and ctx.job.cancelled:
-            job.status = "cancelled"
-            job.completed_at = datetime.now()
-            job.progress = {"message": "Job was cancelled"}
+        # Check if cancelled via Redis flag
+        if await check_cancellation(job_id, job):
             if job.ticket_key:
                 unregister_ticket_job(job.ticket_key)
             return
@@ -587,10 +604,8 @@ async def process_prd_story_sync_worker(ctx, job_id: str, epic_key: str, prd_url
         job = _get_or_create_job(job_id, "prd_story_sync", f"Syncing stories from PRD for epic {epic_key}...")
         job.ticket_key = epic_key
         
-        if hasattr(ctx, 'job') and ctx.job.cancelled:
-            job.status = "cancelled"
-            job.completed_at = datetime.now()
-            job.progress = {"message": "Job was cancelled"}
+        # Check if cancelled via Redis flag
+        if await check_cancellation(job_id, job):
             unregister_ticket_job(epic_key)
             return
         
@@ -679,10 +694,8 @@ async def process_bulk_story_update_worker(ctx, job_id: str, stories_data: List[
         job = _get_or_create_job(job_id, "bulk_story_update", f"Bulk updating {len(stories_data)} stories...")
         job.total_tickets = len(stories_data)
         
-        if hasattr(ctx, 'job') and ctx.job.cancelled:
-            job.status = "cancelled"
-            job.completed_at = datetime.now()
-            job.progress = {"message": "Job was cancelled"}
+        # Check if cancelled via Redis flag
+        if await check_cancellation(job_id, job):
             return
         
         if not jira_client:
@@ -697,10 +710,8 @@ async def process_bulk_story_update_worker(ctx, job_id: str, stories_data: List[
         
         # Process each story
         for i, story_dict in enumerate(stories_data, 1):
-            if hasattr(ctx, 'job') and ctx.job.cancelled:
-                job.status = "cancelled"
-                job.completed_at = datetime.now()
-                job.progress = {"message": "Job was cancelled"}
+            # Check if cancelled via Redis flag
+            if await check_cancellation(job_id, job):
                 break
             
             story_item = StoryUpdateItem(**story_dict)
@@ -724,15 +735,20 @@ async def process_bulk_story_update_worker(ctx, job_id: str, stories_data: List[
                 failed += 1
                 job.failed_tickets = failed
         
-        job.status = "completed"
-        job.completed_at = datetime.now()
-        job.results = {
-            "total_stories": len(stories_data),
-            "successful": successful,
-            "failed": failed,
-            "results": results
-        }
-        job.progress = {"message": f"Bulk update completed: {successful} successful, {failed} failed"}
+        # Check if job was cancelled before marking as completed
+        if job.status != "cancelled":
+            job.status = "completed"
+            job.completed_at = datetime.now()
+            job.results = {
+                "total_stories": len(stories_data),
+                "successful": successful,
+                "failed": failed,
+                "results": results
+            }
+            job.progress = {"message": f"Bulk update completed: {successful} successful, {failed} failed"}
+        else:
+            # Job was cancelled - update progress but keep cancelled status
+            job.progress = {"message": f"Job was cancelled after processing {i} stories"}
         
         logger.info(f"Job {job_id} completed: bulk updated {len(stories_data)} stories ({successful} successful, {failed} failed)")
         
@@ -759,10 +775,8 @@ async def process_bulk_task_creation_worker(ctx, job_id: str, tasks_data: List[D
         job = _get_or_create_job(job_id, "bulk_task_creation", f"Creating {len(tasks_data)} task tickets...")
         job.total_tickets = len(tasks_data)
         
-        if hasattr(ctx, 'job') and ctx.job.cancelled:
-            job.status = "cancelled"
-            job.completed_at = datetime.now()
-            job.progress = {"message": "Job was cancelled"}
+        # Check if cancelled via Redis flag
+        if await check_cancellation(job_id, job):
             # Unregister story keys
             story_keys = list(set([task.get("story_key") for task in tasks_data]))
             for story_key in story_keys:
@@ -975,7 +989,8 @@ async def process_bulk_task_creation_worker(ctx, job_id: str, tasks_data: List[D
                 return False
         
         for link_info in pending_links:
-            if hasattr(ctx, 'job') and ctx.job.cancelled:
+            # Check if cancelled via Redis flag
+            if await check_cancellation(job_id, job):
                 break
             
             index = link_info["index"]
@@ -1058,25 +1073,31 @@ async def process_bulk_task_creation_worker(ctx, job_id: str, tasks_data: List[D
                     "status": "failed"
                 })
         
-        message = f"Bulk creation completed: {successful} successful, {failed} failed"
-        logger.info(message)
+        # Check if job was cancelled before marking as completed
+        if job.status != "cancelled":
+            message = f"Bulk creation completed: {successful} successful, {failed} failed"
+            logger.info(message)
+            
+            job.status = "completed"
+            job.completed_at = datetime.now()
+            job.results = {
+                "total_tasks": len(tasks_data),
+                "successful": successful,
+                "failed": failed,
+                "results": results,
+                "created_tickets": created_ticket_keys,
+                "message": message
+            }
+            job.progress = {"message": message}
+            job.processed_tickets = len(tasks_data)
+            job.successful_tickets = successful
+            job.failed_tickets = failed
+        else:
+            # Job was cancelled - update progress but keep cancelled status
+            job.progress = {"message": f"Job was cancelled after creating {len(created_ticket_keys)} tickets"}
+            job.processed_tickets = len(created_ticket_keys)
         
-        job.status = "completed"
-        job.completed_at = datetime.now()
-        job.results = {
-            "total_tasks": len(tasks_data),
-            "successful": successful,
-            "failed": failed,
-            "results": results,
-            "created_tickets": created_ticket_keys,
-            "message": message
-        }
-        job.progress = {"message": message}
-        job.processed_tickets = len(tasks_data)
-        job.successful_tickets = successful
-        job.failed_tickets = failed
-        
-        # Unregister all story keys when job completes
+        # Unregister all story keys when job completes or is cancelled
         story_keys = list(set([task.get("story_key") for task in tasks_data]))
         for story_key in story_keys:
             unregister_ticket_job(story_key)
@@ -1113,11 +1134,8 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
         job = _get_or_create_job(job_id, "story_coverage", f"Analyzing coverage for story {story_key}...")
         job.story_key = story_key
         
-        # Check if cancelled
-        if hasattr(ctx, 'job') and ctx.job.cancelled:
-            job.status = "cancelled"
-            job.completed_at = datetime.now()
-            job.progress = {"message": "Job was cancelled"}
+        # Check if cancelled via Redis flag
+        if await check_cancellation(job_id, job):
             unregister_ticket_job(story_key)
             return
         
@@ -1204,10 +1222,8 @@ async def process_epic_creation_worker(ctx, job_id: str, epic_key: str, operatio
         job = _get_or_create_job(job_id, "epic_creation", f"Planning and creating tickets for epic {epic_key}...")
         job.ticket_key = epic_key
         
-        if hasattr(ctx, 'job') and ctx.job.cancelled:
-            job.status = "cancelled"
-            job.completed_at = datetime.now()
-            job.progress = {"message": "Job was cancelled"}
+        # Check if cancelled via Redis flag
+        if await check_cancellation(job_id, job):
             unregister_ticket_job(epic_key)
             return
         
@@ -1283,10 +1299,8 @@ async def process_story_creation_worker(ctx, job_id: str, epic_key: str, story_c
         job = _get_or_create_job(job_id, "story_creation", f"Creating stories for epic {epic_key}...")
         job.ticket_key = epic_key
         
-        if hasattr(ctx, 'job') and ctx.job.cancelled:
-            job.status = "cancelled"
-            job.completed_at = datetime.now()
-            job.progress = {"message": "Job was cancelled"}
+        # Check if cancelled via Redis flag
+        if await check_cancellation(job_id, job):
             unregister_ticket_job(epic_key)
             return
         
@@ -1375,10 +1389,8 @@ async def process_task_creation_worker(ctx, job_id: str, story_keys: List[str], 
         job = _get_or_create_job(job_id, "task_creation", f"Creating tasks for {len(story_keys)} stories...")
         job.story_keys = story_keys.copy()
         
-        if hasattr(ctx, 'job') and ctx.job.cancelled:
-            job.status = "cancelled"
-            job.completed_at = datetime.now()
-            job.progress = {"message": "Job was cancelled"}
+        # Check if cancelled via Redis flag
+        if await check_cancellation(job_id, job):
             # Unregister all story keys
             for story_key in story_keys:
                 unregister_ticket_job(story_key)
@@ -1488,10 +1500,8 @@ async def process_sprint_planning_worker(ctx, job_id: str, epic_key: str, board_
         job = _get_or_create_job(job_id, "sprint_planning", f"Planning sprint for epic {epic_key}...")
         job.ticket_key = epic_key
         
-        if hasattr(ctx, 'job') and ctx.job.cancelled:
-            job.status = "cancelled"
-            job.completed_at = datetime.now()
-            job.progress = {"message": "Job was cancelled"}
+        # Check if cancelled via Redis flag
+        if await check_cancellation(job_id, job):
             unregister_ticket_job(epic_key)
             return
         
@@ -1552,10 +1562,8 @@ async def process_timeline_planning_worker(ctx, job_id: str, epic_key: str, boar
         job = _get_or_create_job(job_id, "timeline_planning", f"Creating timeline for epic {epic_key}...")
         job.ticket_key = epic_key
         
-        if hasattr(ctx, 'job') and ctx.job.cancelled:
-            job.status = "cancelled"
-            job.completed_at = datetime.now()
-            job.progress = {"message": "Job was cancelled"}
+        # Check if cancelled via Redis flag
+        if await check_cancellation(job_id, job):
             unregister_ticket_job(epic_key)
             return
         

@@ -55,3 +55,66 @@ async def close_redis():
         redis_pool = None
         logger.info("Redis connection pool closed")
 
+
+# Job cancellation constants and functions
+CANCEL_KEY_PREFIX = "job:cancel:"
+CANCEL_TTL = 86400  # 24 hours - cancellation flags expire after this time
+
+
+async def request_job_cancellation(job_id: str) -> bool:
+    """
+    Set cancellation flag in Redis for a job.
+    This flag can be checked by workers running in separate processes.
+    
+    Args:
+        job_id: The ID of the job to cancel
+        
+    Returns:
+        True if the cancellation flag was set successfully
+    """
+    try:
+        pool = await get_redis_pool()
+        key = f"{CANCEL_KEY_PREFIX}{job_id}"
+        await pool.set(key, "1", ex=CANCEL_TTL)
+        logger.info(f"Cancellation flag set for job {job_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to set cancellation flag for job {job_id}: {e}")
+        return False
+
+
+async def is_job_cancelled(job_id: str) -> bool:
+    """
+    Check if cancellation was requested for a job.
+    Workers should call this periodically to check if they should stop.
+    
+    Args:
+        job_id: The ID of the job to check
+        
+    Returns:
+        True if the job should be cancelled
+    """
+    try:
+        pool = await get_redis_pool()
+        key = f"{CANCEL_KEY_PREFIX}{job_id}"
+        return await pool.exists(key) > 0
+    except Exception as e:
+        logger.warning(f"Failed to check cancellation flag for job {job_id}: {e}")
+        return False
+
+
+async def clear_cancellation_flag(job_id: str):
+    """
+    Clean up cancellation flag after job completes or is cancelled.
+    
+    Args:
+        job_id: The ID of the job to clean up
+    """
+    try:
+        pool = await get_redis_pool()
+        key = f"{CANCEL_KEY_PREFIX}{job_id}"
+        await pool.delete(key)
+        logger.debug(f"Cancellation flag cleared for job {job_id}")
+    except Exception as e:
+        logger.warning(f"Failed to clear cancellation flag for job {job_id}: {e}")
+

@@ -417,7 +417,12 @@ async def cancel_job(job_id: str, current_user: str = Depends(get_current_user))
         raise HTTPException(status_code=400, detail=f"Cannot cancel job with status: {job.status}")
     
     try:
-        # Try to abort the ARQ job
+        # Set Redis cancellation flag (works across processes - workers will check this)
+        from ..job_queue import request_job_cancellation
+        await request_job_cancellation(job_id)
+        logger.info(f"Set cancellation flag in Redis for job {job_id}")
+        
+        # Also try to abort the ARQ job (for queued jobs that haven't started yet)
         redis_pool = await get_redis_pool()
         from arq.jobs import Job
         arq_job = Job(job_id, redis_pool)
@@ -429,7 +434,7 @@ async def cancel_job(job_id: str, current_user: str = Depends(get_current_user))
         except Exception as abort_error:
             logger.warning(f"Could not abort ARQ job {job_id}: {abort_error}")
         
-        # Update job status
+        # Update job status in memory
         job.status = "cancelled"
         job.completed_at = datetime.now()
         job.progress = {"message": "Job was cancelled by user"}
