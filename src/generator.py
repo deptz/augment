@@ -1385,7 +1385,7 @@ class DescriptionGenerator:
     def generate_tasks_for_stories(
         self, 
         story_keys: List[str], 
-        epic_key: str,
+        epic_key: Optional[str] = None,
         dry_run: bool = True,
         split_oversized_tasks: bool = True,
         max_task_cycle_days: float = 3.0,
@@ -1399,7 +1399,7 @@ class DescriptionGenerator:
         
         Args:
             story_keys: List of story keys to generate tasks for
-            epic_key: Parent epic key
+            epic_key: Parent epic key. If not provided, will be derived from the first story's parent.
             dry_run: If True, don't actually create tickets
             split_oversized_tasks: Automatically split oversized tasks
             max_task_cycle_days: Maximum cycle time allowed per task
@@ -1413,13 +1413,35 @@ class DescriptionGenerator:
         """
         if not self.planning_service:
             return PlanningResult(
-                epic_key=epic_key,
+                epic_key=epic_key or "UNKNOWN",
                 mode=OperationMode.PLANNING,
                 success=False,
                 errors=["Planning service not available - requires Confluence client"]
             )
         
         logger.info(f"Generating tasks for {len(story_keys)} stories")
+        
+        # Derive epic_key from story if not provided
+        if not epic_key:
+            logger.info("No epic_key provided, deriving from story tickets...")
+            try:
+                first_story_data = self.jira_client.get_ticket(story_keys[0])
+                if first_story_data:
+                    parent = first_story_data.get('fields', {}).get('parent')
+                    if parent and parent.get('key'):
+                        epic_key = parent['key']
+                        logger.info(f"Derived epic_key from story {story_keys[0]}: {epic_key}")
+                    else:
+                        logger.warning(f"Story {story_keys[0]} has no parent epic")
+            except Exception as e:
+                logger.warning(f"Failed to derive epic_key from story: {e}")
+        
+        # If we still don't have an epic_key, use a placeholder derived from story key
+        if not epic_key:
+            # Extract project prefix from first story key (e.g., "STORY-123" -> "STORY")
+            project_prefix = story_keys[0].split('-')[0] if story_keys else "UNKNOWN"
+            epic_key = f"{project_prefix}-DERIVED"
+            logger.warning(f"Could not derive epic_key, using placeholder: {epic_key}")
         
         # Retrieve PRD/RFC content from epic
         prd_content = None

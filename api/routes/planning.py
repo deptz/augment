@@ -18,7 +18,7 @@ from ..models.planning import (
 )
 from ..models.generation import BatchResponse
 from ..dependencies import get_generator, get_jira_client, get_config, get_active_job_for_ticket, register_ticket_job, unregister_ticket_job
-from ..utils import create_custom_llm_client, extract_story_details_with_tests, extract_task_details_with_tests
+from ..utils import create_custom_llm_client, extract_story_details_with_tests, extract_task_details_with_tests, parse_story_keys_from_input
 from ..auth import get_current_user
 
 router = APIRouter()
@@ -230,7 +230,7 @@ async def generate_stories_for_epic(request: StoryGenerationRequest, current_use
           tags=["Planning"],
           response_model=Union[PlanningResultResponse, BatchResponse],
           summary="Generate tasks for stories",
-          description="Generate tasks for stories with breakdown and custom LLM configuration. Preview mode by default. Set dry_run=false to create tickets.")
+          description="Generate tasks for stories with breakdown and custom LLM configuration. Supports both story keys and full JIRA URLs. Epic key is optional - if not provided, it will be derived from the story tickets' parent epic. Preview mode by default. Set dry_run=false to create tickets.")
 async def generate_tasks_for_stories(request: TaskGenerationRequest, current_user: str = Depends(get_current_user)):
     """Generate tasks for specific stories"""
     from ..job_queue import get_redis_pool
@@ -241,9 +241,18 @@ async def generate_tasks_for_stories(request: TaskGenerationRequest, current_use
     
     generator = get_generator()
     config = get_config()
+    jira_client = get_jira_client()
     
     try:
-        logger.info(f"User {current_user} generating tasks for {len(request.story_keys)} stories")
+        # Parse story keys from URLs if needed
+        story_keys = parse_story_keys_from_input(request.story_keys)
+        if not story_keys:
+            raise HTTPException(
+                status_code=400,
+                detail="No valid JIRA story keys found in the provided input"
+            )
+        
+        logger.info(f"User {current_user} generating tasks for {len(story_keys)} stories: {story_keys}")
         
         if not generator.planning_service:
             raise HTTPException(
@@ -251,12 +260,36 @@ async def generate_tasks_for_stories(request: TaskGenerationRequest, current_use
                 detail="Planning service not available - requires Confluence client configuration"
             )
         
+        # Derive epic_key from story tickets if not provided
+        epic_key = request.epic_key
+        if not epic_key:
+            logger.info("No epic_key provided, deriving from story tickets...")
+            
+            # Fetch the first story to get its parent epic
+            first_story_data = jira_client.get_ticket(story_keys[0])
+            if not first_story_data:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Story ticket {story_keys[0]} not found in JIRA"
+                )
+            
+            # Extract parent epic from story
+            parent = first_story_data.get('fields', {}).get('parent')
+            if parent and parent.get('key'):
+                epic_key = parent['key']
+                logger.info(f"Derived epic_key from story {story_keys[0]}: {epic_key}")
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Story {story_keys[0]} has no parent epic. Please provide epic_key explicitly."
+                )
+        
         # If async mode, enqueue job
         if request.async_mode:
             # Check for duplicate active jobs per story
             duplicate_stories = []
             active_duplicates = {}
-            for story_key in request.story_keys:
+            for story_key in story_keys:
                 active_job_id = get_active_job_for_ticket(story_key)
                 if active_job_id:
                     duplicate_stories.append(story_key)
@@ -278,25 +311,25 @@ async def generate_tasks_for_stories(request: TaskGenerationRequest, current_use
                 job_id=job_id,
                 job_type="task_generation",
                 status="started",
-                progress={"message": f"Queued for generating tasks for {len(request.story_keys)} stories"},
+                progress={"message": f"Queued for generating tasks for {len(story_keys)} stories"},
                 started_at=datetime.now(),
                 processed_tickets=0,
                 successful_tickets=0,
                 failed_tickets=0,
-                ticket_key=request.epic_key,
-                story_keys=request.story_keys.copy()
+                ticket_key=epic_key,
+                story_keys=story_keys.copy()
             )
             
             # Register all story keys for duplicate prevention
-            for story_key in request.story_keys:
+            for story_key in story_keys:
                 register_ticket_job(story_key, job_id)
             
             redis_pool = await get_redis_pool()
             await redis_pool.enqueue_job(
                 'process_task_generation_worker',
                 job_id=job_id,
-                story_keys=request.story_keys,
-                epic_key=request.epic_key,
+                story_keys=story_keys,
+                epic_key=epic_key,
                 dry_run=request.dry_run,
                 split_oversized_tasks=request.split_oversized_tasks,
                 max_task_cycle_days=request.max_task_cycle_days,
@@ -307,15 +340,15 @@ async def generate_tasks_for_stories(request: TaskGenerationRequest, current_use
                 _job_id=job_id
             )
             
-            logger.info(f"Enqueued task generation job {job_id} for {len(request.story_keys)} stories")
+            logger.info(f"Enqueued task generation job {job_id} for {len(story_keys)} stories")
             
             return BatchResponse(
                 job_id=job_id,
                 status="started",
-                message=f"Task generation for {len(request.story_keys)} stories queued",
+                message=f"Task generation for {len(story_keys)} stories queued",
                 status_url=f"/jobs/{job_id}",
                 jql="",  # Not applicable
-                max_results=len(request.story_keys),
+                max_results=len(story_keys),
                 update_jira=not request.dry_run,
                 safety_note="JIRA will only be updated if dry_run is false"
             )
@@ -326,8 +359,8 @@ async def generate_tasks_for_stories(request: TaskGenerationRequest, current_use
             custom_llm_client = create_custom_llm_client(request.llm_provider, request.llm_model)
         
         planning_result = generator.generate_tasks_for_stories(
-            story_keys=request.story_keys,
-            epic_key=request.epic_key,
+            story_keys=story_keys,
+            epic_key=epic_key,
             dry_run=request.dry_run,
             split_oversized_tasks=request.split_oversized_tasks,
             max_task_cycle_days=request.max_task_cycle_days,
@@ -355,9 +388,11 @@ async def generate_tasks_for_stories(request: TaskGenerationRequest, current_use
             user_prompt=planning_result.user_prompt
         )
         
-        logger.info(f"Task generation completed for stories {request.story_keys}: {response.success}")
+        logger.info(f"Task generation completed for stories {story_keys}: {response.success}")
         return response
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error generating tasks for stories {request.story_keys}: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to generate tasks: {str(e)}")

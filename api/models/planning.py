@@ -90,12 +90,12 @@ class TaskGenerationRequest(BaseModel):
     """Request model for generating tasks for stories"""
     story_keys: List[str] = Field(
         ..., 
-        description="List of JIRA story keys to generate tasks for",
-        example=["STORY-1", "STORY-2"]
+        description="List of JIRA story keys or full JIRA URLs to generate tasks for",
+        example=["STORY-1", "STORY-2", "https://company.atlassian.net/browse/STORY-3"]
     )
-    epic_key: str = Field(
-        ..., 
-        description="Parent epic key",
+    epic_key: Optional[str] = Field(
+        default=None, 
+        description="Parent epic key. If not provided, will be auto-derived from the story tickets' parent epic.",
         example="EPIC-123"
     )
     dry_run: bool = Field(

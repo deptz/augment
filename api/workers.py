@@ -417,12 +417,17 @@ async def process_story_generation_worker(ctx, job_id: str, epic_key: str, dry_r
         raise
 
 
-async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str], epic_key: str,
-                                        dry_run: bool, split_oversized_tasks: bool,
-                                        max_task_cycle_days: float, llm_model: Optional[str] = None,
+async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str], epic_key: Optional[str] = None,
+                                        dry_run: bool = True, split_oversized_tasks: bool = True,
+                                        max_task_cycle_days: float = 3.0, llm_model: Optional[str] = None,
                                         llm_provider: Optional[str] = None, additional_context: Optional[str] = None,
                                         generate_test_cases: bool = False):
-    """ARQ worker function for generating tasks for stories"""
+    """ARQ worker function for generating tasks for stories
+    
+    Args:
+        story_keys: List of story keys to generate tasks for
+        epic_key: Optional parent epic key. If not provided, will be derived from story tickets.
+    """
     _initialize_services_if_needed()
     generator = get_generator()
     config = get_config()
@@ -430,7 +435,7 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
     try:
         job = _get_or_create_job(job_id, "task_generation", f"Generating tasks for {len(story_keys)} stories...")
         # Track all story keys for this job
-        job.ticket_key = epic_key
+        job.ticket_key = epic_key  # May be None initially
         job.story_keys = story_keys.copy()
         
         # Check if cancelled via Redis flag

@@ -3,6 +3,7 @@ Utility Functions
 Helper functions for LLM client creation and data extraction
 """
 from typing import Optional, Dict, Any, List
+import re
 from src.llm_client import LLMClient
 from .dependencies import get_config, get_generator
 from .models.test_generation import TestCaseModel
@@ -10,6 +11,63 @@ from .models.planning import TaskDetail, StoryDetail
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+# Pattern to match JIRA ticket keys: PROJECT-123
+JIRA_KEY_PATTERN = re.compile(r'\b([A-Z][A-Z0-9]+-\d+)\b')
+
+
+def extract_jira_key_from_input(input_str: str) -> Optional[str]:
+    """
+    Extract JIRA ticket key from a string that may be a key or full URL.
+    
+    Supports multiple formats:
+    - Plain key: STORY-123
+    - Browse URL: https://company.atlassian.net/browse/STORY-123
+    - Software URL: https://company.atlassian.net/jira/software/projects/PROJ/issues/STORY-123
+    - Any URL containing a JIRA key: https://company.atlassian.net/browse/STORY-123?selectedIssue=...
+    
+    Args:
+        input_str: A JIRA ticket key or full JIRA URL
+        
+    Returns:
+        JIRA ticket key (e.g., "STORY-123") or None if not found
+    """
+    if not input_str:
+        return None
+    
+    input_str = input_str.strip()
+    
+    # Try to find JIRA key pattern in the input
+    match = JIRA_KEY_PATTERN.search(input_str)
+    if match:
+        return match.group(1)
+    
+    return None
+
+
+def parse_story_keys_from_input(story_keys: List[str]) -> List[str]:
+    """
+    Parse a list of story keys/URLs and extract JIRA keys.
+    
+    Args:
+        story_keys: List of JIRA ticket keys or full JIRA URLs
+        
+    Returns:
+        List of JIRA ticket keys (deduplicated)
+    """
+    parsed_keys = []
+    seen_keys = set()
+    
+    for key_or_url in story_keys:
+        extracted_key = extract_jira_key_from_input(key_or_url)
+        if extracted_key and extracted_key not in seen_keys:
+            parsed_keys.append(extracted_key)
+            seen_keys.add(extracted_key)
+        elif not extracted_key:
+            logger.warning(f"Could not extract JIRA key from input: {key_or_url}")
+    
+    return parsed_keys
 
 
 def create_custom_llm_client(provider: Optional[str] = None, model: Optional[str] = None) -> LLMClient:
