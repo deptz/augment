@@ -11,6 +11,7 @@ from ..models.generation import JobStatus
 from ..dependencies import jobs, get_job_by_ticket_key
 from ..auth import get_current_user
 from ..job_queue import get_redis_pool
+from ..utils import normalize_ticket_key
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -140,6 +141,11 @@ async def _reconstruct_job_from_redis(job_id: str) -> Optional[JobStatus]:
             story_key = kwargs.get('story_key')
             story_keys = kwargs.get('story_keys')
             
+            # Normalize ticket keys (extract key from URLs)
+            ticket_key = normalize_ticket_key(ticket_key)
+            if ticket_keys:
+                ticket_keys = [normalize_ticket_key(k) for k in ticket_keys if normalize_ticket_key(k)]
+            
             # Only use arq_results if it's a valid dict (for successful jobs)
             # For failed jobs, arq_results contains the exception object, not actual results
             results_for_job = arq_results if isinstance(arq_results, dict) else None
@@ -216,6 +222,11 @@ async def _reconstruct_job_from_redis(job_id: str) -> Optional[JobStatus]:
                 story_key = kwargs.get('story_key')
                 story_keys = kwargs.get('story_keys')
                 
+                # Normalize ticket keys (extract key from URLs)
+                ticket_key = normalize_ticket_key(ticket_key)
+                if ticket_keys:
+                    ticket_keys = [normalize_ticket_key(k) for k in ticket_keys if normalize_ticket_key(k)]
+                
                 # Reconstruct JobStatus
                 reconstructed_job = JobStatus(
                     job_id=job_id,
@@ -269,12 +280,21 @@ async def get_job_status(job_id: str, current_user: str = Depends(get_current_us
                 # Redis has the results - use it and update in-memory
                 jobs[job_id] = redis_job
                 return redis_job
-        # Job is completed/failed/cancelled in memory, return it
+        # Job is completed/failed/cancelled in memory, normalize ticket_key before returning
+        if job.ticket_key:
+            job.ticket_key = normalize_ticket_key(job.ticket_key)
+        if job.ticket_keys:
+            job.ticket_keys = [normalize_ticket_key(k) for k in job.ticket_keys if normalize_ticket_key(k)]
         return job
     
     # If not in memory, try to reconstruct from Redis
     reconstructed = await _reconstruct_job_from_redis(job_id)
     if reconstructed:
+        # Normalize ticket_key if needed (should already be normalized in _reconstruct_job_from_redis, but double-check)
+        if reconstructed.ticket_key:
+            reconstructed.ticket_key = normalize_ticket_key(reconstructed.ticket_key)
+        if reconstructed.ticket_keys:
+            reconstructed.ticket_keys = [normalize_ticket_key(k) for k in reconstructed.ticket_keys if normalize_ticket_key(k)]
         return reconstructed
     
     raise HTTPException(status_code=404, detail="Job not found")
@@ -370,6 +390,13 @@ async def list_jobs(
     total_count = len(job_list)
     job_list = job_list[offset:offset + limit]
     
+    # Normalize ticket_key for all jobs before returning
+    for job in job_list:
+        if job.ticket_key:
+            job.ticket_key = normalize_ticket_key(job.ticket_key)
+        if job.ticket_keys:
+            job.ticket_keys = [normalize_ticket_key(k) for k in job.ticket_keys if normalize_ticket_key(k)]
+    
     return {
         "jobs": job_list,
         "total": total_count,
@@ -392,13 +419,34 @@ async def list_jobs(
          description="Get job status for a ticket. Returns the active job if processing, otherwise the latest completed job.")
 async def get_job_status_by_ticket(ticket_key: str, current_user: str = Depends(get_current_user)):
     """Get job status for a specific ticket key"""
-    job_data = get_job_by_ticket_key(ticket_key)
+    # Normalize the input ticket_key (extract from URL if needed)
+    normalized_ticket_key = normalize_ticket_key(ticket_key)
+    if not normalized_ticket_key:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid ticket key format: {ticket_key}"
+        )
+    
+    job_data = get_job_by_ticket_key(normalized_ticket_key)
     
     if not job_data:
         raise HTTPException(
             status_code=404,
-            detail=f"No job found for ticket key: {ticket_key}"
+            detail=f"No job found for ticket key: {normalized_ticket_key}"
         )
+    
+    # Normalize ticket_key in the returned job data
+    if isinstance(job_data, dict):
+        if job_data.get('ticket_key'):
+            job_data['ticket_key'] = normalize_ticket_key(job_data['ticket_key'])
+        if job_data.get('ticket_keys'):
+            job_data['ticket_keys'] = [normalize_ticket_key(k) for k in job_data['ticket_keys'] if normalize_ticket_key(k)]
+    else:
+        # JobStatus object
+        if job_data.ticket_key:
+            job_data.ticket_key = normalize_ticket_key(job_data.ticket_key)
+        if job_data.ticket_keys:
+            job_data.ticket_keys = [normalize_ticket_key(k) for k in job_data.ticket_keys if normalize_ticket_key(k)]
     
     return job_data
 

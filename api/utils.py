@@ -70,6 +70,29 @@ def parse_story_keys_from_input(story_keys: List[str]) -> List[str]:
     return parsed_keys
 
 
+def normalize_ticket_key(ticket_key: Optional[str]) -> Optional[str]:
+    """
+    Normalize a ticket key by extracting the JIRA key from a URL if needed.
+    
+    Args:
+        ticket_key: A JIRA ticket key or full JIRA URL, or None
+        
+    Returns:
+        JIRA ticket key (e.g., "STORY-123") or None if input is None or invalid
+    """
+    if not ticket_key:
+        return None
+    
+    # Extract key from URL if needed, otherwise return as-is if it's already a key
+    normalized = extract_jira_key_from_input(ticket_key)
+    if normalized:
+        return normalized
+    
+    # If extraction failed but input looks like it might be a key, return as-is
+    # (handles edge cases where regex might not match)
+    return ticket_key.strip() if isinstance(ticket_key, str) else None
+
+
 def create_custom_llm_client(provider: Optional[str] = None, model: Optional[str] = None) -> LLMClient:
     """Create a custom LLM client with specified provider and model"""
     config = get_config()
