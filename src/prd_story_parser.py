@@ -873,12 +873,8 @@ class PRDStoryParser:
                         summary = truncated + "..."
                     logger.warning(f"Summary truncated to {len(summary)} characters to meet JIRA limit")
 
-                # Add user story to description if not already there
-                if user_story_text.lower() not in description.lower():
-                    if description:
-                        description = f"{user_story_text}\n\n{description}"
-                    else:
-                        description = user_story_text
+                # Set description to only the user story part (exclude title)
+                description = user_story_text
             else:
                 # No user story format found, use title as-is but ensure it's under 255 chars
                 summary = title
