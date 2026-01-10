@@ -18,7 +18,7 @@ from ..models.planning import (
 )
 from ..models.generation import BatchResponse
 from ..dependencies import get_generator, get_jira_client, get_config, get_active_job_for_ticket, register_ticket_job, unregister_ticket_job
-from ..utils import create_custom_llm_client, extract_story_details_with_tests, extract_task_details_with_tests, parse_story_keys_from_input
+from ..utils import create_custom_llm_client, extract_story_details_with_tests, extract_task_details_with_tests, parse_story_keys_from_input, normalize_ticket_key
 from ..auth import get_current_user
 
 router = APIRouter()
@@ -556,11 +556,21 @@ async def sync_stories_from_prd(request: PRDStorySyncRequest, current_user: str 
     try:
         logger.info(f"User {current_user} syncing stories from PRD")
         
+        # Normalize epic_key from URL if needed (supports full JIRA URLs like single ticket and task breakdown)
+        epic_key = None
+        if request.epic_key:
+            epic_key = normalize_ticket_key(request.epic_key)
+            if not epic_key:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid epic_key format: {request.epic_key}. Please provide a valid JIRA epic key or URL (e.g., EPIC-123 or https://company.atlassian.net/browse/EPIC-123)."
+                )
+        
         # Validate input
-        if not request.epic_key and not request.prd_url:
+        if not epic_key and not request.prd_url:
             raise HTTPException(
                 status_code=400,
-                detail="Either epic_key or prd_url must be provided"
+                detail="Either epic_key or prd_url must be provided. epic_key can be a JIRA ticket key or full JIRA URL."
             )
         
         if not generator.planning_service:
@@ -569,8 +579,7 @@ async def sync_stories_from_prd(request: PRDStorySyncRequest, current_user: str 
                 detail="Planning service not available - requires Confluence client configuration"
             )
         
-        # Determine epic_key and prd_url
-        epic_key = request.epic_key
+        # Determine prd_url
         prd_url = request.prd_url
         
         # If epic_key provided, get PRD URL from epic
@@ -630,7 +639,8 @@ async def sync_stories_from_prd(request: PRDStorySyncRequest, current_user: str 
                 processed_tickets=0,
                 successful_tickets=0,
                 failed_tickets=0,
-                ticket_key=epic_key
+                ticket_key=epic_key,
+                prd_url=prd_url
             )
             
             # Register epic key for duplicate prevention

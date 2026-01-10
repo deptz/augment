@@ -608,6 +608,9 @@ async def process_prd_story_sync_worker(ctx, job_id: str, epic_key: str, prd_url
     try:
         job = _get_or_create_job(job_id, "prd_story_sync", f"Syncing stories from PRD for epic {epic_key}...")
         job.ticket_key = epic_key
+        # Preserve PRD URL if not already set
+        if not job.prd_url:
+            job.prd_url = prd_url
         
         # Check if cancelled via Redis flag
         if await check_cancellation(job_id, job):

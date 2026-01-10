@@ -217,7 +217,7 @@ class PRDStorySyncRequest(BaseModel):
     """Request model for syncing story tickets from PRD table"""
     epic_key: Optional[str] = Field(
         default=None,
-        description="JIRA epic key. If provided, PRD URL will be read from epic's PRD custom field.",
+        description="JIRA epic key or full JIRA URL (e.g., EPIC-123 or https://company.atlassian.net/browse/EPIC-123). If provided, PRD URL will be read from epic's PRD custom field.",
         example="EPIC-123"
     )
     prd_url: Optional[str] = Field(

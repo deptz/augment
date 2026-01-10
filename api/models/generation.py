@@ -165,4 +165,5 @@ class JobStatus(BaseModel):
     ticket_keys: Optional[List[str]] = Field(None, description="List of ticket keys being processed (for batch or multi-ticket jobs)")
     story_key: Optional[str] = Field(None, description="Primary story key being processed (for single story jobs, e.g., story_coverage)")
     story_keys: Optional[List[str]] = Field(None, description="List of story keys being processed (for multi-story jobs, e.g., task_generation)")
+    prd_url: Optional[str] = Field(None, description="PRD document URL (for prd_story_sync jobs)")
 

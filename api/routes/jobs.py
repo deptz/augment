@@ -140,6 +140,7 @@ async def _reconstruct_job_from_redis(job_id: str) -> Optional[JobStatus]:
             ticket_keys = kwargs.get('ticket_keys')
             story_key = kwargs.get('story_key')
             story_keys = kwargs.get('story_keys')
+            prd_url = kwargs.get('prd_url')
             
             # Normalize ticket keys (extract key from URLs)
             ticket_key = normalize_ticket_key(ticket_key)
@@ -166,7 +167,8 @@ async def _reconstruct_job_from_redis(job_id: str) -> Optional[JobStatus]:
                 ticket_key=ticket_key,
                 ticket_keys=ticket_keys,
                 story_key=story_key,
-                story_keys=story_keys
+                story_keys=story_keys,
+                prd_url=prd_url
             )
             
             # Store in memory for future requests
@@ -221,6 +223,7 @@ async def _reconstruct_job_from_redis(job_id: str) -> Optional[JobStatus]:
                 ticket_keys = kwargs.get('ticket_keys')
                 story_key = kwargs.get('story_key')
                 story_keys = kwargs.get('story_keys')
+                prd_url = kwargs.get('prd_url')
                 
                 # Normalize ticket keys (extract key from URLs)
                 ticket_key = normalize_ticket_key(ticket_key)
@@ -243,7 +246,8 @@ async def _reconstruct_job_from_redis(job_id: str) -> Optional[JobStatus]:
                     ticket_key=ticket_key,
                     ticket_keys=ticket_keys,
                     story_key=story_key,
-                    story_keys=story_keys
+                    story_keys=story_keys,
+                    prd_url=prd_url
                 )
                 
                 # Store in memory for future requests
