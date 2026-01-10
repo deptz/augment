@@ -13,6 +13,7 @@ from ..dependencies import get_jira_client, get_generator
 from ..dependencies import jobs, get_active_job_for_ticket, register_ticket_job
 from ..auth import get_current_user
 from ..job_queue import get_redis_pool
+from ..utils import normalize_ticket_key
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -21,7 +22,7 @@ logger = logging.getLogger(__name__)
 @router.post("/generate/single", 
           tags=["Generation"],
           summary="Generate description for a single ticket",
-          description="Generate a description for a single JIRA ticket. Use async_mode=true to process in the background.")
+          description="Generate a description for a single JIRA ticket. Supports both ticket keys (e.g., PROJ-123) and full JIRA URLs. Use async_mode=true to process in the background.")
 async def generate_single_description(
     request: SingleTicketRequest, 
     current_user: str = Depends(get_current_user)
@@ -33,24 +34,32 @@ async def generate_single_description(
         if not generator:
             raise HTTPException(status_code=503, detail="Service not initialized")
         
+        # Parse ticket_key from URL if needed
+        ticket_key = normalize_ticket_key(request.ticket_key)
+        if not ticket_key:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid ticket key format: {request.ticket_key}. Please provide a valid JIRA ticket key or URL."
+            )
+        
         # If async mode, enqueue job
         if request.async_mode:
             # Check for duplicate active job
-            active_job_id = get_active_job_for_ticket(request.ticket_key)
+            active_job_id = get_active_job_for_ticket(ticket_key)
             if active_job_id:
                 # Verify job actually exists (defensive check)
                 if active_job_id in jobs:
                     active_job = jobs[active_job_id]
                     raise HTTPException(
                         status_code=409,
-                        detail=f"Ticket {request.ticket_key} is already being processed in job {active_job_id}",
+                        detail=f"Ticket {ticket_key} is already being processed in job {active_job_id}",
                         headers={"X-Active-Job-Id": active_job_id, "X-Active-Job-Status-Url": f"/jobs/{active_job_id}"}
                     )
                 else:
                     # Job ID returned but job doesn't exist - clean up stale mapping
-                    logger.warning(f"Stale ticket_jobs mapping found: {request.ticket_key} -> {active_job_id} (job not in jobs dict)")
+                    logger.warning(f"Stale ticket_jobs mapping found: {ticket_key} -> {active_job_id} (job not in jobs dict)")
                     from ..dependencies import unregister_ticket_job
-                    unregister_ticket_job(request.ticket_key)
+                    unregister_ticket_job(ticket_key)
                     # Continue to create new job
             
             job_id = str(uuid.uuid4())
@@ -59,22 +68,22 @@ async def generate_single_description(
                 job_id=job_id,
                 job_type="single",
                 status="started",
-                progress={"message": f"Queued for processing ticket {request.ticket_key}"},
+                progress={"message": f"Queued for processing ticket {ticket_key}"},
                 started_at=datetime.now(),
                 processed_tickets=0,
                 successful_tickets=0,
                 failed_tickets=0,
-                ticket_key=request.ticket_key
+                ticket_key=ticket_key
             )
             
             # Register ticket key for duplicate prevention
-            register_ticket_job(request.ticket_key, job_id)
+            register_ticket_job(ticket_key, job_id)
             
             redis_pool = await get_redis_pool()
             await redis_pool.enqueue_job(
                 'process_single_ticket_worker',
                 job_id=job_id,
-                ticket_key=request.ticket_key,
+                ticket_key=ticket_key,
                 update_jira=request.update_jira,
                 llm_model=request.llm_model,
                 llm_provider=request.llm_provider,
@@ -82,12 +91,12 @@ async def generate_single_description(
                 _job_id=job_id
             )
             
-            logger.info(f"Enqueued single ticket job {job_id} for ticket {request.ticket_key}")
+            logger.info(f"Enqueued single ticket job {job_id} for ticket {ticket_key}")
             
             return BatchResponse(
                 job_id=job_id,
                 status="started",
-                message=f"Ticket {request.ticket_key} queued for processing",
+                message=f"Ticket {ticket_key} queued for processing",
                 status_url=f"/jobs/{job_id}",
                 jql="",  # Not applicable for single ticket
                 max_results=1,
@@ -97,15 +106,15 @@ async def generate_single_description(
         
         # Synchronous mode (original behavior)
         jira_client = get_jira_client()
-        logger.info(f"Processing single ticket: {request.ticket_key}, update_jira={request.update_jira}")
+        logger.info(f"Processing single ticket: {ticket_key}, update_jira={request.update_jira}")
         
         if request.llm_model or request.llm_provider:
             logger.info(f"Using custom LLM settings - provider: {request.llm_provider or 'default'}, model: {request.llm_model or 'default'}")
         
-        ticket_data = jira_client.get_ticket(request.ticket_key)
+        ticket_data = jira_client.get_ticket(ticket_key)
         if not ticket_data:
             return TicketResponse(
-                ticket_key=request.ticket_key,
+                ticket_key=ticket_key,
                 summary="",
                 assignee_name=None,
                 parent_name=None,
@@ -125,7 +134,7 @@ async def generate_single_description(
         parent_name = parent.get('fields', {}).get('summary') if parent else None
         
         result = generator.process_ticket(
-            ticket_key=request.ticket_key,
+            ticket_key=ticket_key,
             dry_run=not request.update_jira,
             llm_model=request.llm_model,
             llm_provider=request.llm_provider,
@@ -141,7 +150,7 @@ async def generate_single_description(
             user_prompt = result.description.user_prompt
         
         return TicketResponse(
-            ticket_key=request.ticket_key,
+            ticket_key=ticket_key,
             summary=summary,
             assignee_name=assignee_name,
             parent_name=parent_name,
@@ -156,12 +165,16 @@ async def generate_single_description(
             user_prompt=user_prompt
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error processing ticket {request.ticket_key}: {e}")
         if request.async_mode:
             raise HTTPException(status_code=500, detail=str(e))
+        # Use normalized ticket_key in error response
+        normalized_key = normalize_ticket_key(request.ticket_key) or request.ticket_key
         return TicketResponse(
-            ticket_key=request.ticket_key,
+            ticket_key=normalized_key,
             summary="",
             assignee_name=None,
             parent_name=None,

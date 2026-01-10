@@ -59,9 +59,8 @@ class JQLRequest(BaseModel):
 class SingleTicketRequest(BaseModel):
     ticket_key: str = Field(
         ..., 
-        description="JIRA ticket key (e.g., PROJ-123)",
-        example="PROJ-123",
-        pattern=r"^[A-Z]+-\d+$"
+        description="JIRA ticket key or full JIRA URL (e.g., PROJ-123 or https://company.atlassian.net/browse/PROJ-123)",
+        example="PROJ-123"
     )
     update_jira: bool = Field(
         False,
@@ -105,7 +104,17 @@ class SingleTicketRequest(BaseModel):
                 "llm_provider": "openai",
                 "llm_model": "gpt-5-mini",
                 "additional_context": "Uses Redis for caching. Must be compatible with Python 3.10."
-            }
+            },
+            "examples": [
+                {
+                    "ticket_key": "PROJ-123",
+                    "update_jira": False
+                },
+                {
+                    "ticket_key": "https://company.atlassian.net/browse/PROJ-123",
+                    "update_jira": False
+                }
+            ]
         }
 
 
