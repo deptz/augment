@@ -143,12 +143,14 @@ async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update
             llm_provider=result.llm_provider,
             llm_model=result.llm_model,
             system_prompt=system_prompt,
-            user_prompt=user_prompt
+            user_prompt=user_prompt,
+            additional_context=additional_context
         )
         
         job.status = "completed"
         job.completed_at = datetime.now()
         job.results = ticket_response.dict()
+        job.additional_context = additional_context  # Preserve for job status retrieval
         job.progress = {"message": "Completed successfully" if result.success else f"Completed with error: {result.error}"}
         job.successful_tickets = 1 if result.success else 0
         job.failed_tickets = 0 if result.success else 1
@@ -481,8 +483,10 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
             "warnings": planning_result.warnings,
             "execution_time_seconds": planning_result.execution_time_seconds,
             "system_prompt": planning_result.system_prompt,
-            "user_prompt": planning_result.user_prompt
+            "user_prompt": planning_result.user_prompt,
+            "additional_context": additional_context
         }
+        job.additional_context = additional_context  # Preserve for job status retrieval
         job.progress = {"message": f"Generated {len(task_details)} tasks successfully"}
         job.successful_tickets = len(planning_result.created_tickets)
         

@@ -133,6 +133,7 @@ class TicketResponse(BaseModel):
     llm_model: Optional[str] = Field(None, description="LLM model used for generation")
     system_prompt: Optional[str] = Field(None, description="System prompt sent to LLM")
     user_prompt: Optional[str] = Field(None, description="User prompt sent to LLM")
+    additional_context: Optional[str] = Field(None, description="Additional context used for generation (preserved for reuse in subsequent operations)")
 
 
 class BatchResponse(BaseModel):
@@ -166,4 +167,5 @@ class JobStatus(BaseModel):
     story_key: Optional[str] = Field(None, description="Primary story key being processed (for single story jobs, e.g., story_coverage)")
     story_keys: Optional[List[str]] = Field(None, description="List of story keys being processed (for multi-story jobs, e.g., task_generation)")
     prd_url: Optional[str] = Field(None, description="PRD document URL (for prd_story_sync jobs)")
+    additional_context: Optional[str] = Field(None, description="Additional context used for processing (preserved for reuse in subsequent operations)")
 

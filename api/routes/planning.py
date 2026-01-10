@@ -385,7 +385,8 @@ async def generate_tasks_for_stories(request: TaskGenerationRequest, current_use
             warnings=planning_result.warnings,
             execution_time_seconds=planning_result.execution_time_seconds,
             system_prompt=planning_result.system_prompt,
-            user_prompt=planning_result.user_prompt
+            user_prompt=planning_result.user_prompt,
+            additional_context=request.additional_context
         )
         
         logger.info(f"Task generation completed for stories {story_keys}: {response.success}")

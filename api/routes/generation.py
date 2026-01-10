@@ -162,7 +162,8 @@ async def generate_single_description(
             llm_provider=result.llm_provider,
             llm_model=result.llm_model,
             system_prompt=system_prompt,
-            user_prompt=user_prompt
+            user_prompt=user_prompt,
+            additional_context=request.additional_context
         )
         
     except HTTPException:

@@ -198,6 +198,7 @@ class PlanningResultResponse(BaseModel):
     execution_time_seconds: float = Field(..., description="Time taken for planning")
     system_prompt: Optional[str] = Field(None, description="System prompt sent to LLM")
     user_prompt: Optional[str] = Field(None, description="User prompt sent to LLM")
+    additional_context: Optional[str] = Field(None, description="Additional context used for planning (preserved for reuse in subsequent operations)")
 
 
 class CycleTimeEstimateResponse(BaseModel):
