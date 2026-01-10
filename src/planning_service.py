@@ -2643,33 +2643,32 @@ class PlanningService:
             
             logger.info(f"Parsed {len(stories)} stories from PRD table")
             
-            # First, check PRD table for existing JIRA links (preferred method)
+            # EARLY DETECTION: Fetch existing stories from JIRA immediately after parsing PRD
+            # This allows us to know which stories already exist before processing
+            logger.info(f"Early detection: Fetching existing stories for epic {epic_key}...")
+            existing_story_titles = self._get_epic_stories_with_titles(epic_key)
+            logger.info(f"Early detection: Found {len(existing_story_titles)} existing stories by title")
+            if existing_story_titles:
+                logger.debug(f"Existing story titles (first 5): {list(existing_story_titles.keys())[:5]}")
+            
+            # Check PRD table for existing JIRA links (preferred method over title matching)
             stories_with_jira_keys = {}
             for story in stories:
                 if story.key:
                     stories_with_jira_keys[story.key] = story
                     logger.debug(f"Found JIRA key in PRD table for story: {story.key} - {story.summary}")
             
-            # Fallback: Check JIRA for existing stories by title
-            existing_stories = self._get_epic_stories(epic_key)
-            existing_story_titles = {}
-            
-            if existing_stories:
-                for story_key in existing_stories:
-                    try:
-                        story_data = self.jira_client.get_ticket(story_key)
-                        if story_data:
-                            title = story_data.get('fields', {}).get('summary', '')
-                            existing_story_titles[title.lower()] = story_key
-                    except Exception as e:
-                        logger.warning(f"Error getting existing story {story_key}: {e}")
-            
             # Filter stories based on existing_ticket_action
             stories_to_create = []
             stories_to_update = []
             skipped_stories = []
+            skipped_stories_needing_prd_link = []  # Track skipped stories that need PRD table link update
             story_metadata = {}  # Track metadata: story_key -> {source, action_taken, was_updated, jira_url}
             jira_server_url = self.jira_client.server_url.rstrip('/')
+            
+            # Track PRD content updates for immediate application
+            prd_content_updated = False
+            prd_html_content = prd_content.get('body', {}).get('storage', {}).get('value', '') if prd_content else ''
             
             for story in stories:
                 # Priority 1: Check if story has JIRA key from PRD table
@@ -2704,9 +2703,11 @@ class PlanningService:
                         }
                 else:
                     # Priority 2: Check JIRA API for existing stories by title (fallback)
-                    story_title_lower = story.summary.lower()
-                    if story_title_lower in existing_story_titles:
-                        existing_key = existing_story_titles[story_title_lower]
+                    # Normalize title: lowercase and strip whitespace for consistent matching
+                    story_title_normalized = story.summary.lower().strip()
+                    logger.debug(f"Checking title match for story: '{story_title_normalized[:60]}...' (has key: {story.key})")
+                    if story_title_normalized in existing_story_titles:
+                        existing_key = existing_story_titles[story_title_normalized]
                         jira_url = f"{jira_server_url}/browse/{existing_key}"
                         
                         if existing_ticket_action == "error":
@@ -2728,11 +2729,42 @@ class PlanningService:
                             }
                         else:  # skip
                             skipped_stories.append(story.summary)
+                            # Track this story for PRD table link update (matched by title, PRD doesn't have link yet)
+                            story.key = existing_key  # Set key so we can update PRD table
+                            skipped_stories_needing_prd_link.append(story)
+                            
+                            # IMMEDIATE UPDATE: Update PRD table directly when early detection finds a match
+                            # This happens even in dry_run mode - we update the in-memory content
+                            # The actual save to Confluence respects dry_run flag
+                            prd_updated_immediately = False
+                            logger.info(f"Early detection matched: '{story.summary[:50]}...' -> {existing_key}")
+                            logger.debug(f"Attempting immediate PRD update: confluence_client={self.confluence_client is not None}, prd_html_content_len={len(prd_html_content) if prd_html_content else 0}")
+                            if self.confluence_client and prd_html_content:
+                                updated_html = self._update_prd_table_immediately(
+                                    prd_html_content,
+                                    story,
+                                    existing_key,
+                                    jira_url
+                                )
+                                if updated_html:
+                                    prd_html_content = updated_html
+                                    prd_content_updated = True
+                                    prd_updated_immediately = True
+                                    if dry_run:
+                                        logger.info(f"[DRY RUN] Would immediately update PRD table with JIRA link: {existing_key} for story '{story.summary[:50]}...'")
+                                    else:
+                                        logger.info(f"Immediately updated PRD table with JIRA link: {existing_key} for story '{story.summary[:50]}...'")
+                                else:
+                                    logger.warning(f"Failed to immediately update PRD table for {existing_key}")
+                            else:
+                                logger.warning(f"Cannot immediately update PRD: confluence_client={self.confluence_client is not None}, prd_html_content={bool(prd_html_content)}")
+                            
                             story_metadata[existing_key] = {
                                 'source': 'jira_api',
                                 'action_taken': 'skipped',
                                 'was_updated': False,
-                                'jira_url': jira_url
+                                'jira_url': jira_url,
+                                'prd_updated_immediately': prd_updated_immediately
                             }
                     else:
                         # New story - needs to be created
@@ -2855,6 +2887,34 @@ class PlanningService:
             # Create/update stories (only if not dry run)
             created_tickets = {"stories": []}
             
+            # Save PRD content if it was updated immediately during early detection
+            # This happens BEFORE dry_run check because linking existing tickets should always be saved
+            if prd_content_updated and prd_html_content and self.confluence_client:
+                try:
+                    page_id = prd_content.get('id')
+                    if page_id:
+                        # Update the prd_content dict with new HTML
+                        if 'body' not in prd_content:
+                            prd_content['body'] = {}
+                        if 'storage' not in prd_content['body']:
+                            prd_content['body']['storage'] = {}
+                        prd_content['body']['storage']['value'] = prd_html_content
+                        
+                        # Get current version for update
+                        current_version = prd_content.get('version', {}).get('number', 1)
+                        
+                        # Save to Confluence (even in dry_run mode for existing ticket links)
+                        logger.info(f"Saving PRD table updates to Confluence (page_id={page_id}, version={current_version})...")
+                        success = self.confluence_client.update_page_content(page_id, prd_html_content, current_version)
+                        if success:
+                            logger.info(f"Successfully saved PRD table updates to Confluence (linked {len(skipped_stories_needing_prd_link)} existing tickets from early detection)")
+                        else:
+                            logger.warning("Failed to save PRD table updates to Confluence")
+                except Exception as e:
+                    logger.warning(f"Error saving immediate PRD updates: {e}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
+            
             if not dry_run:
                 if stories_to_create:
                     created = self._create_story_tickets(stories_to_create)
@@ -2903,6 +2963,22 @@ class PlanningService:
                                 'was_updated': False,
                                 'jira_url': jira_url
                             }
+                
+                # Update PRD table with JIRA links for skipped stories (matched by title but PRD missing link)
+                # Only update stories that weren't already updated immediately
+                stories_still_needing_update = [
+                    story for story in skipped_stories_needing_prd_link 
+                    if story.key and story_metadata.get(story.key, {}).get('prd_updated_immediately', False) == False
+                ]
+                if stories_still_needing_update and self.confluence_client:
+                    skipped_story_keys = [story.key for story in stories_still_needing_update if story.key]
+                    if skipped_story_keys:
+                        logger.info(f"Updating PRD table with JIRA links for {len(skipped_story_keys)} remaining skipped stories (matched by title)")
+                        self._update_prd_table_with_story_links_uuid(
+                            prd_content=prd_content,
+                            stories=stories_still_needing_update,
+                            created_story_keys=skipped_story_keys
+                        )
             
             # Build epic plan with all stories (including skipped ones for display)
             # The 'stories' variable contains all parsed stories, regardless of whether they're created/updated/skipped
@@ -2962,6 +3038,40 @@ class PlanningService:
         except Exception as e:
             logger.warning(f"Error getting stories for epic {epic_key}: {str(e)}")
             return []
+    
+    def _get_epic_stories_with_titles(self, epic_key: str) -> Dict[str, str]:
+        """
+        Get all stories linked to an epic with their titles in one optimized call.
+        
+        This method fetches all stories under an epic and returns a mapping of
+        title (lowercase) to JIRA key for early detection of existing stories.
+        
+        Args:
+            epic_key: The JIRA epic key
+            
+        Returns:
+            Dict mapping lowercase title to JIRA key (e.g., {"my story title": "STORY-123"})
+        """
+        existing_story_titles = {}
+        try:
+            jql = f'"Epic Link" = {epic_key} AND issuetype = Story'
+            # Use search_tickets which returns full issue data including summary
+            issues = self.jira_client.search_tickets(jql, max_results=1000)
+            
+            for issue in issues:
+                issue_key = issue.get('key', '')
+                title = issue.get('fields', {}).get('summary', '')
+                if issue_key and title:
+                    # Normalize title: lowercase and strip whitespace for consistent matching
+                    title_normalized = title.lower().strip()
+                    existing_story_titles[title_normalized] = issue_key
+            
+            logger.debug(f"Fetched {len(existing_story_titles)} existing stories with titles for epic {epic_key}")
+            
+        except Exception as e:
+            logger.warning(f"Error getting stories with titles for epic {epic_key}: {str(e)}")
+        
+        return existing_story_titles
     
     def _update_story_ticket(self, story: 'StoryPlan'):
         """Update an existing story ticket"""
@@ -3404,6 +3514,113 @@ class PlanningService:
             logger.debug(traceback.format_exc())
             # Don't fail story creation if PRD update fails
             return False
+    
+    def _update_prd_table_immediately(
+        self,
+        html_content: str,
+        story: 'StoryPlan',
+        jira_key: str,
+        jira_url: str
+    ) -> Optional[str]:
+        """
+        Immediately update PRD table HTML with JIRA link for a story matched by early detection.
+        
+        This method updates the HTML content in memory and returns the updated HTML.
+        The caller is responsible for saving it to Confluence.
+        
+        Args:
+            html_content: Current PRD HTML content
+            story: StoryPlan object with story details
+            jira_key: JIRA ticket key (e.g., "STORY-123")
+            jira_url: Full JIRA ticket URL
+            
+        Returns:
+            Updated HTML content, or None if update failed
+        """
+        try:
+            from .prd_table_updater import find_row_by_uuid, replace_uuid_with_jira_link, update_story_row_with_jira_link
+            from .prd_story_parser import PRDStoryParser
+            from bs4 import BeautifulSoup
+            
+            # Try UUID-based matching first (most reliable)
+            if story.prd_row_uuid:
+                row_idx = find_row_by_uuid(html_content, story.prd_row_uuid)
+                if row_idx is not None:
+                    updated_html = replace_uuid_with_jira_link(
+                        html_content,
+                        row_idx,
+                        jira_key,
+                        jira_url
+                    )
+                    if updated_html:
+                        logger.debug(f"Updated PRD row {row_idx} with JIRA link using UUID: {jira_key}")
+                        return updated_html
+            
+            # Fallback to fuzzy matching by story summary
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Find story table
+            parser = PRDStoryParser()
+            story_table = parser._find_story_table(soup)
+            if not story_table:
+                logger.warning("Could not find story table for immediate update")
+                return None
+            
+            rows = story_table.find_all("tr")
+            if len(rows) < 2:
+                logger.warning("Story table has no data rows")
+                return None
+            
+            # Get headers to find story column
+            header_row = rows[0]
+            header_cells = header_row.find_all(['th', 'td'])
+            header_texts = [cell.get_text(" ", strip=True) for cell in header_cells]
+            
+            story_col_idx = None
+            for idx, header in enumerate(header_texts):
+                if "user story" in header.lower() or "user-story" in header.lower():
+                    story_col_idx = idx
+                    break
+            
+            if story_col_idx is None:
+                logger.warning("Could not find story column for immediate update")
+                return None
+            
+            # Find matching row by story summary
+            matched_row_idx = None
+            story_summary_normalized = story.summary.lower().strip()
+            
+            for row_idx, row in enumerate(rows[1:], 1):
+                cells = row.find_all("td")
+                if story_col_idx < len(cells):
+                    cell_text = parser._clean_text(cells[story_col_idx]).lower().strip()
+                    # Check if story summary matches (fuzzy match)
+                    if (story_summary_normalized in cell_text or 
+                        cell_text in story_summary_normalized or
+                        story_summary_normalized[:50] in cell_text or
+                        cell_text[:50] in story_summary_normalized):
+                        matched_row_idx = row_idx - 1  # Convert to 0-based index
+                        break
+            
+            if matched_row_idx is not None:
+                updated_html = update_story_row_with_jira_link(
+                    html_content,
+                    matched_row_idx,
+                    jira_key,
+                    jira_url
+                )
+                if updated_html:
+                    logger.debug(f"Updated PRD row {matched_row_idx} with JIRA link (fuzzy match): {jira_key}")
+                    return updated_html
+            
+            logger.warning(f"Could not find matching row in PRD table for story '{story.summary[:50]}...'")
+            return None
+            
+        except Exception as e:
+            logger.warning(f"Error in immediate PRD update: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            return None
     
     def _update_prd_table_for_story(
         self,

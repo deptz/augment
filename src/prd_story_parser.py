@@ -749,13 +749,24 @@ class PRDStoryParser:
         # Get text content
         cell_text = cell.get_text(" ", strip=True)
 
+        # First check if this is a UUID placeholder (should not be treated as JIRA key)
+        # UUID placeholders have format: [TEMP-{uuid}](placeholder) or TEMP-{long_number}
+        uuid_placeholder_pattern = r'\[TEMP-[a-f0-9-]+\]\(placeholder\)|TEMP-\d{8,}'
+        if re.search(uuid_placeholder_pattern, cell_text, re.IGNORECASE):
+            # This is a UUID placeholder, not a JIRA key
+            return None
+
         # Pattern to match JIRA ticket keys: PROJECT-123
-        jira_key_pattern = r'\b([A-Z][A-Z0-9]+-\d+)\b'
+        # Exclude TEMP- prefix which is used for UUID placeholders
+        jira_key_pattern = r'\b((?!TEMP-)[A-Z][A-Z0-9]+-\d+)\b'
 
         # Try to find JIRA key in text
         match = re.search(jira_key_pattern, cell_text)
         if match:
-            return match.group(1)
+            potential_key = match.group(1)
+            # Double-check: exclude TEMP- keys (UUID placeholders)
+            if not potential_key.startswith('TEMP-'):
+                return potential_key
 
         # Also check for links (markdown or HTML)
         links = cell.find_all('a', href=True)
@@ -775,13 +786,15 @@ class PRDStoryParser:
         """
         Extract UUID placeholder from a table cell
         
-        Looks for format: [TEMP-{uuid}](placeholder)
+        Looks for formats:
+        - [TEMP-{uuid}](placeholder) - full UUID format
+        - TEMP-{number} - simplified format (e.g., TEMP-30352896)
         
         Args:
             cell: BeautifulSoup cell element
             
         Returns:
-            UUID string if found, None otherwise
+            UUID string or placeholder ID if found, None otherwise
         """
         if cell is None:
             return None
@@ -789,12 +802,18 @@ class PRDStoryParser:
         # Get text content
         cell_text = cell.get_text(" ", strip=True)
         
-        # Pattern to match UUID placeholder: [TEMP-{uuid}](placeholder)
-        uuid_pattern = r'\[TEMP-([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\]\(placeholder\)'
-        
-        # Try to find UUID in text
-        match = re.search(uuid_pattern, cell_text, re.IGNORECASE)
+        # Pattern 1: Full UUID format: [TEMP-{uuid}](placeholder)
+        uuid_pattern_full = r'\[TEMP-([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\]\(placeholder\)'
+        match = re.search(uuid_pattern_full, cell_text, re.IGNORECASE)
         if match:
+            return match.group(1)
+        
+        # Pattern 2: Simplified format: TEMP-{number} (8+ digits)
+        # This handles cases where UUID is stored as just TEMP-{number}
+        uuid_pattern_simple = r'\bTEMP-(\d{8,})\b'
+        match = re.search(uuid_pattern_simple, cell_text, re.IGNORECASE)
+        if match:
+            # Return the number as the placeholder ID
             return match.group(1)
         
         return None

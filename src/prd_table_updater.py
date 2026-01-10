@@ -340,7 +340,13 @@ def find_row_by_uuid(
             return None
         
         # Search for UUID placeholder in data rows
-        uuid_pattern = f"[TEMP-{row_uuid}](placeholder)"
+        # Support multiple formats:
+        # 1. [TEMP-{uuid}](placeholder) - full markdown format
+        # 2. TEMP-{uuid} - plain text format
+        uuid_patterns = [
+            f"[TEMP-{row_uuid}](placeholder)",  # Full format
+            f"TEMP-{row_uuid}",  # Plain text format
+        ]
         
         for row_idx, row in enumerate(rows[1:], 0):  # Start from 0 for data rows
             cells = row.find_all("td")
@@ -348,11 +354,12 @@ def find_row_by_uuid(
                 jira_cell = cells[jira_col_index]
                 cell_text = jira_cell.get_text(" ", strip=True)
                 
-                if uuid_pattern in cell_text:
-                    logger.info(f"Found UUID {row_uuid} at row index {row_idx}")
-                    return row_idx
+                for uuid_pattern in uuid_patterns:
+                    if uuid_pattern in cell_text:
+                        logger.info(f"Found UUID {row_uuid} at row index {row_idx} (pattern: {uuid_pattern})")
+                        return row_idx
         
-        logger.warning(f"UUID {row_uuid} not found in PRD table")
+        logger.warning(f"UUID {row_uuid} not found in PRD table (searched patterns: {uuid_patterns})")
         return None
         
     except Exception as e:
