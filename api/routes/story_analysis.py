@@ -141,7 +141,10 @@ async def analyze_story_coverage(
         
         logger.info(f"Coverage analysis completed for {request.story_key}: {result.get('coverage_percentage', 0)}% coverage")
         
-        return StoryCoverageResponse(**result)
+        # Ensure additional_context is included in response
+        result_with_context = result.copy()
+        result_with_context['additional_context'] = request.additional_context
+        return StoryCoverageResponse(**result_with_context)
         
     except HTTPException:
         raise

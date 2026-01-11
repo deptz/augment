@@ -1192,11 +1192,16 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
         
         # Convert result to response format
         from .models.story_analysis import StoryCoverageResponse
-        coverage_response = StoryCoverageResponse(**result)
+        
+        # Ensure additional_context is included in result
+        result_with_context = result.copy()
+        result_with_context['additional_context'] = additional_context
+        coverage_response = StoryCoverageResponse(**result_with_context)
         
         job.status = "completed"
         job.completed_at = datetime.now()
         job.results = coverage_response.dict()
+        job.additional_context = additional_context  # Preserve for job status retrieval
         job.progress = {
             "message": f"Analysis completed: {result.get('coverage_percentage', 0)}% coverage",
             "coverage_percentage": result.get('coverage_percentage', 0)

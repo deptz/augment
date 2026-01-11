@@ -98,6 +98,7 @@ class StoryCoverageResponse(BaseModel):
     error: Optional[str] = Field(None, description="Error message if analysis failed")
     system_prompt: Optional[str] = Field(None, description="System prompt sent to LLM")
     user_prompt: Optional[str] = Field(None, description="User prompt sent to LLM")
+    additional_context: Optional[str] = Field(None, description="Additional context used for analysis (preserved for reuse in subsequent operations)")
 
 
 class UpdateTaskRequest(BaseModel):
