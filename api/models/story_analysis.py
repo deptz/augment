@@ -10,9 +10,8 @@ class StoryCoverageRequest(BaseModel):
     """Request model for story coverage analysis"""
     story_key: str = Field(
         ..., 
-        description="Story ticket key to analyze",
-        example="PROJ-123",
-        pattern=r"^[A-Z]+-\d+$"
+        description="Story ticket key or full JIRA URL to analyze (e.g., PROJ-123 or https://company.atlassian.net/browse/PROJ-123)",
+        example="PROJ-123"
     )
     include_test_cases: bool = Field(
         default=True,
@@ -105,7 +104,7 @@ class UpdateTaskRequest(BaseModel):
     """Request to update an existing task with suggested improvements"""
     task_key: str = Field(
         ...,
-        description="Task ticket key to update",
+        description="Task ticket key or full JIRA URL to update (e.g., PROJ-124 or https://company.atlassian.net/browse/PROJ-124)",
         example="PROJ-124"
     )
     updated_description: str = Field(
@@ -126,7 +125,7 @@ class CreateTaskRequest(BaseModel):
     """Request to create a new task from suggestions"""
     story_key: str = Field(
         ...,
-        description="Parent story ticket key",
+        description="Parent story ticket key or full JIRA URL (e.g., PROJ-123 or https://company.atlassian.net/browse/PROJ-123)",
         example="PROJ-123"
     )
     task_summary: str = Field(

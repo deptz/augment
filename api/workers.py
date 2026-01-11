@@ -1142,6 +1142,14 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
     llm_client = get_llm_client()
     config = get_config()
     
+    # Normalize story_key from URL if needed (defensive - should already be normalized by route handler)
+    from .utils import normalize_ticket_key
+    normalized_story_key = normalize_ticket_key(story_key)
+    if not normalized_story_key:
+        logger.error(f"[STORY_COVERAGE] Invalid story_key format: {story_key}")
+        raise ValueError(f"Invalid story key format: {story_key}")
+    story_key = normalized_story_key
+    
     try:
         job = _get_or_create_job(job_id, "story_coverage", f"Analyzing coverage for story {story_key}...")
         job.story_key = story_key
@@ -1164,13 +1172,21 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
         
         job.progress = {"message": "Initializing analyzer..."}
         
+        # Get confluence client and planning service for PRD/RFC fetching
+        from .dependencies import get_confluence_client, get_generator
+        confluence_client = get_confluence_client()
+        generator = get_generator()
+        planning_service = generator.planning_service if generator else None
+        
         # Import and create the analyzer
         from src.story_coverage_analyzer import StoryCoverageAnalyzer
         
         analyzer = StoryCoverageAnalyzer(
             jira_client=jira_client,
             llm_client=analysis_llm_client,
-            config=config.__dict__ if hasattr(config, '__dict__') else {}
+            config=config.__dict__ if hasattr(config, '__dict__') else {},
+            confluence_client=confluence_client,
+            planning_service=planning_service
         )
         
         job.progress = {"message": "Fetching story and tasks..."}
@@ -1419,7 +1435,7 @@ async def process_task_creation_worker(ctx, job_id: str, story_keys: List[str], 
         # Generate tasks first
         from src.planning_models import PlanningContext, OperationMode
         from .dependencies import get_jira_client
-        from ..utils import normalize_ticket_key
+        from .utils import normalize_ticket_key
         
         jira_client = get_jira_client()
         

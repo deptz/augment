@@ -19,7 +19,7 @@ from ..models.story_analysis import (
 from ..models.generation import BatchResponse, JobStatus
 from ..dependencies import get_jira_client, get_llm_client, get_config
 from ..dependencies import jobs, get_active_job_for_ticket, register_ticket_job
-from ..utils import create_custom_llm_client
+from ..utils import create_custom_llm_client, normalize_ticket_key
 from ..auth import get_current_user
 from ..job_queue import get_redis_pool
 
@@ -41,7 +41,15 @@ async def analyze_story_coverage(
     config = get_config()
     
     try:
-        logger.info(f"User {current_user} analyzing coverage for story {request.story_key} (async_mode={request.async_mode})")
+        # Normalize story_key from URL if needed
+        story_key = normalize_ticket_key(request.story_key)
+        if not story_key:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid story key format: {request.story_key}. Please provide a valid JIRA ticket key or URL."
+            )
+        
+        logger.info(f"User {current_user} analyzing coverage for story {story_key} (async_mode={request.async_mode})")
         
         if not jira_client:
             raise HTTPException(status_code=503, detail="JIRA client not initialized")
@@ -52,21 +60,21 @@ async def analyze_story_coverage(
         # If async mode, enqueue job
         if request.async_mode:
             # Check for duplicate active job
-            active_job_id = get_active_job_for_ticket(request.story_key)
+            active_job_id = get_active_job_for_ticket(story_key)
             if active_job_id:
                 # Verify job actually exists (defensive check)
                 if active_job_id in jobs:
                     active_job = jobs[active_job_id]
                     raise HTTPException(
                         status_code=409,
-                        detail=f"Story {request.story_key} is already being processed in job {active_job_id}",
+                        detail=f"Story {story_key} is already being processed in job {active_job_id}",
                         headers={"X-Active-Job-Id": active_job_id, "X-Active-Job-Status-Url": f"/jobs/{active_job_id}"}
                     )
                 else:
                     # Job ID returned but job doesn't exist - clean up stale mapping
-                    logger.warning(f"Stale ticket_jobs mapping found: {request.story_key} -> {active_job_id} (job not in jobs dict)")
+                    logger.warning(f"Stale ticket_jobs mapping found: {story_key} -> {active_job_id} (job not in jobs dict)")
                     from ..dependencies import unregister_ticket_job
-                    unregister_ticket_job(request.story_key)
+                    unregister_ticket_job(story_key)
                     # Continue to create new job
             
             job_id = str(uuid.uuid4())
@@ -75,22 +83,22 @@ async def analyze_story_coverage(
                 job_id=job_id,
                 job_type="story_coverage",
                 status="started",
-                progress={"message": f"Queued for analyzing story coverage for {request.story_key}"},
+                progress={"message": f"Queued for analyzing story coverage for {story_key}"},
                 started_at=datetime.now(),
                 processed_tickets=0,
                 successful_tickets=0,
                 failed_tickets=0,
-                story_key=request.story_key
+                story_key=story_key
             )
             
             # Register story key for duplicate prevention
-            register_ticket_job(request.story_key, job_id)
+            register_ticket_job(story_key, job_id)
             
             redis_pool = await get_redis_pool()
             await redis_pool.enqueue_job(
                 'process_story_coverage_worker',
                 job_id=job_id,
-                story_key=request.story_key,
+                story_key=story_key,
                 include_test_cases=request.include_test_cases,
                 additional_context=request.additional_context,
                 llm_model=request.llm_model,
@@ -98,12 +106,12 @@ async def analyze_story_coverage(
                 _job_id=job_id
             )
             
-            logger.info(f"Enqueued story coverage analysis job {job_id} for story {request.story_key}")
+            logger.info(f"Enqueued story coverage analysis job {job_id} for story {story_key}")
             
             return BatchResponse(
                 job_id=job_id,
                 status="started",
-                message=f"Story coverage analysis for {request.story_key} queued for processing",
+                message=f"Story coverage analysis for {story_key} queued for processing",
                 status_url=f"/jobs/{job_id}",
                 jql="",  # Not applicable for story coverage
                 max_results=1,
@@ -117,18 +125,26 @@ async def analyze_story_coverage(
         if request.llm_provider or request.llm_model:
             analysis_llm_client = create_custom_llm_client(request.llm_provider, request.llm_model)
         
+        # Get confluence client and planning service for PRD/RFC fetching
+        from ..dependencies import get_confluence_client, get_generator
+        confluence_client = get_confluence_client()
+        generator = get_generator()
+        planning_service = generator.planning_service if generator else None
+        
         # Import and create the analyzer
         from src.story_coverage_analyzer import StoryCoverageAnalyzer
         
         analyzer = StoryCoverageAnalyzer(
             jira_client=jira_client,
             llm_client=analysis_llm_client,
-            config=config.__dict__ if hasattr(config, '__dict__') else {}
+            config=config.__dict__ if hasattr(config, '__dict__') else {},
+            confluence_client=confluence_client,
+            planning_service=planning_service
         )
         
         # Perform analysis
         result = analyzer.analyze_coverage(
-            story_key=request.story_key,
+            story_key=story_key,
             include_test_cases=request.include_test_cases,
             additional_context=request.additional_context
         )
@@ -139,7 +155,7 @@ async def analyze_story_coverage(
                 detail=result.get('error', 'Analysis failed')
             )
         
-        logger.info(f"Coverage analysis completed for {request.story_key}: {result.get('coverage_percentage', 0)}% coverage")
+        logger.info(f"Coverage analysis completed for {story_key}: {result.get('coverage_percentage', 0)}% coverage")
         
         # Ensure additional_context is included in response
         result_with_context = result.copy()
@@ -149,7 +165,9 @@ async def analyze_story_coverage(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error analyzing story coverage for {request.story_key}: {str(e)}", exc_info=True)
+        # Use normalized key if available, otherwise fall back to original
+        error_key = story_key if 'story_key' in dir() else request.story_key
+        logger.error(f"Error analyzing story coverage for {error_key}: {str(e)}", exc_info=True)
         if request.async_mode:
             raise HTTPException(status_code=500, detail=str(e))
         raise HTTPException(status_code=500, detail=f"Failed to analyze story coverage: {str(e)}")
@@ -169,40 +187,48 @@ async def update_task_from_suggestion(
     from ..dependencies import get_confluence_client
     
     try:
-        logger.info(f"User {current_user} updating task {request.task_key} (update_jira={request.update_jira})")
+        # Normalize task_key from URL if needed
+        task_key = normalize_ticket_key(request.task_key)
+        if not task_key:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid task key format: {request.task_key}. Please provide a valid JIRA ticket key or URL."
+            )
+        
+        logger.info(f"User {current_user} updating task {task_key} (update_jira={request.update_jira})")
         
         if not jira_client:
             raise HTTPException(status_code=503, detail="JIRA client not initialized")
         
         # Verify task exists
-        task_data = jira_client.get_ticket(request.task_key)
+        task_data = jira_client.get_ticket(task_key)
         if not task_data:
-            raise HTTPException(status_code=404, detail=f"Task {request.task_key} not found")
+            raise HTTPException(status_code=404, detail=f"Task {task_key} not found")
         
         if not request.update_jira:
             # Preview mode - just return what would be updated
-            logger.info(f"Preview mode for {request.task_key} - not updating JIRA")
+            logger.info(f"Preview mode for {task_key} - not updating JIRA")
             return UpdateTaskResponse(
                 success=True,
-                task_key=request.task_key,
+                task_key=task_key,
                 updated_in_jira=False,
                 preview_description=request.updated_description,
                 preview_test_cases=request.updated_test_cases,
-                message=f"Preview: Task {request.task_key} would be updated with provided content. Set update_jira=true to commit."
+                message=f"Preview: Task {task_key} would be updated with provided content. Set update_jira=true to commit."
             )
         
         # Actually update JIRA
-        logger.info(f"Updating task {request.task_key} in JIRA")
+        logger.info(f"Updating task {task_key} in JIRA")
         
         # Update description
         description_updated = jira_client.update_ticket_description(
-            ticket_key=request.task_key,
+            ticket_key=task_key,
             description=request.updated_description,
             dry_run=False
         )
         
         if not description_updated:
-            raise HTTPException(status_code=500, detail=f"Failed to update description for {request.task_key}")
+            raise HTTPException(status_code=500, detail=f"Failed to update description for {task_key}")
         
         # Handle image attachments if description contains images
         confluence_client = get_confluence_client()
@@ -211,7 +237,7 @@ async def update_task_from_suggestion(
             confluence_server_url = confluence_client.server_url
         
         jira_client._attach_images_from_description(
-            request.task_key, 
+            task_key, 
             request.updated_description, 
             confluence_server_url
         )
@@ -219,29 +245,31 @@ async def update_task_from_suggestion(
         # Update test cases if provided
         if request.updated_test_cases:
             test_cases_updated = jira_client.update_test_case_custom_field(
-                ticket_key=request.task_key,
+                ticket_key=task_key,
                 test_cases_content=request.updated_test_cases
             )
             
             if not test_cases_updated:
-                logger.warning(f"Failed to update test cases for {request.task_key}")
+                logger.warning(f"Failed to update test cases for {task_key}")
         
-        logger.info(f"Successfully updated task {request.task_key} in JIRA")
+        logger.info(f"Successfully updated task {task_key} in JIRA")
         
         return UpdateTaskResponse(
             success=True,
-            task_key=request.task_key,
+            task_key=task_key,
             updated_in_jira=True,
-            message=f"Successfully updated task {request.task_key} in JIRA"
+            message=f"Successfully updated task {task_key} in JIRA"
         )
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error updating task {request.task_key}: {str(e)}", exc_info=True)
+        # Use normalized key if available, otherwise fall back to original
+        error_key = task_key if 'task_key' in dir() else request.task_key
+        logger.error(f"Error updating task {error_key}: {str(e)}", exc_info=True)
         return UpdateTaskResponse(
             success=False,
-            task_key=request.task_key,
+            task_key=error_key,
             updated_in_jira=False,
             message=f"Failed to update task",
             error=str(e)
@@ -261,37 +289,45 @@ async def create_task_from_suggestion(
     jira_client = get_jira_client()
     
     try:
-        logger.info(f"User {current_user} creating task for story {request.story_key} (create_ticket={request.create_ticket})")
+        # Normalize story_key from URL if needed
+        story_key = normalize_ticket_key(request.story_key)
+        if not story_key:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid story key format: {request.story_key}. Please provide a valid JIRA ticket key or URL."
+            )
+        
+        logger.info(f"User {current_user} creating task for story {story_key} (create_ticket={request.create_ticket})")
         
         if not jira_client:
             raise HTTPException(status_code=503, detail="JIRA client not initialized")
         
         # Verify story exists
-        story_data = jira_client.get_ticket(request.story_key)
+        story_data = jira_client.get_ticket(story_key)
         if not story_data:
-            raise HTTPException(status_code=404, detail=f"Story {request.story_key} not found")
+            raise HTTPException(status_code=404, detail=f"Story {story_key} not found")
         
         # Get project key from story
-        project_key = jira_client.get_project_key_from_epic(request.story_key)
+        project_key = jira_client.get_project_key_from_epic(story_key)
         if not project_key:
-            raise HTTPException(status_code=400, detail=f"Could not determine project key from {request.story_key}")
+            raise HTTPException(status_code=400, detail=f"Could not determine project key from {story_key}")
         
         if not request.create_ticket:
             # Preview mode - just return what would be created
-            logger.info(f"Preview mode for new task under {request.story_key} - not creating in JIRA")
+            logger.info(f"Preview mode for new task under {story_key} - not creating in JIRA")
             return CreateTaskResponse(
                 success=True,
-                story_key=request.story_key,
+                story_key=story_key,
                 task_key=None,
                 created_in_jira=False,
                 preview_summary=request.task_summary,
                 preview_description=request.task_description,
                 preview_test_cases=request.test_cases,
-                message=f"Preview: Task would be created under story {request.story_key}. Set create_ticket=true to commit."
+                message=f"Preview: Task would be created under story {story_key}. Set create_ticket=true to commit."
             )
         
         # Actually create in JIRA
-        logger.info(f"Creating new task under story {request.story_key} in JIRA")
+        logger.info(f"Creating new task under story {story_key} in JIRA")
         
         # Prepare task data following existing patterns
         from src.planning_models import TaskPlan, CycleTimeEstimate, TaskScope
@@ -325,58 +361,60 @@ async def create_task_from_suggestion(
         )
         
         # Create the task ticket with raw description to avoid duplication
-        task_key = jira_client.create_task_ticket(
+        created_task_key = jira_client.create_task_ticket(
             task_plan=task_plan,
             project_key=project_key,
-            story_key=request.story_key,
+            story_key=story_key,
             raw_description=request.task_description
         )
         
-        if not task_key:
+        if not created_task_key:
             raise HTTPException(status_code=500, detail="Failed to create task ticket")
         
         # Update test cases separately if provided (as raw string for custom field)
         if request.test_cases:
             test_cases_updated = jira_client.update_test_case_custom_field(
-                ticket_key=task_key,
+                ticket_key=created_task_key,
                 test_cases_content=request.test_cases
             )
             if test_cases_updated:
-                logger.info(f"Added test cases to task {task_key}")
+                logger.info(f"Added test cases to task {created_task_key}")
         
         # Link task to story using "Work item split" relationship
         link_created = jira_client.create_issue_link(
-            inward_key=task_key,      # Task is inward (split from)
-            outward_key=request.story_key,  # Story is outward (split to)
+            inward_key=created_task_key,      # Task is inward (split from)
+            outward_key=story_key,  # Story is outward (split to)
             link_type="Work item split"
         )
         
         if not link_created:
-            logger.warning(f"Failed to create 'Work item split' link between {task_key} and {request.story_key}")
+            logger.warning(f"Failed to create 'Work item split' link between {created_task_key} and {story_key}")
             # Try alternative link type
             jira_client.create_issue_link(
-                inward_key=task_key,      # Task is inward (split from)
-                outward_key=request.story_key,  # Story is outward (split to)
+                inward_key=created_task_key,      # Task is inward (split from)
+                outward_key=story_key,  # Story is outward (split to)
                 link_type="Relates"
             )
         
-        logger.info(f"Successfully created task {task_key} under story {request.story_key}")
+        logger.info(f"Successfully created task {created_task_key} under story {story_key}")
         
         return CreateTaskResponse(
             success=True,
-            story_key=request.story_key,
-            task_key=task_key,
+            story_key=story_key,
+            task_key=created_task_key,
             created_in_jira=True,
-            message=f"Successfully created task {task_key} under story {request.story_key}"
+            message=f"Successfully created task {created_task_key} under story {story_key}"
         )
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error creating task for story {request.story_key}: {str(e)}", exc_info=True)
+        # Use normalized key if available, otherwise fall back to original
+        error_key = story_key if 'story_key' in dir() else request.story_key
+        logger.error(f"Error creating task for story {error_key}: {str(e)}", exc_info=True)
         return CreateTaskResponse(
             success=False,
-            story_key=request.story_key,
+            story_key=error_key,
             task_key=None,
             created_in_jira=False,
             message=f"Failed to create task",

@@ -21,6 +21,7 @@ class AnalysisPrompts:
 **Story Test Cases:**
 {story_test_cases}
 
+{document_context}
 {additional_context}
 **Existing Tasks ({tasks_count} tasks):**
 {tasks_summary}

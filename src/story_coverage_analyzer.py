@@ -17,7 +17,7 @@ class StoryCoverageAnalyzer:
     - Suggestions for new tasks to fill gaps
     """
     
-    def __init__(self, jira_client, llm_client, config: dict):
+    def __init__(self, jira_client, llm_client, config: dict, confluence_client=None, planning_service=None):
         """
         Initialize the analyzer
         
@@ -25,10 +25,14 @@ class StoryCoverageAnalyzer:
             jira_client: JiraClient instance for fetching tickets
             llm_client: LLMClient instance for AI analysis
             config: Configuration dictionary with prompt templates
+            confluence_client: Optional ConfluenceClient for fetching PRD/RFC content
+            planning_service: Optional PlanningService for PRD/RFC content extraction
         """
         self.jira_client = jira_client
         self.llm_client = llm_client
         self.config = config
+        self.confluence_client = confluence_client
+        self.planning_service = planning_service
         
     def analyze_coverage(
         self, 
@@ -60,16 +64,50 @@ class StoryCoverageAnalyzer:
                     "story_key": story_key
                 }
             
-            # Step 2: Build LLM prompt (user prompt)
-            user_prompt = self._build_llm_prompt(story_data, tasks_data, include_test_cases, additional_context)
+            # Step 2: Fetch PRD/RFC content from epic (if available)
+            prd_content = None
+            rfc_content = None
+            try:
+                # Get epic from story's parent
+                story_fields = story_data.get('fields', {})
+                parent = story_fields.get('parent')
+                if parent and parent.get('key') and self.planning_service:
+                    epic_key = parent['key']
+                    logger.info(f"[STORY_COVERAGE] Fetching PRD/RFC content from epic: {epic_key}")
+                    
+                    # Get epic issue
+                    epic_issue = self.jira_client.get_ticket(epic_key)
+                    if epic_issue:
+                        # Get PRD content
+                        prd_content = self.planning_service._get_prd_content(epic_issue)
+                        if prd_content:
+                            logger.info(f"[STORY_COVERAGE] ✅ Retrieved PRD content: {prd_content.get('title', 'Unknown')}")
+                        else:
+                            logger.info(f"[STORY_COVERAGE] ⚠️ No PRD content found for epic {epic_key}")
+                        
+                        # Get RFC content
+                        rfc_content = self.planning_service._get_rfc_content(epic_issue)
+                        if rfc_content:
+                            logger.info(f"[STORY_COVERAGE] ✅ Retrieved RFC content: {rfc_content.get('title', 'Unknown')}")
+                        else:
+                            logger.info(f"[STORY_COVERAGE] ⚠️ No RFC content found for epic {epic_key}")
+                    else:
+                        logger.warning(f"[STORY_COVERAGE] Could not fetch epic {epic_key} from JIRA")
+                else:
+                    logger.info(f"[STORY_COVERAGE] Story has no parent epic or planning_service not available")
+            except Exception as e:
+                logger.warning(f"[STORY_COVERAGE] Failed to retrieve PRD/RFC content: {e}")
             
-            # Step 3: Get system prompt from LLM client
+            # Step 3: Build LLM prompt (user prompt) with PRD/RFC context
+            user_prompt = self._build_llm_prompt(story_data, tasks_data, include_test_cases, additional_context, prd_content, rfc_content)
+            
+            # Step 4: Get system prompt from LLM client
             system_prompt = self.llm_client.get_system_prompt()
             
-            # Step 4: Analyze with LLM
+            # Step 5: Analyze with LLM
             llm_response = self._analyze_with_llm(user_prompt)
             
-            # Step 5: Format suggestions with ready-to-submit payloads
+            # Step 6: Format suggestions with ready-to-submit payloads
             formatted_result = self._format_suggestions(
                 story_key, 
                 story_data, 
@@ -139,7 +177,9 @@ class StoryCoverageAnalyzer:
         story_data: Dict[str, Any], 
         tasks_data: List[Dict[str, Any]],
         include_test_cases: bool,
-        additional_context: Optional[str] = None
+        additional_context: Optional[str] = None,
+        prd_content: Optional[Dict[str, Any]] = None,
+        rfc_content: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         Build the LLM prompt for coverage analysis
@@ -181,12 +221,16 @@ class StoryCoverageAnalyzer:
                 if isinstance(task_description, dict):
                     task_description = self.jira_client._extract_text_from_adf(task_description)
                 
+                # Ensure task_description is a string (handle None case)
+                if task_description is None:
+                    task_description = ''
+                
                 tasks_summary.append(f"{i}. {task_key}: {task_summary}")
                 
                 # Build detailed task info
                 detail = f"**Task {i}: {task_key}**\n"
                 detail += f"Summary: {task_summary}\n"
-                detail += f"Description: {task_description[:500]}{'...' if len(task_description) > 500 else ''}\n"
+                detail += f"Description: {task_description[:500]}{'...' if len(task_description) > 500 else ''}\n" if task_description else "Description: No description\n"
                 
                 if include_test_cases:
                     test_cases = task.get('extracted_test_cases', 'No test cases')
@@ -205,6 +249,50 @@ class StoryCoverageAnalyzer:
             if additional_context:
                 additional_context_section = f"**Additional Context/Requirements:**\n{additional_context}\n"
             
+            # Format PRD/RFC context section
+            document_context_section = ""
+            if prd_content or rfc_content:
+                document_parts = []
+                
+                if prd_content:
+                    prd_title = prd_content.get('title', 'PRD')
+                    prd_summary = prd_content.get('summary', '')
+                    prd_sections = prd_content.get('sections', {})
+                    
+                    prd_text = f"**PRD: {prd_title}**\n"
+                    if prd_summary:
+                        prd_text += f"Summary: {prd_summary[:300]}{'...' if len(prd_summary) > 300 else ''}\n"
+                    
+                    # Add relevant PRD sections
+                    priority_sections = ['user_stories', 'proposed_solution', 'success_criteria', 'acceptance_criteria']
+                    for section_key in priority_sections:
+                        if section_key in prd_sections and prd_sections[section_key]:
+                            section_content = prd_sections[section_key]
+                            prd_text += f"\n**{section_key.replace('_', ' ').title()}:**\n{section_content[:500]}{'...' if len(section_content) > 500 else ''}\n"
+                    
+                    document_parts.append(prd_text)
+                
+                if rfc_content:
+                    rfc_title = rfc_content.get('title', 'RFC')
+                    rfc_summary = rfc_content.get('summary', '')
+                    rfc_sections = rfc_content.get('sections', {})
+                    
+                    rfc_text = f"**RFC: {rfc_title}**\n"
+                    if rfc_summary:
+                        rfc_text += f"Summary: {rfc_summary[:300]}{'...' if len(rfc_summary) > 300 else ''}\n"
+                    
+                    # Add relevant RFC sections
+                    priority_sections = ['technical_design', 'apis', 'overview']
+                    for section_key in priority_sections:
+                        if section_key in rfc_sections and rfc_sections[section_key]:
+                            section_content = rfc_sections[section_key]
+                            rfc_text += f"\n**{section_key.replace('_', ' ').title()}:**\n{section_content[:500]}{'...' if len(section_content) > 500 else ''}\n"
+                    
+                    document_parts.append(rfc_text)
+                
+                if document_parts:
+                    document_context_section = "\n**PRD/RFC Context:**\n" + "\n".join(document_parts) + "\n"
+            
             # Format the prompt
             prompt = prompt_template.format(
                 story_key=story_key,
@@ -215,7 +303,8 @@ class StoryCoverageAnalyzer:
                 tasks_summary='\n'.join(tasks_summary) if tasks_summary else "No tasks found",
                 tasks_details='\n\n'.join(tasks_details) if tasks_details else "No task details available",
                 include_test_cases=include_test_cases,
-                additional_context=additional_context_section
+                additional_context=additional_context_section,
+                document_context=document_context_section
             )
             
             return prompt
