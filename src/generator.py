@@ -1421,6 +1421,16 @@ class DescriptionGenerator:
         
         logger.info(f"Generating tasks for {len(story_keys)} stories")
         
+        # Normalize epic_key if provided (might be a full URL)
+        if epic_key:
+            from api.utils import normalize_ticket_key
+            normalized_epic_key = normalize_ticket_key(epic_key)
+            if normalized_epic_key:
+                epic_key = normalized_epic_key
+            else:
+                logger.warning(f"Could not normalize epic_key: {epic_key}, will try to derive from story")
+                epic_key = None
+        
         # Derive epic_key from story if not provided
         if not epic_key:
             logger.info("No epic_key provided, deriving from story tickets...")
@@ -1429,8 +1439,13 @@ class DescriptionGenerator:
                 if first_story_data:
                     parent = first_story_data.get('fields', {}).get('parent')
                     if parent and parent.get('key'):
-                        epic_key = parent['key']
-                        logger.info(f"Derived epic_key from story {story_keys[0]}: {epic_key}")
+                        # Normalize parent key (should be just a key, but normalize to be safe)
+                        from api.utils import normalize_ticket_key
+                        epic_key = normalize_ticket_key(parent['key'])
+                        if epic_key:
+                            logger.info(f"Derived epic_key from story {story_keys[0]}: {epic_key}")
+                        else:
+                            logger.warning(f"Could not normalize parent epic key: {parent['key']}")
                     else:
                         logger.warning(f"Story {story_keys[0]} has no parent epic")
             except Exception as e:

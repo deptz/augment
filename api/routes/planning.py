@@ -262,6 +262,15 @@ async def generate_tasks_for_stories(request: TaskGenerationRequest, current_use
         
         # Derive epic_key from story tickets if not provided
         epic_key = request.epic_key
+        # Normalize epic_key if provided (might be a full URL)
+        if epic_key:
+            epic_key = normalize_ticket_key(epic_key)
+            if not epic_key:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid epic_key format: {request.epic_key}. Please provide a valid JIRA epic key or URL."
+                )
+        
         if not epic_key:
             logger.info("No epic_key provided, deriving from story tickets...")
             
@@ -276,7 +285,13 @@ async def generate_tasks_for_stories(request: TaskGenerationRequest, current_use
             # Extract parent epic from story
             parent = first_story_data.get('fields', {}).get('parent')
             if parent and parent.get('key'):
-                epic_key = parent['key']
+                # Normalize parent key (should be just a key, but normalize to be safe)
+                epic_key = normalize_ticket_key(parent['key'])
+                if not epic_key:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid parent epic key format: {parent['key']}"
+                    )
                 logger.info(f"Derived epic_key from story {story_keys[0]}: {epic_key}")
             else:
                 raise HTTPException(

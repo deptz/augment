@@ -1418,20 +1418,90 @@ async def process_task_creation_worker(ctx, job_id: str, story_keys: List[str], 
         
         # Generate tasks first
         from src.planning_models import PlanningContext, OperationMode
+        from .dependencies import get_jira_client
+        from ..utils import normalize_ticket_key
         
-        # Derive epic_key from first story_key
-        epic_key = story_keys[0].split('-')[0] + "-000"
+        jira_client = get_jira_client()
+        
+        # Normalize story keys first (handle URLs)
+        normalized_story_keys = [normalize_ticket_key(key) for key in story_keys]
+        normalized_story_keys = [key for key in normalized_story_keys if key]  # Remove None values
+        
+        if not normalized_story_keys:
+            logger.error(f"[TASK_BREAKDOWN] No valid story keys after normalization")
+            raise ValueError("No valid story keys provided")
+        
+        # Derive epic_key from first story's parent
+        epic_key = None
+        logger.info(f"[TASK_BREAKDOWN] Starting PRD/RFC fetch for {len(normalized_story_keys)} stories")
+        try:
+            first_story_data = jira_client.get_ticket(normalized_story_keys[0])
+            if first_story_data:
+                parent = first_story_data.get('fields', {}).get('parent')
+                if parent and parent.get('key'):
+                    # Normalize parent key (might be a full URL)
+                    epic_key = normalize_ticket_key(parent['key'])
+                    logger.info(f"[TASK_BREAKDOWN] Derived epic_key from story {normalized_story_keys[0]}: {epic_key}")
+                else:
+                    logger.warning(f"[TASK_BREAKDOWN] Story {normalized_story_keys[0]} has no parent field")
+            else:
+                logger.warning(f"[TASK_BREAKDOWN] Could not fetch story {normalized_story_keys[0]} from JIRA")
+        except Exception as e:
+            logger.warning(f"[TASK_BREAKDOWN] Failed to derive epic_key from story {normalized_story_keys[0]}: {e}")
+        
+        # Fallback: use project prefix if we couldn't derive epic_key
+        if not epic_key:
+            project_prefix = normalized_story_keys[0].split('-')[0] if normalized_story_keys else "UNKNOWN"
+            epic_key = f"{project_prefix}-DERIVED"
+            logger.warning(f"[TASK_BREAKDOWN] Could not derive epic_key, using placeholder: {epic_key}")
+        
+        # Normalize epic_key (in case it's a full URL)
+        epic_key = normalize_ticket_key(epic_key)
+        if not epic_key:
+            logger.error(f"[TASK_BREAKDOWN] Failed to normalize epic_key")
+            raise ValueError("Could not normalize epic key")
+        
+        # Fetch PRD/RFC content from epic
+        prd_content = None
+        rfc_content = None
+        
+        logger.info(f"[TASK_BREAKDOWN] Attempting to fetch PRD/RFC content for epic: {epic_key}")
+        try:
+            # Get epic details to retrieve PRD/RFC URLs
+            epic_issue = jira_client.get_ticket(epic_key)
+            if epic_issue:
+                logger.info(f"[TASK_BREAKDOWN] Successfully fetched epic issue {epic_key}")
+                # Get PRD content using planning service method
+                prd_content = generator.planning_service._get_prd_content(epic_issue)
+                # Get RFC content using planning service method
+                rfc_content = generator.planning_service._get_rfc_content(epic_issue)
+                
+                if prd_content:
+                    logger.info(f"[TASK_BREAKDOWN] ✅ Retrieved PRD content: {prd_content.get('title', 'Unknown')}")
+                else:
+                    logger.info(f"[TASK_BREAKDOWN] ⚠️ No PRD content found for epic {epic_key}")
+                    
+                if rfc_content:
+                    logger.info(f"[TASK_BREAKDOWN] ✅ Retrieved RFC content: {rfc_content.get('title', 'Unknown')}")
+                else:
+                    logger.info(f"[TASK_BREAKDOWN] ⚠️ No RFC content found for epic {epic_key}")
+            else:
+                logger.warning(f"[TASK_BREAKDOWN] Could not fetch epic {epic_key} from JIRA")
+        except Exception as e:
+            logger.warning(f"[TASK_BREAKDOWN] Failed to retrieve PRD/RFC content for epic {epic_key}: {e}", exc_info=True)
         
         job.progress = {"message": "Generating tasks..."}
         
         context = PlanningContext(
             epic_key=epic_key,
             mode=OperationMode.PLANNING,
-            max_tasks_per_story=tasks_per_story or 3
+            max_tasks_per_story=tasks_per_story or 3,
+            prd_content=prd_content,
+            rfc_content=rfc_content
         )
         
         planning_result = generator.planning_service.generate_tasks_for_stories(
-            story_keys, context
+            normalized_story_keys, context
         )
         
         if not planning_result.success or not planning_result.epic_plan:
