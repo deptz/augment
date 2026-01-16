@@ -504,6 +504,14 @@ curl -X POST "http://localhost:8000/plan/tasks/generate" \
 - Jobs can be cancelled during execution (cancellation is checked at multiple points)
 - Coverage analysis includes actionable suggestions for task updates and new tasks
 
+**OpenCode Session Completion:**
+- **No Polling**: The system does not poll for completion. It uses Server-Sent Events (SSE) streaming for real-time communication
+- **Completion Detection**: Session completion is detected via:
+  - **SSE "done" event**: For streaming responses, the system waits for a "done" event from OpenCode
+  - **JSON response**: For non-streaming responses, immediate JSON response indicates completion
+- **Post-Completion**: After streaming completes, there's a brief 1-second delay to allow file system writes, then the result file (`result.json`) is read from the workspace
+- **Timeout Protection**: Overall job timeout (`OPENCODE_TIMEOUT`) applies to the entire operation, ensuring jobs don't hang indefinitely
+
 **Team Member Database (Optional):**
 ```bash
 TEAM_MEMBER_DB_PATH=data/team_members.db  # Custom database path (absolute or relative to project root)

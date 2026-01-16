@@ -1015,6 +1015,38 @@ GIT_PASSWORD=your-token
 - **Google**: `gemini` → Uses `OPENCODE_GOOGLE_API_KEY` and `OPENCODE_GOOGLE_MODEL`
 - **Moonshot**: `kimi` → Uses `OPENCODE_MOONSHOT_API_KEY` and `OPENCODE_MOONSHOT_MODEL`
 
+### Session Completion & Execution Flow
+
+#### How Session Completion is Detected
+
+OpenCode uses an **event-driven architecture** rather than polling:
+
+- **No Polling**: The system does not poll for completion status. Instead, it uses Server-Sent Events (SSE) streaming for real-time communication with OpenCode containers.
+
+- **Completion Detection Methods**:
+  1. **SSE "done" event**: For streaming responses, the system listens for a "done" event from OpenCode via SSE. When this event is received, the session is considered complete.
+  2. **JSON response**: For non-streaming responses, OpenCode may return a JSON response immediately, which indicates completion.
+
+- **Post-Completion Steps**:
+  1. After streaming completes (via "done" event or JSON response), there's a brief 1-second delay to allow file system writes to complete.
+  2. The system then reads the result file (`result.json`) from the workspace.
+  3. The result is validated against expected schemas and returned.
+
+- **Timeout Protection**: The overall job timeout (`OPENCODE_TIMEOUT`, default: 20 minutes) applies to the entire operation, ensuring jobs don't hang indefinitely if OpenCode fails to send completion signals.
+
+#### Execution Flow
+
+1. **Container Spawn**: OpenCode container is started with workspace mounted
+2. **Session Creation**: HTTP POST to `/session` endpoint creates a session and returns `session_id`
+3. **Prompt Submission**: HTTP POST to `/session/{session_id}/message` with prompt
+4. **Streaming Response**: 
+   - If response is `text/event-stream`, system streams SSE events until "done" event
+   - If response is `application/json`, completion is immediate
+5. **Result Extraction**: After completion, reads `result.json` from workspace
+6. **Container Cleanup**: Container is stopped and removed
+
+This event-driven approach is more efficient than polling and provides real-time feedback during execution.
+
 ---
 
 ## Related Documentation
