@@ -140,6 +140,140 @@ class Config:
             'max_result_size_mb': int(opencode_config.get('max_result_size_mb', 10)),
         }
     
+    def get_opencode_llm_config(self, provider: Optional[str] = None, model: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Get LLM configuration for OpenCode containers.
+        
+        ONLY uses OpenCode-specific LLM configuration. Does NOT fall back to main LLM config.
+        This ensures OpenCode uses separate API keys from the main application.
+        
+        Args:
+            provider: Optional provider override (from API request)
+            model: Optional model override (from API request)
+            
+        Returns:
+            LLM configuration dict for OpenCode
+            
+        Raises:
+            ValueError: If OpenCode-specific API key is missing for the provider
+        """
+        opencode_config = self.opencode
+        opencode_llm_config = opencode_config.get('llm', {})
+        
+        # Use provided provider or OpenCode-specific provider ONLY (no fallback to main LLM config)
+        provider = provider or opencode_llm_config.get('provider')
+        
+        if not provider:
+            raise ValueError(
+                "OpenCode requires a provider to be specified. "
+                "Set OPENCODE_LLM_PROVIDER in your .env file or pass provider parameter. "
+                "OpenCode does not use the main LLM provider configuration."
+            )
+        
+        # Validate provider
+        if not self.validate_llm_provider(provider):
+            raise ValueError(f"Unsupported LLM provider: {provider}. Supported providers: {self.get_supported_providers()}")
+        
+        # Get max_tokens from OpenCode config only
+        max_tokens_config = opencode_llm_config.get('max_tokens', '')
+        max_tokens = None
+        if max_tokens_config and (isinstance(max_tokens_config, str) and max_tokens_config.strip() or isinstance(max_tokens_config, int)):
+            try:
+                max_tokens = int(max_tokens_config)
+            except (ValueError, TypeError):
+                pass
+        
+        # Get temperature from OpenCode config only (no fallback to main LLM config)
+        temperature = opencode_llm_config.get('temperature')
+        if temperature is None or (isinstance(temperature, str) and not temperature.strip()):
+            # Use default temperature if not specified in OpenCode config
+            temperature = 0.7
+        else:
+            temperature = float(temperature)
+        
+        config = {
+            'provider': provider,
+            'system_prompt': self.llm.get('system_prompt', Prompts.get_default_system_prompt()),
+            'temperature': temperature,
+            'max_tokens': max_tokens
+        }
+        
+        # Get API keys and models - ONLY from OpenCode-specific config, NO fallback
+        if provider == 'openai':
+            api_key_value = opencode_llm_config.get('openai_api_key')
+            if not api_key_value or (isinstance(api_key_value, str) and not api_key_value.strip()):
+                raise ValueError(
+                    "OpenCode requires OPENCODE_OPENAI_API_KEY to be set in your .env file. "
+                    "OpenCode does not use the main LLM configuration."
+                )
+            config['api_key'] = api_key_value
+            config['openai_api_key'] = api_key_value
+            # Only use OpenCode-specific model, no fallback to main LLM config
+            default_model = opencode_llm_config.get('openai_model')
+            if not default_model:
+                raise ValueError(
+                    "OpenCode requires OPENCODE_OPENAI_MODEL to be set in your .env file. "
+                    "OpenCode does not use the main LLM configuration."
+                )
+            config['model'] = model or default_model
+        elif provider == 'claude':
+            api_key_value = opencode_llm_config.get('anthropic_api_key')
+            if not api_key_value or (isinstance(api_key_value, str) and not api_key_value.strip()):
+                raise ValueError(
+                    "OpenCode requires OPENCODE_ANTHROPIC_API_KEY to be set in your .env file. "
+                    "OpenCode does not use the main LLM configuration."
+                )
+            config['api_key'] = api_key_value
+            config['anthropic_api_key'] = api_key_value
+            # Only use OpenCode-specific model, no fallback to main LLM config
+            default_model = opencode_llm_config.get('anthropic_model')
+            if not default_model:
+                raise ValueError(
+                    "OpenCode requires OPENCODE_ANTHROPIC_MODEL to be set in your .env file. "
+                    "OpenCode does not use the main LLM configuration."
+                )
+            config['model'] = model or default_model
+        elif provider == 'gemini':
+            api_key_value = opencode_llm_config.get('google_api_key')
+            if not api_key_value or (isinstance(api_key_value, str) and not api_key_value.strip()):
+                raise ValueError(
+                    "OpenCode requires OPENCODE_GOOGLE_API_KEY to be set in your .env file. "
+                    "OpenCode does not use the main LLM configuration."
+                )
+            config['api_key'] = api_key_value
+            config['google_api_key'] = api_key_value
+            # Only use OpenCode-specific model, no fallback to main LLM config
+            default_model = opencode_llm_config.get('google_model')
+            if not default_model:
+                raise ValueError(
+                    "OpenCode requires OPENCODE_GOOGLE_MODEL to be set in your .env file. "
+                    "OpenCode does not use the main LLM configuration."
+                )
+            config['model'] = model or default_model
+        elif provider == 'kimi':
+            api_key_value = opencode_llm_config.get('moonshot_api_key')
+            if not api_key_value or (isinstance(api_key_value, str) and not api_key_value.strip()):
+                raise ValueError(
+                    "OpenCode requires OPENCODE_MOONSHOT_API_KEY to be set in your .env file. "
+                    "OpenCode does not use the main LLM configuration."
+                )
+            config['api_key'] = api_key_value
+            config['moonshot_api_key'] = api_key_value
+            # Only use OpenCode-specific model, no fallback to main LLM config
+            default_model = opencode_llm_config.get('moonshot_model')
+            if not default_model:
+                raise ValueError(
+                    "OpenCode requires OPENCODE_MOONSHOT_MODEL to be set in your .env file. "
+                    "OpenCode does not use the main LLM configuration."
+                )
+            config['model'] = model or default_model
+        
+        # Validate model if specified
+        if model and not self.validate_llm_model(provider, config['model']):
+            raise ValueError(f"Unsupported model '{config['model']}' for provider '{provider}'. Supported models: {self.get_supported_models()[provider]}")
+        
+        return config
+    
     def get_git_credentials(self) -> Dict[str, Optional[str]]:
         """Get git credentials for cloning repositories"""
         git_config = self.git
@@ -247,19 +381,27 @@ class Config:
         }
         
         if provider == 'openai':
-            config['api_key'] = self.llm.get('openai_api_key')
+            api_key_value = self.llm.get('openai_api_key')
+            config['api_key'] = api_key_value
+            config['openai_api_key'] = api_key_value  # Also set provider-specific key
             default_model = self.llm.get('openai_model') or self.llm.get('models', {}).get('openai', 'gpt-5-mini')
             config['model'] = model or default_model
         elif provider == 'claude':
-            config['api_key'] = self.llm.get('anthropic_api_key')
+            api_key_value = self.llm.get('anthropic_api_key')
+            config['api_key'] = api_key_value
+            config['anthropic_api_key'] = api_key_value  # Also set provider-specific key
             default_model = self.llm.get('anthropic_model') or self.llm.get('models', {}).get('claude', 'claude-sonnet-4-5')
             config['model'] = model or default_model
         elif provider == 'gemini':
-            config['api_key'] = self.llm.get('google_api_key')
+            api_key_value = self.llm.get('google_api_key')
+            config['api_key'] = api_key_value
+            config['google_api_key'] = api_key_value  # Also set provider-specific key
             default_model = self.llm.get('google_model') or self.llm.get('models', {}).get('gemini', 'gemini-2.5-flash')
             config['model'] = model or default_model
         elif provider == 'kimi':
-            config['api_key'] = self.llm.get('moonshot_api_key')
+            api_key_value = self.llm.get('moonshot_api_key')
+            config['api_key'] = api_key_value
+            config['moonshot_api_key'] = api_key_value  # Also set provider-specific key
             default_model = self.llm.get('moonshot_model') or self.llm.get('models', {}).get('kimi', 'moonshot-v1-8k')
             config['model'] = model or default_model
         

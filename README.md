@@ -407,31 +407,69 @@ OpenCode enables code-aware LLM generation by analyzing actual repository conten
 2. Run OpenCode in a Docker container with filesystem access
 3. Generate results based on actual code structure
 
+**IMPORTANT**: OpenCode requires **separate, OpenCode-specific LLM configuration**. It does NOT use the main LLM configuration.
+
 ```bash
 # Enable OpenCode integration
 OPENCODE_ENABLED=true
 
-# OpenCode Docker image (uses default if not specified)
-OPENCODE_DOCKER_IMAGE=ghcr.io/anomalyco/opencode
+# OpenCode-Specific LLM Configuration (REQUIRED - separate from main LLM config)
+OPENCODE_LLM_PROVIDER=claude  # REQUIRED: Options: openai, claude, gemini, kimi
+OPENCODE_ANTHROPIC_API_KEY=sk-ant-api03-...  # REQUIRED if provider=claude
+OPENCODE_ANTHROPIC_MODEL=claude-haiku-4-5  # REQUIRED if provider=claude
+# OR for OpenAI:
+# OPENCODE_OPENAI_API_KEY=sk-...  # REQUIRED if provider=openai
+# OPENCODE_OPENAI_MODEL=gpt-5-mini  # REQUIRED if provider=openai
+# OR for Gemini:
+# OPENCODE_GOOGLE_API_KEY=...  # REQUIRED if provider=gemini
+# OPENCODE_GOOGLE_MODEL=gemini-2.5-flash  # REQUIRED if provider=gemini
+# OR for KIMI:
+# OPENCODE_MOONSHOT_API_KEY=...  # REQUIRED if provider=kimi
+# OPENCODE_MOONSHOT_MODEL=moonshot-v1-8k  # REQUIRED if provider=kimi
 
-# Concurrency and limits
-OPENCODE_MAX_CONCURRENT=2  # Max concurrent OpenCode containers
-OPENCODE_MAX_REPOS=5  # Max repositories per job
-OPENCODE_TIMEOUT=20  # Job timeout in minutes
-OPENCODE_CLONE_TIMEOUT=300  # Git clone timeout in seconds
-OPENCODE_SHALLOW_CLONE=true  # Use shallow clone (--depth 1)
-OPENCODE_MAX_RESULT_SIZE=10  # Max result file size in MB
+OPENCODE_LLM_TEMPERATURE=0.7  # Optional: defaults to 0.7
+OPENCODE_LLM_MAX_TOKENS=  # Optional: uses provider defaults if not set
 
-# Git credentials for cloning private repositories
-GIT_USERNAME=your-git-username
-GIT_PASSWORD=your-git-token-or-password
+# OpenCode Docker Configuration
+OPENCODE_DOCKER_IMAGE=ghcr.io/anomalyco/opencode  # Docker image for OpenCode containers (default: ghcr.io/anomalyco/opencode)
+
+# OpenCode Concurrency and Resource Limits
+OPENCODE_MAX_CONCURRENT=2  # Maximum number of concurrent OpenCode containers (default: 2). Prevents resource exhaustion.
+OPENCODE_MAX_REPOS=5  # Maximum number of repositories allowed per job (default: 5). Validates repository count in API requests.
+OPENCODE_TIMEOUT=20  # Job timeout in minutes (default: 20). Maximum execution time for OpenCode jobs.
+OPENCODE_CLONE_TIMEOUT=300  # Git clone timeout in seconds (default: 300). Timeout for repository cloning operations.
+OPENCODE_SHALLOW_CLONE=true  # Use shallow clone with --depth 1 (default: true). Faster cloning, only latest commit.
+OPENCODE_MAX_RESULT_SIZE=10  # Maximum result file size in MB (default: 10). Prevents oversized result files.
+
+# Git Credentials (Required for Private Repositories, Optional for Public)
+# These credentials are used when cloning private repositories via HTTPS
+# For public repositories, these can be left empty
+GIT_USERNAME=your-git-username  # Git username or email (required for private repos)
+GIT_PASSWORD=your-git-token-or-password  # Git password, personal access token, or app password (required for private repos)
 ```
+
+**OpenCode Environment Variables Summary:**
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `OPENCODE_DOCKER_IMAGE` | No | `ghcr.io/anomalyco/opencode` | Docker image for OpenCode containers |
+| `OPENCODE_MAX_CONCURRENT` | No | `2` | Maximum concurrent OpenCode containers |
+| `OPENCODE_MAX_REPOS` | No | `5` | Maximum repositories allowed per job |
+| `OPENCODE_TIMEOUT` | No | `20` | Job timeout in minutes |
+| `OPENCODE_CLONE_TIMEOUT` | No | `300` | Git clone timeout in seconds |
+| `OPENCODE_SHALLOW_CLONE` | No | `true` | Use shallow clone (--depth 1) |
+| `OPENCODE_MAX_RESULT_SIZE` | No | `10` | Maximum result file size in MB |
+| `GIT_USERNAME` | Yes* | - | Git username (required for private repos) |
+| `GIT_PASSWORD` | Yes* | - | Git password/token (required for private repos) |
+
+*Required only for private repositories. Optional for public repositories.
 
 **Prerequisites for OpenCode:**
 - Docker must be installed and running
 - The Docker daemon must be accessible to the worker process
 - Git credentials (if cloning private repositories)
 - The OpenCode Docker image is automatically pulled on worker startup
+- **All OpenCode-specific LLM configuration must be set** (`OPENCODE_LLM_PROVIDER`, `OPENCODE_*_API_KEY`, `OPENCODE_*_MODEL`)
 
 **Using OpenCode in API calls:**
 
@@ -467,6 +505,14 @@ curl -X POST "http://localhost:8000/plan/tasks/generate" \
 - LLM API keys are automatically passed to the OpenCode container
 - Jobs can be cancelled during execution (cancellation is checked at multiple points)
 - Coverage analysis includes actionable suggestions for task updates and new tasks
+
+**OpenCode Session Completion:**
+- **No Polling**: The system does not poll for completion. It uses Server-Sent Events (SSE) streaming for real-time communication
+- **Completion Detection**: Session completion is detected via:
+  - **SSE "done" event**: For streaming responses, the system waits for a "done" event from OpenCode
+  - **JSON response**: For non-streaming responses, immediate JSON response indicates completion
+- **Post-Completion**: After streaming completes, there's a brief 1-second delay to allow file system writes, then the result file (`result.json`) is read from the workspace
+- **Timeout Protection**: Overall job timeout (`OPENCODE_TIMEOUT`) applies to the entire operation, ensuring jobs don't hang indefinitely
 
 **Team Member Database (Optional):**
 ```bash

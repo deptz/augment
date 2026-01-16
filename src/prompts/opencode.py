@@ -11,6 +11,7 @@ from ..opencode_schemas import (
     COVERAGE_CHECK_SCHEMA,
     get_schema_for_prompt
 )
+from .utility import UtilityPrompts
 
 
 def ticket_description_prompt(
@@ -132,6 +133,9 @@ def task_breakdown_prompt(
     
     schema_json = get_schema_for_prompt("task_breakdown")
     
+    # Get Purpose/Scopes/Outcome guidance template
+    pso_guidance = UtilityPrompts.get_task_breakdown_pso_guidance_template()
+    
     return f"""You have full filesystem access to these repositories: {repos_str}
 
 You are analyzing the codebase to create implementation-grade tasks for a story.
@@ -164,7 +168,52 @@ Create an implementation task breakdown that:
 - Include file paths where changes are needed
 - Note any dependencies between tasks
 
+{pso_guidance}
+
+**IMPLEMENTATION PLAN REQUIREMENTS:**
+
+After the Expected Outcomes section, add an **Implementation Plan** section that provides code-aware implementation details. This section must:
+
+1. **Files to Modify**: List the actual file paths you found in the codebase that need changes
+   - Use exact paths relative to repository root (e.g., `src/api/users.py`, `tests/test_users.py`)
+   - Only reference files that actually exist in the codebase
+   - Do NOT invent or hallucinate file paths
+
+2. **Implementation Steps**: Provide step-by-step implementation guidance based on existing code patterns
+   - Reference how similar features are implemented in the codebase
+   - Follow existing architectural patterns you observe
+   - Include specific code locations or modules to modify
+
+3. **Dependencies**: Note any dependencies on other tasks or components
+   - Reference other tasks by their summary/title if applicable
+   - Note integration points with existing services or modules
+
+4. **Code Structure Considerations**: Mention any important architectural or structural considerations
+   - Database changes needed
+   - API contract changes
+   - Integration with existing services
+   - Testing approach based on existing test patterns
+
+**Example Implementation Plan Format:**
+```
+**Implementation Plan:**
+- Files to modify: `src/api/users.py`, `src/models/user.py`, `tests/test_users.py`
+- Implementation steps:
+  1. Add new endpoint in `src/api/users.py` following the existing REST pattern (see `src/api/auth.py` for reference)
+  2. Update user model in `src/models/user.py` to include new field, following existing model structure
+  3. Add unit tests in `tests/test_users.py` following existing test patterns (see `tests/test_auth.py` for reference)
+- Dependencies: Requires database migration from task "[BE] Create user profile migration"
+- Integration points: Connects with authentication service in `src/services/auth_service.py`
+- Code structure considerations: Follow existing error handling pattern in `src/api/base.py`
+```
+
 **IMPORTANT - OUTPUT INSTRUCTIONS:**
+
+For each task, the `description` field in the JSON must contain markdown-formatted text with these sections in order:
+1. **Purpose** (1-2 sentences)
+2. **Scopes** (3-5 bullet points with deliverables)
+3. **Expected Outcomes** (2-3 concrete results)
+4. **Implementation Plan** (code-aware implementation details as described above)
 
 After completing your analysis, you MUST write your result to `/workspace/result.json`
 

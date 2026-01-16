@@ -861,6 +861,10 @@ Use OpenCode when you want AI-generated content that:
 1. **Docker**: Must be installed and running
 2. **Git credentials**: For cloning private repositories
 3. **Enable OpenCode**: Set `OPENCODE_ENABLED=true` in configuration
+4. **OpenCode-Specific LLM Configuration**: OpenCode requires separate LLM configuration (does NOT use main LLM config):
+   - `OPENCODE_LLM_PROVIDER` (REQUIRED)
+   - `OPENCODE_*_API_KEY` for your provider (REQUIRED)
+   - `OPENCODE_*_MODEL` for your provider (REQUIRED)
 
 ### Configuration
 
@@ -868,20 +872,54 @@ Use OpenCode when you want AI-generated content that:
 # Enable OpenCode
 OPENCODE_ENABLED=true
 
-# Docker image (uses default if not specified)
-OPENCODE_DOCKER_IMAGE=ghcr.io/anomalyco/opencode
+# OpenCode-Specific LLM Configuration (REQUIRED - separate from main LLM config)
+OPENCODE_LLM_PROVIDER=claude  # REQUIRED: Options: openai, claude, gemini, kimi
+OPENCODE_ANTHROPIC_API_KEY=sk-ant-api03-...  # REQUIRED if provider=claude
+OPENCODE_ANTHROPIC_MODEL=claude-haiku-4-5  # REQUIRED if provider=claude
+# OR for other providers:
+# OPENCODE_OPENAI_API_KEY=sk-...  # REQUIRED if provider=openai
+# OPENCODE_OPENAI_MODEL=gpt-5-mini  # REQUIRED if provider=openai
+# OPENCODE_GOOGLE_API_KEY=...  # REQUIRED if provider=gemini
+# OPENCODE_GOOGLE_MODEL=gemini-2.5-flash  # REQUIRED if provider=gemini
+# OPENCODE_MOONSHOT_API_KEY=...  # REQUIRED if provider=kimi
+# OPENCODE_MOONSHOT_MODEL=moonshot-v1-8k  # REQUIRED if provider=kimi
 
-# Concurrency and limits
-OPENCODE_MAX_CONCURRENT=2    # Max concurrent containers
-OPENCODE_MAX_REPOS=5         # Max repositories per job
-OPENCODE_TIMEOUT=20          # Job timeout in minutes
-OPENCODE_CLONE_TIMEOUT=300   # Git clone timeout in seconds
-OPENCODE_SHALLOW_CLONE=true  # Use shallow clone
+OPENCODE_LLM_TEMPERATURE=0.7  # Optional: defaults to 0.7
+OPENCODE_LLM_MAX_TOKENS=  # Optional: uses provider defaults if not set
 
-# Git credentials for private repositories
-GIT_USERNAME=your-git-username
-GIT_PASSWORD=your-git-token
+# OpenCode Docker Configuration
+OPENCODE_DOCKER_IMAGE=ghcr.io/anomalyco/opencode  # Docker image for OpenCode containers (default: ghcr.io/anomalyco/opencode)
+
+# OpenCode Concurrency and Resource Limits
+OPENCODE_MAX_CONCURRENT=2    # Maximum number of concurrent OpenCode containers (default: 2). Prevents resource exhaustion.
+OPENCODE_MAX_REPOS=5         # Maximum number of repositories allowed per job (default: 5). Validates repository count in API requests.
+OPENCODE_TIMEOUT=20          # Job timeout in minutes (default: 20). Maximum execution time for OpenCode jobs.
+OPENCODE_CLONE_TIMEOUT=300   # Git clone timeout in seconds (default: 300). Timeout for repository cloning operations.
+OPENCODE_SHALLOW_CLONE=true  # Use shallow clone with --depth 1 (default: true). Faster cloning, only latest commit.
+OPENCODE_MAX_RESULT_SIZE=10  # Maximum result file size in MB (default: 10). Prevents oversized result files.
+
+# Git Credentials (Required for Private Repositories, Optional for Public)
+# These credentials are used when cloning private repositories via HTTPS
+# For public repositories, these can be left empty
+GIT_USERNAME=your-git-username  # Git username or email (required for private repos)
+GIT_PASSWORD=your-git-token     # Git password, personal access token, or app password (required for private repos)
 ```
+
+**OpenCode Environment Variables Summary:**
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `OPENCODE_DOCKER_IMAGE` | No | `ghcr.io/anomalyco/opencode` | Docker image for OpenCode containers |
+| `OPENCODE_MAX_CONCURRENT` | No | `2` | Maximum concurrent OpenCode containers |
+| `OPENCODE_MAX_REPOS` | No | `5` | Maximum repositories allowed per job |
+| `OPENCODE_TIMEOUT` | No | `20` | Job timeout in minutes |
+| `OPENCODE_CLONE_TIMEOUT` | No | `300` | Git clone timeout in seconds |
+| `OPENCODE_SHALLOW_CLONE` | No | `true` | Use shallow clone (--depth 1) |
+| `OPENCODE_MAX_RESULT_SIZE` | No | `10` | Maximum result file size in MB |
+| `GIT_USERNAME` | Yes* | - | Git username (required for private repos) |
+| `GIT_PASSWORD` | Yes* | - | Git password/token (required for private repos) |
+
+*Required only for private repositories. Optional for public repositories.
 
 ### Supported Endpoints
 
@@ -1033,6 +1071,10 @@ When OpenCode is used, responses include additional metadata:
 | "Clone timeout" | Increase `OPENCODE_CLONE_TIMEOUT`; check repository access |
 | "Job timeout" | Increase `OPENCODE_TIMEOUT`; reduce repository count |
 | "OpenCode is not enabled" | Set `OPENCODE_ENABLED=true` in config |
+| "Missing API key for provider" | Set OpenCode-specific API key (e.g., `OPENCODE_ANTHROPIC_API_KEY`, not `ANTHROPIC_API_KEY`) |
+| "OpenCode requires OPENCODE_LLM_PROVIDER" | Set `OPENCODE_LLM_PROVIDER` in config (OpenCode does NOT use main `LLM_PROVIDER`) |
+| "OpenCode requires OPENCODE_*_MODEL" | Set OpenCode-specific model (e.g., `OPENCODE_ANTHROPIC_MODEL`, not `ANTHROPIC_MODEL`) |
+| "Authentication error (401)" | Verify OpenCode-specific API key is valid and correctly set (check `OPENCODE_*_API_KEY` variables) |
 
 ---
 

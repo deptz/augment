@@ -97,6 +97,8 @@ class OpenCodeRunner:
         
         self._docker_client: Optional[docker.DockerClient] = None
         self._semaphore: Optional[asyncio.Semaphore] = None
+        self._last_json_response: Optional[Dict[str, Any]] = None
+        self._current_container: Any = None  # docker.models.containers.Container
     
     def set_llm_config(self, llm_config: Dict[str, Any]):
         """Set LLM configuration for container environment"""
@@ -115,7 +117,13 @@ class OpenCodeRunner:
             "OPENCODE_WORKSPACE": "/workspace"
         }
         
-        # LLM API Keys - check config first, then environment
+        # LLM API Keys - ONLY from config (no environment fallback for OpenCode)
+        # Support both formats: provider-specific keys (openai_api_key) and generic (api_key)
+        provider = self.llm_config.get('provider')
+        
+        if not provider:
+            logger.error("[OpenCode] No LLM provider specified in config - OpenCode requires OPENCODE_LLM_PROVIDER to be set")
+        
         api_key_mappings = [
             ('openai_api_key', 'OPENAI_API_KEY'),
             ('anthropic_api_key', 'ANTHROPIC_API_KEY'),
@@ -124,24 +132,108 @@ class OpenCodeRunner:
             ('moonshot_api_key', 'MOONSHOT_API_KEY'),
         ]
         
+        # First, try provider-specific keys from config ONLY (no environment fallback for OpenCode)
+        # Only set non-empty API keys to avoid passing empty strings to OpenCode
         for config_key, env_key in api_key_mappings:
-            value = self.llm_config.get(config_key) or os.getenv(env_key)
-            if value:
-                env[env_key] = value
+            value = self.llm_config.get(config_key)  # Only from config, no os.getenv() fallback
+            # Validate that the value is not empty (not None, not empty string, not just whitespace)
+            if value and isinstance(value, str) and value.strip():
+                env[env_key] = value.strip()
+                logger.debug(f"[OpenCode] Found API key for {env_key} from config key {config_key}")
+            elif value:
+                # Value exists but is empty/whitespace - log warning
+                logger.warning(f"[OpenCode] API key for {env_key} is empty or whitespace, skipping")
+        
+        # If provider is set and we have a generic 'api_key', map it to the provider-specific key
+        if provider and 'api_key' in self.llm_config:
+            provider_to_env_key = {
+                'openai': 'OPENAI_API_KEY',
+                'claude': 'ANTHROPIC_API_KEY',
+                'gemini': 'GOOGLE_API_KEY',
+                'kimi': 'MOONSHOT_API_KEY',
+            }
+            env_key = provider_to_env_key.get(provider)
+            if env_key:
+                if env_key not in env:
+                    api_key_value = self.llm_config['api_key']
+                    # Validate that the API key is not empty
+                    if api_key_value and isinstance(api_key_value, str) and api_key_value.strip():
+                        env[env_key] = api_key_value.strip()
+                        logger.debug(f"[OpenCode] Mapped generic api_key to {env_key} for provider {provider}")
+                    else:
+                        logger.warning(f"[OpenCode] Generic api_key found in config but is empty or invalid for provider {provider}")
+                else:
+                    logger.debug(f"[OpenCode] {env_key} already set, skipping generic api_key mapping")
+            else:
+                logger.warning(f"[OpenCode] Unknown provider '{provider}', cannot map generic api_key")
+        
+        # Validate that we have an API key for the provider
+        if provider:
+            provider_to_env_key = {
+                'openai': 'OPENAI_API_KEY',
+                'claude': 'ANTHROPIC_API_KEY',
+                'gemini': 'GOOGLE_API_KEY',
+                'kimi': 'MOONSHOT_API_KEY',
+            }
+            required_env_key = provider_to_env_key.get(provider)
+            if required_env_key and required_env_key not in env:
+                logger.error(
+                    f"[OpenCode] Missing API key for provider '{provider}'. "
+                    f"Expected environment variable: {required_env_key}. "
+                    f"Config keys checked: {[k for k, _ in api_key_mappings]}, generic 'api_key'. "
+                    f"Available config keys: {list(self.llm_config.keys())}"
+                )
+                raise OpenCodeError(
+                    f"Missing API key for LLM provider '{provider}'. "
+                    f"Please configure {required_env_key} or set the appropriate API key in the LLM configuration."
+                )
         
         # LLM Provider and Model settings
-        provider = self.llm_config.get('provider') or os.getenv('LLM_PROVIDER')
         if provider:
             env['LLM_PROVIDER'] = provider
             
-            # Get model for the provider
+            # Get model for the provider - ONLY from config (no environment fallback for OpenCode)
             model_key = f'{provider}_model'
-            model = self.llm_config.get(model_key) or os.getenv(f'{provider.upper()}_MODEL')
+            model = self.llm_config.get(model_key) or self.llm_config.get('model')
             if model:
                 env['LLM_MODEL'] = model
+                logger.info(f"[OpenCode] Using provider: {provider}, model: {model}")
+            else:
+                logger.error(f"[OpenCode] No model specified for provider {provider} - OpenCode requires model to be set in config")
+        else:
+            logger.warning("[OpenCode] No LLM provider specified - OpenCode may not know which API to use")
         
         # Filter out None/empty values
-        return {k: v for k, v in env.items() if v}
+        filtered_env = {k: v for k, v in env.items() if v and (not isinstance(v, str) or v.strip())}
+        
+        # Log which API keys are being set (without exposing the actual keys)
+        api_keys_set = [k for k in filtered_env.keys() if 'API_KEY' in k]
+        if api_keys_set:
+            logger.info(f"[OpenCode] Setting API keys: {', '.join(api_keys_set)}")
+        else:
+            logger.warning("[OpenCode] No API keys found in environment configuration")
+        
+        # Log provider/model info for debugging
+        if provider:
+            provider_to_env_key = {
+                'openai': 'OPENAI_API_KEY',
+                'claude': 'ANTHROPIC_API_KEY',
+                'gemini': 'GOOGLE_API_KEY',
+                'kimi': 'MOONSHOT_API_KEY',
+            }
+            required_key = provider_to_env_key.get(provider)
+            if required_key:
+                if required_key in filtered_env:
+                    # Check if the key is actually set (not just present but empty)
+                    key_value = filtered_env[required_key]
+                    if key_value and len(key_value.strip()) > 0:
+                        logger.info(f"[OpenCode] Provider '{provider}' API key is configured (length: {len(key_value)} chars)")
+                    else:
+                        logger.error(f"[OpenCode] Provider '{provider}' API key is empty or invalid!")
+                else:
+                    logger.error(f"[OpenCode] Provider '{provider}' requires {required_key} but it's not set!")
+        
+        return filtered_env
     
     @property
     def docker_client(self) -> docker.DockerClient:
@@ -319,6 +411,7 @@ class OpenCodeRunner:
             # Spawn container
             container, port = await self._spawn_container(job_id, workspace_path)
             container_id = container.id
+            self._current_container = container  # Store for diagnostics
             
             logger.info(f"[OpenCode] Job {job_id}: Container started on port {port}")
             
@@ -345,8 +438,11 @@ class OpenCodeRunner:
             if cancellation_event and cancellation_event.is_set():
                 raise asyncio.CancelledError("Job cancelled after streaming")
             
+            # Small delay to allow file system writes to complete
+            await asyncio.sleep(1.0)
+            
             # Read result file
-            result = await self._read_result(workspace_path, job_type)
+            result = await self._read_result(workspace_path, job_type, job_id)
             
             execution_time = time.time() - start_time
             logger.info(
@@ -368,6 +464,8 @@ class OpenCodeRunner:
             # Always cleanup container
             if container_id:
                 await self._stop_container(container_id)
+            # Clear container reference
+            self._current_container = None
     
     async def _spawn_container(
         self,
@@ -524,14 +622,81 @@ class OpenCodeRunner:
                     if "application/json" in content_type:
                         try:
                             data = response.json()
-                            # Check if it's an error response
+                            # Log the response for debugging
+                            logger.debug(f"[OpenCode] Job {job_id}: JSON response: {json.dumps(data, indent=2)[:500]}")
+                            
+                            # Store response data for later diagnostics (before error checking)
+                            self._last_json_response = data
+                            
+                            # Check for error in various possible locations in the response
+                            error_info = None
+                            error_location = None
+                            
+                            # Check direct "error" key
                             if "error" in data:
-                                raise ContainerError(f"OpenCode returned error: {data.get('error')}")
+                                error_info = data.get('error', {})
+                                error_location = "root"
+                            # Check nested "info.error" structure (common in OpenCode responses)
+                            elif "info" in data and isinstance(data.get('info'), dict) and "error" in data['info']:
+                                error_info = data['info'].get('error', {})
+                                error_location = "info.error"
+                            
+                            if error_info:
+                                # Extract error details
+                                error_msg = 'Unknown error'
+                                error_name = ''
+                                status_code = None
+                                
+                                if isinstance(error_info, dict):
+                                    error_msg = error_info.get('message', error_info.get('data', {}).get('message', 'Unknown error'))
+                                    error_name = error_info.get('name', '')
+                                    # Check both direct statusCode and nested in data
+                                    status_code = error_info.get('statusCode') or error_info.get('data', {}).get('statusCode')
+                                else:
+                                    # Error is a string
+                                    error_msg = str(error_info)
+                                
+                                # Check for authentication errors
+                                if status_code == 401 or 'authentication' in error_msg.lower() or 'invalid auth' in error_msg.lower():
+                                    provider = self.llm_config.get('provider', 'unknown')
+                                    provider_to_env_key = {
+                                        'openai': 'OPENAI_API_KEY',
+                                        'claude': 'ANTHROPIC_API_KEY',
+                                        'gemini': 'GOOGLE_API_KEY',
+                                        'kimi': 'MOONSHOT_API_KEY',
+                                    }
+                                    required_key = provider_to_env_key.get(provider, 'API_KEY')
+                                    
+                                    # Map provider to OpenCode-specific env var names (ONLY OpenCode keys are used)
+                                    opencode_env_var_map = {
+                                        'openai': 'OPENCODE_OPENAI_API_KEY',
+                                        'claude': 'OPENCODE_ANTHROPIC_API_KEY',
+                                        'gemini': 'OPENCODE_GOOGLE_API_KEY',
+                                        'kimi': 'OPENCODE_MOONSHOT_API_KEY',
+                                    }
+                                    opencode_env_var = opencode_env_var_map.get(provider, '')
+                                    
+                                    logger.error(
+                                        f"[OpenCode] Job {job_id}: Authentication error (401) from OpenCode. "
+                                        f"Location: {error_location}, Provider: {provider}, Required env var: {opencode_env_var}. "
+                                        f"Error: {error_msg}"
+                                    )
+                                    raise ContainerError(
+                                        f"OpenCode authentication failed (401). "
+                                        f"The LLM API key for provider '{provider}' may be missing, invalid, or expired. "
+                                        f"Please set {opencode_env_var} in your .env file. "
+                                        f"OpenCode ONLY uses OpenCode-specific API keys and does not fall back to main LLM configuration."
+                                    )
+                                
+                                logger.error(f"[OpenCode] Job {job_id}: OpenCode returned error ({error_location}): {error_name} - {error_msg}")
+                                raise ContainerError(f"OpenCode returned error: {error_name} - {error_msg}")
+                            
                             # Otherwise, assume it completed successfully
                             logger.info(f"[OpenCode] Job {job_id}: Received JSON response (non-streaming completion)")
                             return
-                        except json.JSONDecodeError:
-                            logger.warning(f"[OpenCode] Job {job_id}: Invalid JSON in response")
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"[OpenCode] Job {job_id}: Invalid JSON in response: {e}")
+                            logger.warning(f"[OpenCode] Job {job_id}: Response text: {response.text[:500]}")
                             raise ContainerError("Invalid JSON response from OpenCode")
                     
                     # For SSE responses, use httpx-sse
@@ -637,7 +802,8 @@ class OpenCodeRunner:
     async def _read_result(
         self,
         workspace_path: Path,
-        job_type: str
+        job_type: str,
+        job_id: str
     ) -> Dict[str, Any]:
         """
         Read and validate result.json from workspace.
@@ -645,6 +811,7 @@ class OpenCodeRunner:
         Args:
             workspace_path: Path to workspace
             job_type: Type of job for validation
+            job_id: Job ID for logging
             
         Returns:
             Parsed and validated result
@@ -657,9 +824,59 @@ class OpenCodeRunner:
         # Check if file exists
         if not result_path.exists():
             logger.error(f"Result file not found: {result_path}")
+            
+            # Enhanced diagnostics: list all files in workspace
+            try:
+                all_files = []
+                for root, dirs, files in os.walk(workspace_path):
+                    for file in files:
+                        rel_path = os.path.relpath(os.path.join(root, file), workspace_path)
+                        all_files.append(rel_path)
+                
+                logger.error(f"[OpenCode] Job {job_id}: Workspace contents ({len(all_files)} files):")
+                # Log first 50 files to avoid log spam
+                for file_path in sorted(all_files)[:50]:
+                    logger.error(f"  - {file_path}")
+                if len(all_files) > 50:
+                    logger.error(f"  ... and {len(all_files) - 50} more files")
+                
+                # Check for similar filenames
+                similar_files = [f for f in all_files if 'result' in f.lower() or 'json' in f.lower()]
+                if similar_files:
+                    logger.error(f"[OpenCode] Job {job_id}: Found similar files: {similar_files}")
+                    
+            except Exception as e:
+                logger.warning(f"[OpenCode] Job {job_id}: Could not list workspace files: {e}")
+            
+            # Log JSON response if available
+            if self._last_json_response:
+                logger.error(f"[OpenCode] Job {job_id}: Last JSON response from OpenCode: {json.dumps(self._last_json_response, indent=2)[:1000]}")
+            
+            # Try to get container logs for diagnostics
+            try:
+                container_to_check = self._current_container
+                if not container_to_check:
+                    # Fallback: try to get by name
+                    container_name = f"{CONTAINER_NAME_PREFIX}{job_id}"
+                    try:
+                        container_to_check = self.docker_client.containers.get(container_name)
+                    except NotFound:
+                        logger.warning(f"[OpenCode] Job {job_id}: Container {container_name} not found for log inspection")
+                        container_to_check = None
+                
+                if container_to_check:
+                    try:
+                        logs = container_to_check.logs(tail=50).decode('utf-8', errors='replace')
+                        logger.error(f"[OpenCode] Job {job_id}: Container logs (last 50 lines):\n{logs}")
+                    except Exception as log_error:
+                        logger.warning(f"[OpenCode] Job {job_id}: Could not read container logs: {log_error}")
+            except Exception as e:
+                logger.warning(f"[OpenCode] Job {job_id}: Could not retrieve container logs: {e}")
+            
             raise ResultError(
                 f"OpenCode did not produce {self.result_file}. "
-                "The LLM may not have followed instructions to write the result file."
+                "The LLM may not have followed instructions to write the result file. "
+                f"Check logs above for workspace contents and container logs."
             )
         
         # Check file size

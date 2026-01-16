@@ -13,6 +13,7 @@ This document provides comprehensive documentation for all features in the Augme
 7. [Sprint Planning & Capacity Management](#sprint-planning--capacity-management)
 8. [PRD to Story Ticket Sync](#prd-to-story-ticket-sync)
 9. [Draft PR Orchestrator](#draft-pr-orchestrator)
+10. [OpenCode Integration](#opencode-integration)
 
 ---
 
@@ -835,6 +836,372 @@ GET /draft-pr/jobs/{job_id}
 - [Draft PR Orchestrator Guide](DRAFT_PR_ORCHESTRATOR.md) - Complete guide with examples
 - [API Documentation](../api/API_DOCUMENTATION.md#draft-pr-orchestrator) - API reference
 - [Product Requirements Document](../../opencode_coder.md) - PRD specification
+
+---
+
+## OpenCode Integration
+
+### Overview
+
+OpenCode is a code-aware execution engine that analyzes repositories to generate task breakdowns and ticket descriptions. When OpenCode is enabled and the `repos` parameter is provided in API requests, Augment uses OpenCode containers instead of direct LLM calls.
+
+### Key Features
+
+- **Code-Aware Generation**: Analyzes actual repository contents for context-aware task breakdowns
+- **File Path References**: Generates content that references actual file paths and code structure
+- **Impact Analysis**: Identifies impacted files for changes
+- **Implementation-Specific**: Creates implementation-specific task breakdowns based on codebase patterns
+- **Docker-Based**: Runs in isolated Docker containers for security and reproducibility
+
+### LLM Configuration for OpenCode
+
+**IMPORTANT**: OpenCode requires **separate, OpenCode-specific LLM configuration**. It does **NOT** use the main LLM configuration. This ensures OpenCode uses separate API keys from the main application.
+
+#### How It Works
+
+1. **Separate Configuration**: OpenCode uses its own set of environment variables prefixed with `OPENCODE_`. These are completely independent from the main LLM configuration.
+
+2. **Environment Variable Mapping**: OpenCodeRunner maps OpenCode-specific configuration to the following environment variables inside containers:
+   - `OPENAI_API_KEY` (from `OPENCODE_OPENAI_API_KEY`)
+   - `ANTHROPIC_API_KEY` (from `OPENCODE_ANTHROPIC_API_KEY`)
+   - `GOOGLE_API_KEY` (from `OPENCODE_GOOGLE_API_KEY`)
+   - `MOONSHOT_API_KEY` (from `OPENCODE_MOONSHOT_API_KEY`)
+   - `LLM_PROVIDER` (from `OPENCODE_LLM_PROVIDER`)
+   - `LLM_MODEL` (from `OPENCODE_*_MODEL` based on provider)
+
+3. **No Fallback**: OpenCode does **NOT** fall back to main LLM configuration. All required OpenCode-specific variables must be set.
+
+### Setup Instructions
+
+#### 1. Enable OpenCode
+
+Enable OpenCode in your `.env` file:
+
+```bash
+OPENCODE_ENABLED=true
+```
+
+#### 2. Configure OpenCode-Specific LLM Provider (REQUIRED)
+
+**IMPORTANT**: OpenCode requires its own provider configuration. It does NOT use the main `LLM_PROVIDER`.
+
+Set the OpenCode-specific provider:
+
+```bash
+OPENCODE_LLM_PROVIDER=claude  # Options: openai, claude, gemini, kimi
+```
+
+#### 3. Set OpenCode-Specific API Key and Model (REQUIRED)
+
+Set the API key and model for your chosen provider. These are **separate** from the main LLM configuration:
+
+**For OpenAI:**
+```bash
+OPENCODE_OPENAI_API_KEY=sk-...
+OPENCODE_OPENAI_MODEL=gpt-5-mini
+```
+
+**For Anthropic (Claude):**
+```bash
+OPENCODE_ANTHROPIC_API_KEY=sk-ant-api03-...
+OPENCODE_ANTHROPIC_MODEL=claude-haiku-4-5
+```
+
+**For Google (Gemini):**
+```bash
+OPENCODE_GOOGLE_API_KEY=...
+OPENCODE_GOOGLE_MODEL=gemini-2.5-flash
+```
+
+**For Moonshot AI (KIMI):**
+```bash
+OPENCODE_MOONSHOT_API_KEY=...
+OPENCODE_MOONSHOT_MODEL=moonshot-v1-8k
+```
+
+#### 4. Configure OpenCode Settings (Optional)
+
+These settings control OpenCode container behavior, resource limits, and repository handling:
+
+```bash
+# Docker Configuration
+OPENCODE_DOCKER_IMAGE=ghcr.io/anomalyco/opencode  # Docker image for OpenCode containers (default: ghcr.io/anomalyco/opencode)
+
+# Concurrency and Resource Limits
+OPENCODE_MAX_CONCURRENT=2  # Maximum number of concurrent OpenCode containers (default: 2). Prevents resource exhaustion.
+OPENCODE_MAX_REPOS=5  # Maximum number of repositories allowed per job (default: 5). Validates repository count in API requests.
+OPENCODE_TIMEOUT=20  # Job timeout in minutes (default: 20). Maximum execution time for OpenCode jobs.
+OPENCODE_CLONE_TIMEOUT=300  # Git clone timeout in seconds (default: 300). Timeout for repository cloning operations.
+OPENCODE_SHALLOW_CLONE=true  # Use shallow clone with --depth 1 (default: true). Faster cloning, only latest commit.
+OPENCODE_MAX_RESULT_SIZE=10  # Maximum result file size in MB (default: 10). Prevents oversized result files.
+```
+
+**Configuration Details:**
+- **OPENCODE_DOCKER_IMAGE**: Specifies which Docker image to use. The default image is automatically pulled on worker startup.
+- **OPENCODE_MAX_CONCURRENT**: Limits how many OpenCode containers can run simultaneously. Increase if you have more resources.
+- **OPENCODE_MAX_REPOS**: Validates the number of repositories in API requests. Prevents jobs from processing too many repos at once.
+- **OPENCODE_TIMEOUT**: Maximum time a job can run before being terminated. Increase for large repositories or complex analysis.
+- **OPENCODE_CLONE_TIMEOUT**: Time limit for git clone operations. Increase for large repositories or slow network connections.
+- **OPENCODE_SHALLOW_CLONE**: When `true`, only clones the latest commit (faster). Set to `false` for full history (slower but more complete).
+- **OPENCODE_MAX_RESULT_SIZE**: Maximum size of result files in MB. Prevents memory issues from oversized results.
+
+#### 5. Set Git Credentials (Required for Private Repos, Optional for Public)
+
+Git credentials are required when cloning private repositories via HTTPS. For public repositories, these can be left empty.
+
+```bash
+# Git Credentials (Required for Private Repositories, Optional for Public)
+GIT_USERNAME=your-username  # Git username or email (required for private repos)
+GIT_PASSWORD=your-token-or-password  # Git password, personal access token, or app password (required for private repos)
+```
+
+**Git Credential Details:**
+- **GIT_USERNAME**: Your Git username or email address
+- **GIT_PASSWORD**: Your Git password, personal access token, or app password
+- **For Bitbucket**: Use App Password (create at: https://bitbucket.org/account/settings/app-passwords/)
+- **For GitHub**: Use Personal Access Token (create at: https://github.com/settings/tokens)
+- **For GitLab**: Use Personal Access Token (create at: https://gitlab.com/-/profile/personal_access_tokens)
+- **Note**: SSH URLs (`git@...`) use SSH keys, not these credentials
+
+#### 6. Optional: OpenCode-Specific Temperature and Max Tokens
+
+```bash
+OPENCODE_LLM_TEMPERATURE=0.7  # Optional, defaults to 0.7
+OPENCODE_LLM_MAX_TOKENS=      # Optional, uses provider defaults if not set
+```
+
+### Prerequisites
+
+- **Docker**: Must be installed and running
+- **Git credentials**: For cloning private repositories
+- **OpenCode-Specific LLM Configuration**: All required OpenCode-specific variables must be set:
+  - `OPENCODE_LLM_PROVIDER` (REQUIRED)
+  - `OPENCODE_*_API_KEY` for your provider (REQUIRED)
+  - `OPENCODE_*_MODEL` for your provider (REQUIRED)
+
+### Supported Endpoints
+
+The `repos` parameter can be added to these endpoints:
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /generate/single` | Code-aware ticket description generation |
+| `POST /plan/tasks/generate` | Code-aware task breakdown |
+| `POST /analyze/story-coverage` | Code-aware coverage analysis |
+
+### Usage Examples
+
+#### Single Ticket with Code Analysis
+
+```bash
+curl -X POST "http://localhost:8000/generate/single" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ticket_key": "PROJ-123",
+    "async_mode": true,
+    "repos": [
+      "https://github.com/org/backend-api.git",
+      {"url": "https://github.com/org/frontend.git", "branch": "develop"}
+    ]
+  }'
+```
+
+#### Task Generation with Code Context
+
+```bash
+curl -X POST "http://localhost:8000/plan/tasks/generate" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "story_keys": ["STORY-456", "STORY-457"],
+    "async_mode": true,
+    "repos": [
+      {"url": "https://bitbucket.org/company/api.git", "branch": "main"}
+    ]
+  }'
+```
+
+#### Coverage Analysis with Code Inspection
+
+```bash
+curl -X POST "http://localhost:8000/analyze/story-coverage" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "story_key": "STORY-789",
+    "async_mode": true,
+    "repos": ["https://github.com/org/monorepo.git"],
+    "additional_context": "Focus on the auth module"
+  }'
+```
+
+### Repository Specification
+
+The `repos` parameter accepts an array of repository specifications:
+
+**String format** (simple):
+```json
+"repos": ["https://github.com/org/repo.git"]
+```
+
+**Object format** (with branch):
+```json
+"repos": [
+  {"url": "https://github.com/org/repo.git", "branch": "main"}
+]
+```
+
+### Troubleshooting
+
+#### OpenCode containers can't access LLM
+
+**Problem**: OpenCode containers fail with authentication errors (401).
+
+**Solution**: 
+- Verify your **OpenCode-specific** API key is correct (e.g., `OPENCODE_ANTHROPIC_API_KEY`, not `ANTHROPIC_API_KEY`)
+- Check that `OPENCODE_LLM_PROVIDER` matches your API key provider
+- Ensure all required OpenCode-specific variables are set:
+  - `OPENCODE_LLM_PROVIDER` (REQUIRED)
+  - `OPENCODE_*_API_KEY` for your provider (REQUIRED)
+  - `OPENCODE_*_MODEL` for your provider (REQUIRED)
+- Ensure Docker has access to environment variables (restart Docker if needed)
+
+#### Wrong LLM model being used
+
+**Problem**: OpenCode uses a different model than expected.
+
+**Solution**:
+- Verify `OPENCODE_LLM_PROVIDER` is set correctly
+- Check that the OpenCode-specific model environment variable is set (e.g., `OPENCODE_ANTHROPIC_MODEL`, not `ANTHROPIC_MODEL`)
+- Remember: OpenCode uses `OPENCODE_*` prefixed variables, not the main LLM variables
+
+#### OpenCode not using configured LLM
+
+**Problem**: OpenCode seems to use default settings or fails with "Missing API key" errors.
+
+**Solution**:
+- Ensure `.env` file is loaded (check `load_dotenv()` is called)
+- Verify **OpenCode-specific** environment variables are set (prefixed with `OPENCODE_`)
+- OpenCode does NOT use main LLM configuration - you must set OpenCode-specific variables
+- Check OpenCodeRunner logs for which environment variables are being passed
+- Look for error messages indicating which variable is missing
+
+#### Docker-related issues
+
+**Problem**: "Docker is not available" or "Image pull failed"
+
+**Solution**:
+- Ensure Docker daemon is running (`docker ps`)
+- Check network connectivity for image pulling
+- Verify Docker has access to environment variables
+- The OpenCode Docker image is automatically pulled on worker startup
+
+#### Clone timeout
+
+**Problem**: Repository cloning times out
+
+**Solution**:
+- Increase `OPENCODE_CLONE_TIMEOUT` (default: 300 seconds)
+- Check repository access and credentials
+- Verify Git credentials are correct for private repositories
+- Consider using `OPENCODE_SHALLOW_CLONE=true` for faster cloning
+
+#### Job timeout
+
+**Problem**: OpenCode jobs timeout before completion
+
+**Solution**:
+- Increase `OPENCODE_TIMEOUT` (default: 20 minutes)
+- Reduce number of repositories per job (`OPENCODE_MAX_REPOS`)
+- Check repository size and complexity
+
+### Example Configuration
+
+```bash
+# Main LLM Configuration (for direct LLM calls, not used by OpenCode)
+LLM_PROVIDER=claude
+ANTHROPIC_API_KEY=sk-ant-api03-...
+ANTHROPIC_MODEL=claude-sonnet-4-5
+LLM_TEMPERATURE=0.7
+
+# OpenCode Configuration (REQUIRED - separate from main LLM config)
+OPENCODE_ENABLED=true
+OPENCODE_LLM_PROVIDER=claude  # REQUIRED: OpenCode-specific provider
+OPENCODE_ANTHROPIC_API_KEY=sk-ant-api03-...  # REQUIRED: OpenCode-specific API key
+OPENCODE_ANTHROPIC_MODEL=claude-haiku-4-5  # REQUIRED: OpenCode-specific model
+OPENCODE_LLM_TEMPERATURE=0.7  # Optional: defaults to 0.7
+
+# OpenCode Docker Settings
+OPENCODE_DOCKER_IMAGE=ghcr.io/anomalyco/opencode
+OPENCODE_MAX_CONCURRENT=2
+OPENCODE_MAX_REPOS=5
+OPENCODE_TIMEOUT=20
+OPENCODE_CLONE_TIMEOUT=300
+OPENCODE_SHALLOW_CLONE=true
+
+# Git Credentials (for private repos)
+GIT_USERNAME=your-username
+GIT_PASSWORD=your-token
+```
+
+**Important Notes:**
+- OpenCode uses `OPENCODE_*` prefixed variables, which are **separate** from main LLM configuration
+- You can use different providers/models for OpenCode vs main LLM calls
+- All OpenCode-specific variables (`OPENCODE_LLM_PROVIDER`, `OPENCODE_*_API_KEY`, `OPENCODE_*_MODEL`) are **REQUIRED**
+
+### Technical Details
+
+#### Configuration Flow
+
+1. `Config.get_opencode_llm_config()` returns a dict with:
+   - `provider`: The LLM provider name (from `OPENCODE_LLM_PROVIDER`)
+   - `api_key`: The API key (from `OPENCODE_*_API_KEY`)
+   - `model`: The model name (from `OPENCODE_*_MODEL`)
+   - Other settings (temperature, max_tokens, etc.)
+
+2. `OpenCodeRunner._build_container_environment()` transforms this to:
+   - Provider-specific API key environment variables
+   - `LLM_PROVIDER` environment variable
+   - `LLM_MODEL` environment variable
+
+3. These environment variables are passed to the Docker container when it starts.
+
+#### Supported Providers
+
+- **OpenAI**: `openai` → Uses `OPENCODE_OPENAI_API_KEY` and `OPENCODE_OPENAI_MODEL`
+- **Anthropic**: `claude` → Uses `OPENCODE_ANTHROPIC_API_KEY` and `OPENCODE_ANTHROPIC_MODEL`
+- **Google**: `gemini` → Uses `OPENCODE_GOOGLE_API_KEY` and `OPENCODE_GOOGLE_MODEL`
+- **Moonshot**: `kimi` → Uses `OPENCODE_MOONSHOT_API_KEY` and `OPENCODE_MOONSHOT_MODEL`
+
+### Session Completion & Execution Flow
+
+#### How Session Completion is Detected
+
+OpenCode uses an **event-driven architecture** rather than polling:
+
+- **No Polling**: The system does not poll for completion status. Instead, it uses Server-Sent Events (SSE) streaming for real-time communication with OpenCode containers.
+
+- **Completion Detection Methods**:
+  1. **SSE "done" event**: For streaming responses, the system listens for a "done" event from OpenCode via SSE. When this event is received, the session is considered complete.
+  2. **JSON response**: For non-streaming responses, OpenCode may return a JSON response immediately, which indicates completion.
+
+- **Post-Completion Steps**:
+  1. After streaming completes (via "done" event or JSON response), there's a brief 1-second delay to allow file system writes to complete.
+  2. The system then reads the result file (`result.json`) from the workspace.
+  3. The result is validated against expected schemas and returned.
+
+- **Timeout Protection**: The overall job timeout (`OPENCODE_TIMEOUT`, default: 20 minutes) applies to the entire operation, ensuring jobs don't hang indefinitely if OpenCode fails to send completion signals.
+
+#### Execution Flow
+
+1. **Container Spawn**: OpenCode container is started with workspace mounted
+2. **Session Creation**: HTTP POST to `/session` endpoint creates a session and returns `session_id`
+3. **Prompt Submission**: HTTP POST to `/session/{session_id}/message` with prompt
+4. **Streaming Response**: 
+   - If response is `text/event-stream`, system streams SSE events until "done" event
+   - If response is `application/json`, completion is immediate
+5. **Result Extraction**: After completion, reads `result.json` from workspace
+6. **Container Cleanup**: Container is stopped and removed
+
+This event-driven approach is more efficient than polling and provides real-time feedback during execution.
 
 ---
 
