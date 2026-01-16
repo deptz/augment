@@ -5,7 +5,9 @@ Request and response models for planning endpoints
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any, TYPE_CHECKING
+from typing import Optional, List, Dict, Any, TYPE_CHECKING, Union
+
+from .opencode import RepoSpec, RepoInput
 
 # Import TestCaseModel for runtime
 from .test_generation import TestCaseModel
@@ -139,6 +141,11 @@ class TaskGenerationRequest(BaseModel):
         default=False,
         description="Generate test cases for tasks (default: false)",
         example=False
+    )
+    repos: Optional[List[RepoInput]] = Field(
+        default=None,
+        description="Repositories to analyze for code-aware task generation. If provided, uses OpenCode instead of direct LLM. Each item can be a URL string or {url, branch} object.",
+        example=["https://bitbucket.org/company/backend-api.git"]
     )
 
 

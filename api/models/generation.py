@@ -3,8 +3,10 @@ Generation Models
 Request and response models for ticket generation endpoints
 """
 from pydantic import BaseModel, Field, validator
-from typing import Optional, List
+from typing import Optional, List, Union
 from datetime import datetime
+
+from .opencode import RepoSpec, RepoInput
 
 
 class JQLRequest(BaseModel):
@@ -87,6 +89,11 @@ class SingleTicketRequest(BaseModel):
         description="Additional context for description generation (e.g., technical constraints, architecture decisions)",
         example="Use PostgreSQL for data storage. Follows microservice architecture pattern."
     )
+    repos: Optional[List[RepoInput]] = Field(
+        default=None,
+        description="Repositories to analyze for code-aware generation. If provided, uses OpenCode instead of direct LLM. Each item can be a URL string or {url, branch} object.",
+        example=["https://bitbucket.org/company/crm-api.git"]
+    )
     
     @validator('llm_provider')
     def validate_provider(cls, v):
@@ -103,7 +110,8 @@ class SingleTicketRequest(BaseModel):
                 "update_jira": False,
                 "llm_provider": "openai",
                 "llm_model": "gpt-5-mini",
-                "additional_context": "Uses Redis for caching. Must be compatible with Python 3.10."
+                "additional_context": "Uses Redis for caching. Must be compatible with Python 3.10.",
+                "repos": ["https://bitbucket.org/company/backend-api.git"]
             },
             "examples": [
                 {
@@ -112,7 +120,11 @@ class SingleTicketRequest(BaseModel):
                 },
                 {
                     "ticket_key": "https://company.atlassian.net/browse/PROJ-123",
-                    "update_jira": False
+                    "update_jira": False,
+                    "repos": [
+                        {"url": "https://bitbucket.org/company/api.git", "branch": "develop"},
+                        "https://bitbucket.org/company/frontend.git"
+                    ]
                 }
             ]
         }
@@ -168,4 +180,5 @@ class JobStatus(BaseModel):
     story_keys: Optional[List[str]] = Field(None, description="List of story keys being processed (for multi-story jobs, e.g., task_generation)")
     prd_url: Optional[str] = Field(None, description="PRD document URL (for prd_story_sync jobs)")
     additional_context: Optional[str] = Field(None, description="Additional context used for processing (preserved for reuse in subsequent operations)")
+    repos: Optional[List[str]] = Field(None, description="Repository URLs used for OpenCode processing")
 

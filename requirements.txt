@@ -18,3 +18,10 @@ uvicorn[standard]>=0.24.0
 arq>=0.25.0
 redis>=5.0.0
 httpx>=0.24.0  # Required for FastAPI TestClient
+
+# OpenCode integration dependencies
+docker>=7.0.0  # Docker SDK for Python
+gitpython>=3.1.0  # Git operations for cloning repos
+httpx-sse>=0.4.0  # SSE streaming for OpenCode responses
+jsonschema>=4.0.0  # JSON schema validation for OpenCode results
+python-dateutil>=2.8.0  # Date parsing utilities

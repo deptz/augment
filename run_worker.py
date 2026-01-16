@@ -70,6 +70,54 @@ async def main():
         logger.info(f"Starting ARQ worker with Redis: {WorkerSettings.redis_settings.host}:{WorkerSettings.redis_settings.port}")
         logger.info(f"Worker configuration: max_jobs={WorkerSettings.max_jobs}, job_timeout={WorkerSettings.job_timeout}s, keep_result={WorkerSettings.keep_result}s")
         
+        # Cleanup orphaned OpenCode containers and workspaces on startup
+        if config.is_opencode_enabled():
+            logger.info("Cleaning up orphaned OpenCode resources...")
+            try:
+                from src.workspace_manager import WorkspaceManager
+                from src.opencode_runner import OpenCodeRunner
+                
+                opencode_config = config.get_opencode_config()
+                git_creds = config.get_git_credentials()
+                
+                # Cleanup orphaned workspaces
+                workspace_manager = WorkspaceManager(
+                    git_username=git_creds.get('username'),
+                    git_password=git_creds.get('password')
+                )
+                workspace_count = await workspace_manager.cleanup_orphaned_workspaces()
+                if workspace_count > 0:
+                    logger.info(f"Cleaned up {workspace_count} orphaned workspaces")
+                
+                # Cleanup orphaned containers and pre-pull image
+                opencode_runner = OpenCodeRunner(
+                    docker_image=opencode_config.get('docker_image')
+                )
+                if opencode_runner.is_docker_available():
+                    container_count = await opencode_runner.cleanup_orphaned_containers()
+                    if container_count > 0:
+                        logger.info(f"Cleaned up {container_count} orphaned containers")
+                    
+                    # Pre-pull Docker image to avoid delays during job execution
+                    logger.info(f"Ensuring OpenCode image is available: {opencode_config.get('docker_image')}")
+                    try:
+                        await opencode_runner.ensure_image_available(
+                            timeout_seconds=opencode_config.get('image_pull_timeout_seconds', 600)
+                        )
+                        image_info = opencode_runner.get_image_info()
+                        if image_info:
+                            logger.info(
+                                f"OpenCode image ready: {image_info.get('id')} "
+                                f"({image_info.get('size_mb', 0):.1f}MB)"
+                            )
+                    except Exception as e:
+                        logger.warning(f"Could not pre-pull OpenCode image: {e}")
+                else:
+                    logger.info("Docker not available, skipping container cleanup and image pull")
+                    
+            except Exception as e:
+                logger.warning(f"Error during orphan cleanup: {e}")
+        
         # Create worker with all worker functions
         worker = Worker(
             functions=[

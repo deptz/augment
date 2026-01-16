@@ -17,6 +17,7 @@ from ..models.planning import (
     PRDStorySyncResponse
 )
 from ..models.generation import BatchResponse
+from ..models.opencode import validate_repos_list
 from ..dependencies import get_generator, get_jira_client, get_config, get_active_job_for_ticket, register_ticket_job, unregister_ticket_job
 from ..utils import create_custom_llm_client, extract_story_details_with_tests, extract_task_details_with_tests, parse_story_keys_from_input, normalize_ticket_key
 from ..auth import get_current_user
@@ -299,6 +300,24 @@ async def generate_tasks_for_stories(request: TaskGenerationRequest, current_use
                     detail=f"Story {story_keys[0]} has no parent epic. Please provide epic_key explicitly."
                 )
         
+        # Validate and normalize repos if provided
+        repos_normalized = None
+        repos_urls = None
+        if request.repos:
+            try:
+                max_repos = config.get_opencode_config().get('max_repos_per_job', 5)
+                repos_normalized = validate_repos_list(request.repos, max_repos=max_repos)
+                repos_urls = [r.url for r in repos_normalized] if repos_normalized else None
+                
+                # Check if OpenCode is enabled when repos are provided
+                if repos_normalized and not config.is_opencode_enabled():
+                    raise HTTPException(
+                        status_code=503,
+                        detail="OpenCode is not enabled. Remove repos parameter to use direct LLM, or enable OpenCode in configuration."
+                    )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+        
         # If async mode, enqueue job
         if request.async_mode:
             # Check for duplicate active jobs per story
@@ -326,18 +345,24 @@ async def generate_tasks_for_stories(request: TaskGenerationRequest, current_use
                 job_id=job_id,
                 job_type="task_generation",
                 status="started",
-                progress={"message": f"Queued for generating tasks for {len(story_keys)} stories"},
+                progress={"message": f"Queued for generating tasks for {len(story_keys)} stories" + (" (with OpenCode)" if repos_urls else "")},
                 started_at=datetime.now(),
                 processed_tickets=0,
                 successful_tickets=0,
                 failed_tickets=0,
                 ticket_key=epic_key,
-                story_keys=story_keys.copy()
+                story_keys=story_keys.copy(),
+                repos=repos_urls
             )
             
             # Register all story keys for duplicate prevention
             for story_key in story_keys:
                 register_ticket_job(story_key, job_id)
+            
+            # Convert repos to serializable format for worker
+            repos_for_worker = None
+            if repos_normalized:
+                repos_for_worker = [{"url": r.url, "branch": r.branch} for r in repos_normalized]
             
             redis_pool = await get_redis_pool()
             await redis_pool.enqueue_job(
@@ -352,15 +377,16 @@ async def generate_tasks_for_stories(request: TaskGenerationRequest, current_use
                 llm_provider=request.llm_provider,
                 additional_context=request.additional_context,
                 generate_test_cases=request.generate_test_cases,
+                repos=repos_for_worker,
                 _job_id=job_id
             )
             
-            logger.info(f"Enqueued task generation job {job_id} for {len(story_keys)} stories")
+            logger.info(f"Enqueued task generation job {job_id} for {len(story_keys)} stories" + (" (with OpenCode)" if repos_urls else ""))
             
             return BatchResponse(
                 job_id=job_id,
                 status="started",
-                message=f"Task generation for {len(story_keys)} stories queued",
+                message=f"Task generation for {len(story_keys)} stories queued" + (" (with OpenCode)" if repos_urls else ""),
                 status_url=f"/jobs/{job_id}",
                 jql="",  # Not applicable
                 max_results=len(story_keys),
@@ -369,6 +395,13 @@ async def generate_tasks_for_stories(request: TaskGenerationRequest, current_use
             )
         
         # Synchronous mode (original behavior)
+        # Note: repos (OpenCode) requires async_mode due to long execution time
+        if repos_normalized:
+            raise HTTPException(
+                status_code=400,
+                detail="repos parameter requires async_mode=true due to long execution time. Please set async_mode=true to use OpenCode."
+            )
+        
         custom_llm_client = None
         if request.llm_provider or request.llm_model:
             custom_llm_client = create_custom_llm_client(request.llm_provider, request.llm_model)

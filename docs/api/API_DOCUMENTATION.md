@@ -8,10 +8,11 @@
 4. [Authentication](#authentication)
 5. [LLM Model Selection](#llm-model-selection)
 6. [Background Job Processing](#background-job-processing)
-7. [API Endpoints](#api-endpoints)
-8. [Usage Examples](#usage-examples)
-9. [Troubleshooting](#troubleshooting)
-10. [Production Deployment](#production-deployment)
+7. [OpenCode Integration](#opencode-integration)
+8. [API Endpoints](#api-endpoints)
+9. [Usage Examples](#usage-examples)
+10. [Troubleshooting](#troubleshooting)
+11. [Production Deployment](#production-deployment)
 
 ---
 
@@ -837,6 +838,199 @@ Results format depends on job type:
 3. **Handle Failures**: Check `status` and `error` fields for failed jobs
 4. **Cancel When Needed**: Use `DELETE /jobs/{job_id}` to cancel stuck or unwanted jobs
 5. **Monitor Worker**: Ensure `run_worker.py` is running for async jobs to be processed
+
+---
+
+## OpenCode Integration
+
+OpenCode enables **code-aware LLM generation** by giving the AI direct access to your repository contents. When enabled, the system clones your repositories to a temporary workspace and runs OpenCode in a Docker container with filesystem access, allowing it to analyze actual code structure, patterns, and implementations.
+
+### When to Use OpenCode
+
+Use OpenCode when you want AI-generated content that:
+- References **actual file paths** and code structure
+- Understands **existing patterns** in your codebase
+- Identifies **impacted files** for changes
+- Creates **implementation-specific** task breakdowns
+- Performs **code-aware coverage analysis**
+
+### Prerequisites
+
+1. **Docker**: Must be installed and running
+2. **Git credentials**: For cloning private repositories
+3. **Enable OpenCode**: Set `OPENCODE_ENABLED=true` in configuration
+
+### Configuration
+
+```bash
+# Enable OpenCode
+OPENCODE_ENABLED=true
+
+# Docker image (uses default if not specified)
+OPENCODE_DOCKER_IMAGE=ghcr.io/anomalyco/opencode
+
+# Concurrency and limits
+OPENCODE_MAX_CONCURRENT=2    # Max concurrent containers
+OPENCODE_MAX_REPOS=5         # Max repositories per job
+OPENCODE_TIMEOUT=20          # Job timeout in minutes
+OPENCODE_CLONE_TIMEOUT=300   # Git clone timeout in seconds
+OPENCODE_SHALLOW_CLONE=true  # Use shallow clone
+
+# Git credentials for private repositories
+GIT_USERNAME=your-git-username
+GIT_PASSWORD=your-git-token
+```
+
+### Supported Endpoints
+
+The `repos` parameter can be added to these endpoints:
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /generate/single` | Code-aware ticket description generation |
+| `POST /plan/tasks/generate` | Code-aware task breakdown |
+| `POST /analyze/story-coverage` | Code-aware coverage analysis |
+
+### Usage Examples
+
+#### Single Ticket with Code Analysis
+
+```bash
+curl -X POST "http://localhost:8000/generate/single" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ticket_key": "PROJ-123",
+    "async_mode": true,
+    "repos": [
+      "https://github.com/org/backend-api.git",
+      {"url": "https://github.com/org/frontend.git", "branch": "develop"}
+    ]
+  }'
+```
+
+#### Task Generation with Code Context
+
+```bash
+curl -X POST "http://localhost:8000/plan/tasks/generate" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "story_keys": ["STORY-456", "STORY-457"],
+    "async_mode": true,
+    "repos": [
+      {"url": "https://bitbucket.org/company/api.git", "branch": "main"}
+    ]
+  }'
+```
+
+#### Coverage Analysis with Code Inspection
+
+```bash
+curl -X POST "http://localhost:8000/analyze/story-coverage" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "story_key": "STORY-789",
+    "async_mode": true,
+    "repos": ["https://github.com/org/monorepo.git"],
+    "additional_context": "Focus on the auth module"
+  }'
+```
+
+### Repository Specification
+
+The `repos` parameter accepts an array of repository specifications:
+
+**String format** (simple):
+```json
+"repos": ["https://github.com/org/repo.git"]
+```
+
+**Object format** (with branch):
+```json
+"repos": [
+  {"url": "https://github.com/org/repo.git", "branch": "develop"}
+]
+```
+
+**Mixed format**:
+```json
+"repos": [
+  "https://github.com/org/repo1.git",
+  {"url": "https://github.com/org/repo2.git", "branch": "feature/xyz"}
+]
+```
+
+### Response Enhancements
+
+When OpenCode is used, responses include additional metadata:
+
+#### Ticket Description Response
+```json
+{
+  "ticket_key": "PROJ-123",
+  "generated_description": "...",
+  "success": true,
+  "llm_provider": "opencode",
+  "opencode_metadata": {
+    "impacted_files": ["src/api/users.py", "tests/test_users.py"],
+    "components": ["backend", "api"],
+    "acceptance_criteria": ["AC1", "AC2"],
+    "confidence": "high"
+  }
+}
+```
+
+#### Coverage Analysis Response
+```json
+{
+  "story_key": "STORY-789",
+  "coverage_percentage": 75.0,
+  "gaps": [
+    {
+      "requirement": "User password reset",
+      "severity": "important",
+      "suggestion": "Add task for password reset email flow"
+    }
+  ],
+  "suggestions_for_updates": [
+    {
+      "task_key": "TASK-1",
+      "current_description": "...",
+      "suggested_description": "...",
+      "ready_to_submit": {...}
+    }
+  ],
+  "suggestions_for_new_tasks": [
+    {
+      "summary": "Implement password reset endpoint",
+      "description": "Create POST /api/auth/reset-password...",
+      "gap_addressed": "User password reset",
+      "ready_to_submit": {...}
+    }
+  ]
+}
+```
+
+### Important Notes
+
+1. **Async Mode Required**: When `repos` is provided, `async_mode` must be `true` (OpenCode execution takes 5-20 minutes)
+
+2. **LLM Bypass**: Direct LLM calls are bypassed when using OpenCode; the container handles LLM interaction internally with full code context
+
+3. **API Keys**: LLM API keys are automatically passed to the OpenCode container from your configuration
+
+4. **Cancellation**: Jobs can be cancelled during execution; the system checks for cancellation at multiple points including during SSE streaming
+
+5. **Cleanup**: Workspaces and containers are automatically cleaned up after job completion or failure
+
+### Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| "Docker is not available" | Ensure Docker daemon is running |
+| "Image pull failed" | Check network connectivity; image is pre-pulled on worker startup |
+| "Clone timeout" | Increase `OPENCODE_CLONE_TIMEOUT`; check repository access |
+| "Job timeout" | Increase `OPENCODE_TIMEOUT`; reduce repository count |
+| "OpenCode is not enabled" | Set `OPENCODE_ENABLED=true` in config |
 
 ---
 

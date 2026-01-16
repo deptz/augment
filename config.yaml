@@ -78,6 +78,26 @@ auth:
 cors:
   allowed_origins: ${CORS_ALLOWED_ORIGINS:}  # Comma-separated list of allowed origins (e.g., "http://localhost:5173,http://localhost:3000")
 
+# OpenCode Configuration (Optional)
+# Code-aware execution engine for repository analysis
+# When enabled and repos parameter is provided, uses OpenCode instead of direct LLM
+opencode:
+  enabled: ${OPENCODE_ENABLED:false}  # Enable OpenCode integration
+  docker_image: ${OPENCODE_DOCKER_IMAGE:ghcr.io/anomalyco/opencode}  # OpenCode Docker image
+  max_concurrent: ${OPENCODE_MAX_CONCURRENT:2}  # Max concurrent OpenCode containers
+  max_repos_per_job: ${OPENCODE_MAX_REPOS:5}  # Max repositories per job
+  job_timeout_minutes: ${OPENCODE_TIMEOUT:20}  # Job timeout in minutes
+  clone_timeout_seconds: ${OPENCODE_CLONE_TIMEOUT:300}  # Git clone timeout in seconds
+  shallow_clone: ${OPENCODE_SHALLOW_CLONE:true}  # Use shallow clone (--depth 1)
+  result_file: ${OPENCODE_RESULT_FILE:result.json}  # Result filename in workspace
+  max_result_size_mb: ${OPENCODE_MAX_RESULT_SIZE:10}  # Max result file size in MB
+
+# Git Credentials Configuration (Optional)
+# Used for cloning private repositories when using OpenCode
+git:
+  username: ${GIT_USERNAME:}  # Git username for authentication
+  password: ${GIT_PASSWORD:}  # Git password/token for authentication
+
 # Redis Configuration
 # Used for ARQ background job queue
 redis:

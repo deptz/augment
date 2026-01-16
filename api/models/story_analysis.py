@@ -3,7 +3,9 @@ Story Analysis Models
 Request and response models for story coverage analysis endpoints
 """
 from pydantic import BaseModel, Field, validator
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
+
+from .opencode import RepoSpec, RepoInput
 
 
 class StoryCoverageRequest(BaseModel):
@@ -33,6 +35,11 @@ class StoryCoverageRequest(BaseModel):
     additional_context: Optional[str] = Field(
         None,
         description="Additional context or requirements to consider in the analysis (e.g., specific concerns, constraints, or focus areas)"
+    )
+    repos: Optional[List[RepoInput]] = Field(
+        default=None,
+        description="Repositories to analyze for code-aware coverage check. If provided, uses OpenCode instead of direct LLM. Each item can be a URL string or {url, branch} object.",
+        example=["https://bitbucket.org/company/backend-api.git"]
     )
     
     @validator('llm_provider')

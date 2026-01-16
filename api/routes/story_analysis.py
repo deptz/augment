@@ -17,6 +17,7 @@ from ..models.story_analysis import (
     CreateTaskResponse
 )
 from ..models.generation import BatchResponse, JobStatus
+from ..models.opencode import validate_repos_list
 from ..dependencies import get_jira_client, get_llm_client, get_config
 from ..dependencies import jobs, get_active_job_for_ticket, register_ticket_job
 from ..utils import create_custom_llm_client, normalize_ticket_key
@@ -57,6 +58,24 @@ async def analyze_story_coverage(
         if not llm_client:
             raise HTTPException(status_code=503, detail="LLM client not initialized")
         
+        # Validate and normalize repos if provided
+        repos_normalized = None
+        repos_urls = None
+        if request.repos:
+            try:
+                max_repos = config.get_opencode_config().get('max_repos_per_job', 5)
+                repos_normalized = validate_repos_list(request.repos, max_repos=max_repos)
+                repos_urls = [r.url for r in repos_normalized] if repos_normalized else None
+                
+                # Check if OpenCode is enabled when repos are provided
+                if repos_normalized and not config.is_opencode_enabled():
+                    raise HTTPException(
+                        status_code=503,
+                        detail="OpenCode is not enabled. Remove repos parameter to use direct LLM, or enable OpenCode in configuration."
+                    )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+        
         # If async mode, enqueue job
         if request.async_mode:
             # Check for duplicate active job
@@ -83,16 +102,22 @@ async def analyze_story_coverage(
                 job_id=job_id,
                 job_type="story_coverage",
                 status="started",
-                progress={"message": f"Queued for analyzing story coverage for {story_key}"},
+                progress={"message": f"Queued for analyzing story coverage for {story_key}" + (" (with OpenCode)" if repos_urls else "")},
                 started_at=datetime.now(),
                 processed_tickets=0,
                 successful_tickets=0,
                 failed_tickets=0,
-                story_key=story_key
+                story_key=story_key,
+                repos=repos_urls
             )
             
             # Register story key for duplicate prevention
             register_ticket_job(story_key, job_id)
+            
+            # Convert repos to serializable format for worker
+            repos_for_worker = None
+            if repos_normalized:
+                repos_for_worker = [{"url": r.url, "branch": r.branch} for r in repos_normalized]
             
             redis_pool = await get_redis_pool()
             await redis_pool.enqueue_job(
@@ -103,15 +128,16 @@ async def analyze_story_coverage(
                 additional_context=request.additional_context,
                 llm_model=request.llm_model,
                 llm_provider=request.llm_provider,
+                repos=repos_for_worker,
                 _job_id=job_id
             )
             
-            logger.info(f"Enqueued story coverage analysis job {job_id} for story {story_key}")
+            logger.info(f"Enqueued story coverage analysis job {job_id} for story {story_key}" + (" (with OpenCode)" if repos_urls else ""))
             
             return BatchResponse(
                 job_id=job_id,
                 status="started",
-                message=f"Story coverage analysis for {story_key} queued for processing",
+                message=f"Story coverage analysis for {story_key} queued for processing" + (" (with OpenCode)" if repos_urls else ""),
                 status_url=f"/jobs/{job_id}",
                 jql="",  # Not applicable for story coverage
                 max_results=1,
@@ -120,6 +146,13 @@ async def analyze_story_coverage(
             )
         
         # Synchronous mode (original behavior)
+        # Note: repos (OpenCode) requires async_mode due to long execution time
+        if repos_normalized:
+            raise HTTPException(
+                status_code=400,
+                detail="repos parameter requires async_mode=true due to long execution time. Please set async_mode=true to use OpenCode."
+            )
+        
         # Create custom LLM client if specified
         analysis_llm_client = llm_client
         if request.llm_provider or request.llm_model:

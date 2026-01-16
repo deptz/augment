@@ -62,6 +62,27 @@ from .bulk_creation import (
     TaskCreationRequest
 )
 
+# Prompt testing models
+from .prompt_testing import (
+    PromptResubmitRequest,
+    PromptResubmitResponse
+)
+
+# OpenCode models
+from .opencode import (
+    RepoSpec,
+    RepoInput,
+    normalize_repo_input,
+    validate_repos_list,
+    OpenCodeJobResult,
+    TicketDescriptionResult,
+    TaskBreakdownTask,
+    TaskBreakdownResult,
+    CoverageRequirement,
+    CoverageGap as OpenCodeCoverageGap,
+    CoverageCheckResult
+)
+
 __all__ = [
     # Generation
     "JQLRequest",
@@ -108,5 +129,17 @@ __all__ = [
     # Prompt testing
     "PromptResubmitRequest",
     "PromptResubmitResponse",
+    # OpenCode
+    "RepoSpec",
+    "RepoInput",
+    "normalize_repo_input",
+    "validate_repos_list",
+    "OpenCodeJobResult",
+    "TicketDescriptionResult",
+    "TaskBreakdownTask",
+    "TaskBreakdownResult",
+    "CoverageRequirement",
+    "OpenCodeCoverageGap",
+    "CoverageCheckResult",
 ]
 

@@ -111,6 +111,43 @@ class Config:
     def cors(self) -> Dict[str, Any]:
         return self._config.get('cors', {})
     
+    @property
+    def opencode(self) -> Dict[str, Any]:
+        """OpenCode execution engine configuration"""
+        return self._config.get('opencode', {})
+    
+    @property
+    def git(self) -> Dict[str, Any]:
+        """Git credentials configuration for repo cloning"""
+        return self._config.get('git', {})
+    
+    def is_opencode_enabled(self) -> bool:
+        """Check if OpenCode integration is enabled"""
+        return self.opencode.get('enabled', False)
+    
+    def get_opencode_config(self) -> Dict[str, Any]:
+        """Get OpenCode configuration with defaults"""
+        opencode_config = self.opencode
+        return {
+            'enabled': opencode_config.get('enabled', False),
+            'docker_image': opencode_config.get('docker_image', 'ghcr.io/anomalyco/opencode'),
+            'max_concurrent': int(opencode_config.get('max_concurrent', 2)),
+            'max_repos_per_job': int(opencode_config.get('max_repos_per_job', 5)),
+            'job_timeout_minutes': int(opencode_config.get('job_timeout_minutes', 20)),
+            'clone_timeout_seconds': int(opencode_config.get('clone_timeout_seconds', 300)),
+            'shallow_clone': opencode_config.get('shallow_clone', True),
+            'result_file': opencode_config.get('result_file', 'result.json'),
+            'max_result_size_mb': int(opencode_config.get('max_result_size_mb', 10)),
+        }
+    
+    def get_git_credentials(self) -> Dict[str, Optional[str]]:
+        """Get git credentials for cloning repositories"""
+        git_config = self.git
+        return {
+            'username': git_config.get('username') or os.getenv('GIT_USERNAME'),
+            'password': git_config.get('password') or os.getenv('GIT_PASSWORD'),
+        }
+    
     def get_cors_origins(self) -> List[str]:
         """
         Get list of CORS allowed origins from configuration.

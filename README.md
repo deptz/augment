@@ -398,6 +398,74 @@ ENVIRONMENT=development  # Set to "production" for production mode
 CORS_ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000
 ```
 
+**OpenCode Integration (Optional - for code-aware generation):**
+
+OpenCode enables code-aware LLM generation by analyzing actual repository contents. When the `repos` parameter is provided to API endpoints, the system will:
+1. Clone the specified repositories to a temporary workspace
+2. Run OpenCode in a Docker container with filesystem access
+3. Generate results based on actual code structure
+
+```bash
+# Enable OpenCode integration
+OPENCODE_ENABLED=true
+
+# OpenCode Docker image (uses default if not specified)
+OPENCODE_DOCKER_IMAGE=ghcr.io/anomalyco/opencode
+
+# Concurrency and limits
+OPENCODE_MAX_CONCURRENT=2  # Max concurrent OpenCode containers
+OPENCODE_MAX_REPOS=5  # Max repositories per job
+OPENCODE_TIMEOUT=20  # Job timeout in minutes
+OPENCODE_CLONE_TIMEOUT=300  # Git clone timeout in seconds
+OPENCODE_SHALLOW_CLONE=true  # Use shallow clone (--depth 1)
+OPENCODE_MAX_RESULT_SIZE=10  # Max result file size in MB
+
+# Git credentials for cloning private repositories
+GIT_USERNAME=your-git-username
+GIT_PASSWORD=your-git-token-or-password
+```
+
+**Prerequisites for OpenCode:**
+- Docker must be installed and running
+- The Docker daemon must be accessible to the worker process
+- Git credentials (if cloning private repositories)
+- The OpenCode Docker image is automatically pulled on worker startup
+
+**Using OpenCode in API calls:**
+
+Add the `repos` parameter to enable code-aware generation:
+
+```bash
+# Single ticket with code-aware generation
+curl -X POST "http://localhost:8000/generate/single" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "ticket_key": "PROJ-123",
+    "async_mode": true,
+    "repos": [
+      "https://github.com/org/backend-api.git",
+      {"url": "https://github.com/org/frontend.git", "branch": "develop"}
+    ]
+  }'
+
+# Task generation with code-aware analysis
+curl -X POST "http://localhost:8000/plan/tasks/generate" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "story_keys": ["STORY-456"],
+    "async_mode": true,
+    "repos": ["https://github.com/org/api.git"]
+  }'
+```
+
+**Note:** When `repos` is provided:
+- `async_mode` must be `true` (OpenCode execution takes 5-20 minutes)
+- Direct LLM calls are bypassed; OpenCode handles LLM internally
+- Results include file references from the actual codebase
+- LLM API keys are automatically passed to the OpenCode container
+- Jobs can be cancelled during execution (cancellation is checked at multiple points)
+- Coverage analysis includes actionable suggestions for task updates and new tasks
+
 **Team Member Database (Optional):**
 ```bash
 TEAM_MEMBER_DB_PATH=data/team_members.db  # Custom database path (absolute or relative to project root)
@@ -953,6 +1021,24 @@ For more details, see [Background Jobs Documentation](docs/api/API_DOCUMENTATION
     - Ensure all tasks in a batch are created together for proper dependency mapping
     - The system supports both task_id and summary-based dependencies (backward compatible)
 
+12. **OpenCode container fails to start**
+    - Verify Docker is running: `docker ps`
+    - Check if the image exists: `docker images | grep opencode`
+    - The worker automatically pulls the image on startup
+    - Check worker logs for image pull errors
+
+13. **OpenCode job times out**
+    - Increase `OPENCODE_TIMEOUT` in configuration (default: 20 minutes)
+    - Reduce the number of repositories per job
+    - Use `OPENCODE_SHALLOW_CLONE=true` for faster cloning
+    - Check if repositories are large or have slow network access
+
+14. **Git clone fails in OpenCode**
+    - Verify `GIT_USERNAME` and `GIT_PASSWORD` are set correctly
+    - For GitHub, use a Personal Access Token as password
+    - For Bitbucket, use an App Password or API token
+    - Increase `OPENCODE_CLONE_TIMEOUT` for large repositories
+
 ### Debug Mode
 
 Enable verbose logging for troubleshooting:
@@ -987,7 +1073,11 @@ augment/
 │   ├── sprint_planning_service.py # Sprint planning logic
 │   ├── team_member_db.py  # Team member database setup
 │   ├── team_member_service.py # Team member CRUD operations
+│   ├── opencode_runner.py # OpenCode Docker container management
+│   ├── opencode_schemas.py # JSON schemas for OpenCode results
+│   ├── workspace_manager.py # Repository cloning and workspace management
 │   └── prompts/           # Prompt templates
+│       └── opencode.py   # Code-aware prompt templates
 ├── api/                   # API server code
 │   ├── routes/           # API endpoints
 │   │   ├── sprint_planning.py # Sprint planning endpoints

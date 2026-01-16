@@ -81,14 +81,21 @@ async def check_cancellation(job_id: str, job: JobStatus) -> bool:
 
 async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update_jira: bool,
                                      llm_model: Optional[str] = None, llm_provider: Optional[str] = None,
-                                     additional_context: Optional[str] = None):
-    """ARQ worker function for processing a single ticket"""
+                                     additional_context: Optional[str] = None,
+                                     repos: Optional[List[Dict[str, Any]]] = None):
+    """ARQ worker function for processing a single ticket
+    
+    Args:
+        repos: If provided, uses OpenCode for code-aware generation instead of direct LLM.
+               List of dicts with 'url' and optional 'branch' keys.
+    """
     _initialize_services_if_needed()
     generator = get_generator()
     jira_client = get_jira_client()
+    config = get_config()
     
     try:
-        job = _get_or_create_job(job_id, "single", f"Processing ticket {ticket_key}...")
+        job = _get_or_create_job(job_id, "single", f"Processing ticket {ticket_key}..." + (" (with OpenCode)" if repos else ""))
         job.ticket_key = ticket_key
         
         # Check if cancelled via Redis flag
@@ -107,58 +114,206 @@ async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update
         
         # Extract basic info
         summary = ticket_data.get('fields', {}).get('summary', '')
+        description_raw = ticket_data.get('fields', {}).get('description', '')
         assignee = ticket_data.get('fields', {}).get('assignee')
         assignee_name = assignee.get('displayName') if assignee else None
         parent = ticket_data.get('fields', {}).get('parent')
         parent_name = parent.get('fields', {}).get('summary') if parent else None
         
-        # Process ticket
-        result = generator.process_ticket(
-            ticket_key=ticket_key,
-            dry_run=not update_jira,
-            llm_model=llm_model,
-            llm_provider=llm_provider,
-            additional_context=additional_context
-        )
+        # Branch: OpenCode path (when repos provided) vs Direct LLM path
+        if repos:
+            # OpenCode path - no direct LLM call
+            job.progress = {"message": f"Setting up OpenCode workspace for {ticket_key}..."}
+            
+            from src.workspace_manager import WorkspaceManager
+            from src.opencode_runner import OpenCodeRunner, OpenCodeError, DockerUnavailableError
+            from src.prompts.opencode import ticket_description_prompt
+            
+            opencode_config = config.get_opencode_config()
+            git_creds = config.get_git_credentials()
+            
+            workspace_manager = WorkspaceManager(
+                git_username=git_creds.get('username'),
+                git_password=git_creds.get('password'),
+                clone_timeout_seconds=opencode_config.get('clone_timeout_seconds', 300),
+                shallow_clone=opencode_config.get('shallow_clone', True)
+            )
+            
+            opencode_runner = OpenCodeRunner(
+                docker_image=opencode_config.get('docker_image'),
+                job_timeout_minutes=opencode_config.get('job_timeout_minutes', 20),
+                max_result_size_mb=opencode_config.get('max_result_size_mb', 10),
+                result_file=opencode_config.get('result_file', 'result.json'),
+                llm_config=config.get_llm_config() if hasattr(config, 'get_llm_config') else config._config.get('llm', {})
+            )
+            opencode_runner.set_concurrency_limit(opencode_config.get('max_concurrent', 2))
+            
+            workspace_path = None
+            try:
+                # Check if Docker is available
+                if not opencode_runner.is_docker_available():
+                    raise DockerUnavailableError("Docker is not available")
+                
+                # Create workspace and clone repos
+                job.progress = {"message": f"Cloning {len(repos)} repositories..."}
+                workspace_path = await workspace_manager.create_workspace(job_id, repos)
+                
+                # Check cancellation after clone
+                if await check_cancellation(job_id, job):
+                    await workspace_manager.cleanup_workspace(job_id)
+                    unregister_ticket_job(ticket_key)
+                    return
+                
+                # Build prompt
+                repo_names = workspace_manager.list_repos_in_workspace(job_id)
+                prompt = ticket_description_prompt(
+                    ticket_data={
+                        'key': ticket_key,
+                        'summary': summary,
+                        'description': description_raw,
+                        'parent_summary': parent_name
+                    },
+                    repos=repo_names,
+                    additional_context=additional_context
+                )
+                
+                # Execute OpenCode
+                job.progress = {"message": f"Running OpenCode analysis..."}
+                opencode_result = await opencode_runner.execute(
+                    job_id=job_id,
+                    workspace_path=workspace_path,
+                    prompt=prompt,
+                    job_type="ticket_description"
+                )
+                
+                # Extract result
+                generated_description = opencode_result.get('description', '')
+                impacted_files = opencode_result.get('impacted_files', [])
+                
+                # Build response
+                ticket_response = TicketResponse(
+                    ticket_key=ticket_key,
+                    summary=summary,
+                    assignee_name=assignee_name,
+                    parent_name=parent_name,
+                    generated_description=generated_description,
+                    success=True,
+                    error=None,
+                    skipped_reason=None,
+                    updated_in_jira=False,  # OpenCode doesn't update JIRA directly yet
+                    llm_provider="opencode",
+                    llm_model="opencode",
+                    system_prompt=None,
+                    user_prompt=prompt,
+                    additional_context=additional_context
+                )
+                
+                # Optionally update JIRA if requested
+                if update_jira and generated_description:
+                    try:
+                        jira_client.update_ticket_description(
+                            ticket_key=ticket_key,
+                            description=generated_description,
+                            dry_run=False
+                        )
+                        ticket_response.updated_in_jira = True
+                    except Exception as e:
+                        logger.warning(f"Failed to update JIRA for {ticket_key}: {e}")
+                
+                job.status = "completed"
+                job.completed_at = datetime.now()
+                # Store impacted_files in job results metadata
+                results_dict = ticket_response.dict()
+                results_dict['opencode_metadata'] = {
+                    'impacted_files': impacted_files,
+                    'components': opencode_result.get('components', []),
+                    'acceptance_criteria': opencode_result.get('acceptance_criteria', []),
+                    'confidence': opencode_result.get('confidence')
+                }
+                job.results = results_dict
+                job.additional_context = additional_context
+                job.progress = {"message": f"Completed with OpenCode: found {len(impacted_files)} impacted files"}
+                job.successful_tickets = 1
+                job.failed_tickets = 0
+                
+            except (OpenCodeError, DockerUnavailableError) as e:
+                logger.error(f"OpenCode error for job {job_id}: {e}")
+                job.status = "failed"
+                job.completed_at = datetime.now()
+                job.error = str(e)
+                job.progress = {"message": f"OpenCode failed: {str(e)}"}
+                job.failed_tickets = 1
+                # Create error response
+                ticket_response = TicketResponse(
+                    ticket_key=ticket_key,
+                    summary=summary,
+                    assignee_name=assignee_name,
+                    parent_name=parent_name,
+                    generated_description=None,
+                    success=False,
+                    error=str(e),
+                    skipped_reason=None,
+                    updated_in_jira=False,
+                    llm_provider="opencode",
+                    llm_model="opencode",
+                    system_prompt=None,
+                    user_prompt=None,
+                    additional_context=additional_context
+                )
+                
+            finally:
+                # Always cleanup workspace
+                if workspace_path:
+                    await workspace_manager.cleanup_workspace(job_id)
         
-        # Extract results
-        generated_description = None
-        system_prompt = None
-        user_prompt = None
-        if result.description:
-            generated_description = result.description.description
-            system_prompt = result.description.system_prompt
-            user_prompt = result.description.user_prompt
-        
-        ticket_response = TicketResponse(
-            ticket_key=ticket_key,
-            summary=summary,
-            assignee_name=assignee_name,
-            parent_name=parent_name,
-            generated_description=generated_description,
-            success=result.success,
-            error=result.error,
-            skipped_reason=result.skipped_reason,
-            updated_in_jira=update_jira and result.success,
-            llm_provider=result.llm_provider,
-            llm_model=result.llm_model,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            additional_context=additional_context
-        )
-        
-        job.status = "completed"
-        job.completed_at = datetime.now()
-        job.results = ticket_response.dict()
-        job.additional_context = additional_context  # Preserve for job status retrieval
-        job.progress = {"message": "Completed successfully" if result.success else f"Completed with error: {result.error}"}
-        job.successful_tickets = 1 if result.success else 0
-        job.failed_tickets = 0 if result.success else 1
+        else:
+            # Direct LLM path (original behavior)
+            result = generator.process_ticket(
+                ticket_key=ticket_key,
+                dry_run=not update_jira,
+                llm_model=llm_model,
+                llm_provider=llm_provider,
+                additional_context=additional_context
+            )
+            
+            # Extract results
+            generated_description = None
+            system_prompt = None
+            user_prompt = None
+            if result.description:
+                generated_description = result.description.description
+                system_prompt = result.description.system_prompt
+                user_prompt = result.description.user_prompt
+            
+            ticket_response = TicketResponse(
+                ticket_key=ticket_key,
+                summary=summary,
+                assignee_name=assignee_name,
+                parent_name=parent_name,
+                generated_description=generated_description,
+                success=result.success,
+                error=result.error,
+                skipped_reason=result.skipped_reason,
+                updated_in_jira=update_jira and result.success,
+                llm_provider=result.llm_provider,
+                llm_model=result.llm_model,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                additional_context=additional_context
+            )
+            
+            job.status = "completed"
+            job.completed_at = datetime.now()
+            job.results = ticket_response.dict()
+            job.additional_context = additional_context
+            job.progress = {"message": "Completed successfully" if result.success else f"Completed with error: {result.error}"}
+            job.successful_tickets = 1 if result.success else 0
+            job.failed_tickets = 0 if result.success else 1
         
         # Unregister ticket key when job completes
         unregister_ticket_job(ticket_key)
         
-        logger.info(f"Job {job_id} completed: ticket {ticket_key} processed")
+        logger.info(f"Job {job_id} completed: ticket {ticket_key} processed" + (" (with OpenCode)" if repos else ""))
         
         # Return results so ARQ stores them in Redis for persistence
         return ticket_response.dict()
@@ -423,19 +578,22 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
                                         dry_run: bool = True, split_oversized_tasks: bool = True,
                                         max_task_cycle_days: float = 3.0, llm_model: Optional[str] = None,
                                         llm_provider: Optional[str] = None, additional_context: Optional[str] = None,
-                                        generate_test_cases: bool = False):
+                                        generate_test_cases: bool = False,
+                                        repos: Optional[List[Dict[str, Any]]] = None):
     """ARQ worker function for generating tasks for stories
     
     Args:
         story_keys: List of story keys to generate tasks for
         epic_key: Optional parent epic key. If not provided, will be derived from story tickets.
+        repos: If provided, uses OpenCode for code-aware task generation instead of direct LLM.
     """
     _initialize_services_if_needed()
     generator = get_generator()
     config = get_config()
+    jira_client = get_jira_client()
     
     try:
-        job = _get_or_create_job(job_id, "task_generation", f"Generating tasks for {len(story_keys)} stories...")
+        job = _get_or_create_job(job_id, "task_generation", f"Generating tasks for {len(story_keys)} stories..." + (" (with OpenCode)" if repos else ""))
         # Track all story keys for this job
         job.ticket_key = epic_key  # May be None initially
         job.story_keys = story_keys.copy()
@@ -447,54 +605,211 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
                 unregister_ticket_job(story_key)
             return
         
-        if not generator.planning_service:
-            raise RuntimeError("Planning service not available - requires Confluence client configuration")
+        # Branch: OpenCode path (when repos provided) vs Direct LLM path
+        if repos:
+            # OpenCode path - no direct LLM call
+            job.progress = {"message": f"Setting up OpenCode workspace for task generation..."}
+            
+            from src.workspace_manager import WorkspaceManager
+            from src.opencode_runner import OpenCodeRunner, OpenCodeError, DockerUnavailableError
+            from src.prompts.opencode import task_breakdown_prompt
+            
+            opencode_config = config.get_opencode_config()
+            git_creds = config.get_git_credentials()
+            
+            workspace_manager = WorkspaceManager(
+                git_username=git_creds.get('username'),
+                git_password=git_creds.get('password'),
+                clone_timeout_seconds=opencode_config.get('clone_timeout_seconds', 300),
+                shallow_clone=opencode_config.get('shallow_clone', True)
+            )
+            
+            opencode_runner = OpenCodeRunner(
+                docker_image=opencode_config.get('docker_image'),
+                job_timeout_minutes=opencode_config.get('job_timeout_minutes', 20),
+                max_result_size_mb=opencode_config.get('max_result_size_mb', 10),
+                result_file=opencode_config.get('result_file', 'result.json'),
+                llm_config=config.get_llm_config() if hasattr(config, 'get_llm_config') else config._config.get('llm', {})
+            )
+            opencode_runner.set_concurrency_limit(opencode_config.get('max_concurrent', 2))
+            
+            workspace_path = None
+            try:
+                # Check if Docker is available
+                if not opencode_runner.is_docker_available():
+                    raise DockerUnavailableError("Docker is not available")
+                
+                # Create workspace and clone repos
+                job.progress = {"message": f"Cloning {len(repos)} repositories..."}
+                workspace_path = await workspace_manager.create_workspace(job_id, repos)
+                
+                # Check cancellation after clone
+                if await check_cancellation(job_id, job):
+                    await workspace_manager.cleanup_workspace(job_id)
+                    for story_key in story_keys:
+                        unregister_ticket_job(story_key)
+                    return
+                
+                # Gather story data for all stories first
+                all_tasks = []
+                all_warnings = []
+                repo_names = workspace_manager.list_repos_in_workspace(job_id)
+                
+                # Collect all story data
+                stories_data = []
+                for story_key in story_keys:
+                    story_data = jira_client.get_ticket(story_key)
+                    if not story_data:
+                        logger.warning(f"Story {story_key} not found, skipping")
+                        continue
+                    
+                    story_fields = story_data.get('fields', {})
+                    stories_data.append({
+                        'key': story_key,
+                        'summary': story_fields.get('summary', ''),
+                        'description': story_fields.get('description', ''),
+                        'acceptance_criteria': []
+                    })
+                
+                # Process stories serially to avoid container conflicts
+                for idx, story_info in enumerate(stories_data):
+                    story_key = story_info['key']
+                    
+                    # Check cancellation between stories
+                    if await check_cancellation(job_id, job):
+                        await workspace_manager.cleanup_workspace(job_id)
+                        for sk in story_keys:
+                            unregister_ticket_job(sk)
+                        return
+                    
+                    # Build prompt for this story
+                    prompt = task_breakdown_prompt(
+                        story_data=story_info,
+                        repos=repo_names,
+                        additional_context=additional_context,
+                        max_tasks=config.get_max_tasks_per_story()
+                    )
+                    
+                    # Execute OpenCode with unique execution ID (use index to avoid name conflicts)
+                    job.progress = {"message": f"Running OpenCode for story {story_key} ({idx + 1}/{len(stories_data)})..."}
+                    opencode_result = await opencode_runner.execute(
+                        job_id=f"{job_id}-s{idx}",  # Use simple index suffix
+                        workspace_path=workspace_path,
+                        prompt=prompt,
+                        job_type="task_breakdown"
+                    )
+                    
+                    # Extract tasks from result
+                    tasks = opencode_result.get('tasks', [])
+                    for task in tasks:
+                        task['story_key'] = story_key
+                    all_tasks.extend(tasks)
+                    all_warnings.extend(opencode_result.get('warnings', []))
+                
+                # Convert OpenCode results to TaskDetail format
+                from .models.planning import TaskDetail
+                
+                task_details = []
+                for task in all_tasks:
+                    task_details.append(TaskDetail(
+                        task_id=None,
+                        summary=task.get('summary', ''),
+                        description=task.get('description', ''),
+                        team=task.get('team', 'Backend'),
+                        depends_on_tasks=task.get('dependencies', []),
+                        estimated_days=None,
+                        test_cases=[],
+                        jira_key=None
+                    ))
+                
+                # Build response
+                job.status = "completed"
+                job.completed_at = datetime.now()
+                job.results = {
+                    "epic_key": epic_key,
+                    "operation_mode": "opencode",
+                    "success": True,
+                    "created_tickets": {"stories": [], "tasks": []},
+                    "story_details": [],
+                    "task_details": [t.dict() for t in task_details],
+                    "summary_stats": {
+                        "total_tasks": len(task_details),
+                        "stories_processed": len(stories_data),
+                        "files_identified": sum(len(t.get('files_to_modify', [])) for t in all_tasks)
+                    },
+                    "errors": [],
+                    "warnings": all_warnings,
+                    "execution_time_seconds": 0,
+                    "system_prompt": None,
+                    "user_prompt": None,  # Multiple prompts were used
+                    "additional_context": additional_context
+                }
+                job.additional_context = additional_context
+                job.progress = {"message": f"Generated {len(task_details)} tasks with OpenCode"}
+                job.successful_tickets = len(task_details)
+                
+            except (OpenCodeError, DockerUnavailableError) as e:
+                logger.error(f"OpenCode error for job {job_id}: {e}")
+                job.status = "failed"
+                job.completed_at = datetime.now()
+                job.error = str(e)
+                job.progress = {"message": f"OpenCode failed: {str(e)}"}
+                
+            finally:
+                # Always cleanup workspace
+                if workspace_path:
+                    await workspace_manager.cleanup_workspace(job_id)
         
-        custom_llm_client = None
-        if llm_provider or llm_model:
-            custom_llm_client = create_custom_llm_client(llm_provider, llm_model)
-        
-        planning_result = generator.generate_tasks_for_stories(
-            story_keys=story_keys,
-            epic_key=epic_key,
-            dry_run=dry_run,
-            split_oversized_tasks=split_oversized_tasks,
-            max_task_cycle_days=max_task_cycle_days,
-            max_tasks_per_story=config.get_max_tasks_per_story(),
-            custom_llm_client=custom_llm_client,
-            additional_context=additional_context,
-            generate_test_cases=generate_test_cases
-        )
-        
-        story_details = extract_story_details_with_tests(planning_result, generate_test_cases=generate_test_cases)
-        task_details = extract_task_details_with_tests(planning_result, generate_test_cases=generate_test_cases)
-        
-        job.status = "completed"
-        job.completed_at = datetime.now()
-        job.results = {
-            "epic_key": planning_result.epic_key,
-            "operation_mode": planning_result.mode.value,
-            "success": planning_result.success,
-            "created_tickets": planning_result.created_tickets,
-            "story_details": [s.dict() for s in story_details],
-            "task_details": [t.dict() for t in task_details],
-            "summary_stats": planning_result.summary_stats,
-            "errors": planning_result.errors,
-            "warnings": planning_result.warnings,
-            "execution_time_seconds": planning_result.execution_time_seconds,
-            "system_prompt": planning_result.system_prompt,
-            "user_prompt": planning_result.user_prompt,
-            "additional_context": additional_context
-        }
-        job.additional_context = additional_context  # Preserve for job status retrieval
-        job.progress = {"message": f"Generated {len(task_details)} tasks successfully"}
-        job.successful_tickets = len(planning_result.created_tickets)
+        else:
+            # Direct LLM path (original behavior)
+            if not generator.planning_service:
+                raise RuntimeError("Planning service not available - requires Confluence client configuration")
+            
+            custom_llm_client = None
+            if llm_provider or llm_model:
+                custom_llm_client = create_custom_llm_client(llm_provider, llm_model)
+            
+            planning_result = generator.generate_tasks_for_stories(
+                story_keys=story_keys,
+                epic_key=epic_key,
+                dry_run=dry_run,
+                split_oversized_tasks=split_oversized_tasks,
+                max_task_cycle_days=max_task_cycle_days,
+                max_tasks_per_story=config.get_max_tasks_per_story(),
+                custom_llm_client=custom_llm_client,
+                additional_context=additional_context,
+                generate_test_cases=generate_test_cases
+            )
+            
+            story_details = extract_story_details_with_tests(planning_result, generate_test_cases=generate_test_cases)
+            task_details = extract_task_details_with_tests(planning_result, generate_test_cases=generate_test_cases)
+            
+            job.status = "completed"
+            job.completed_at = datetime.now()
+            job.results = {
+                "epic_key": planning_result.epic_key,
+                "operation_mode": planning_result.mode.value,
+                "success": planning_result.success,
+                "created_tickets": planning_result.created_tickets,
+                "story_details": [s.dict() for s in story_details],
+                "task_details": [t.dict() for t in task_details],
+                "summary_stats": planning_result.summary_stats,
+                "errors": planning_result.errors,
+                "warnings": planning_result.warnings,
+                "execution_time_seconds": planning_result.execution_time_seconds,
+                "system_prompt": planning_result.system_prompt,
+                "user_prompt": planning_result.user_prompt,
+                "additional_context": additional_context
+            }
+            job.additional_context = additional_context
+            job.progress = {"message": f"Generated {len(task_details)} tasks successfully"}
+            job.successful_tickets = len(planning_result.created_tickets)
         
         # Unregister all story keys when job completes
         for story_key in story_keys:
             unregister_ticket_job(story_key)
         
-        logger.info(f"Job {job_id} completed: generated tasks for {len(story_keys)} stories")
+        logger.info(f"Job {job_id} completed: generated tasks for {len(story_keys)} stories" + (" (with OpenCode)" if repos else ""))
         
         # Return results so ARQ stores them in Redis for persistence
         return job.results
@@ -1135,8 +1450,13 @@ async def process_bulk_task_creation_worker(ctx, job_id: str, tasks_data: List[D
 
 async def process_story_coverage_worker(ctx, job_id: str, story_key: str, include_test_cases: bool = True,
                                        additional_context: Optional[str] = None,
-                                       llm_model: Optional[str] = None, llm_provider: Optional[str] = None):
-    """ARQ worker function for analyzing story coverage"""
+                                       llm_model: Optional[str] = None, llm_provider: Optional[str] = None,
+                                       repos: Optional[List[Dict[str, Any]]] = None):
+    """ARQ worker function for analyzing story coverage
+    
+    Args:
+        repos: If provided, uses OpenCode for code-aware coverage analysis instead of direct LLM.
+    """
     _initialize_services_if_needed()
     jira_client = get_jira_client()
     llm_client = get_llm_client()
@@ -1151,7 +1471,7 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
     story_key = normalized_story_key
     
     try:
-        job = _get_or_create_job(job_id, "story_coverage", f"Analyzing coverage for story {story_key}...")
+        job = _get_or_create_job(job_id, "story_coverage", f"Analyzing coverage for story {story_key}..." + (" (with OpenCode)" if repos else ""))
         job.story_key = story_key
         
         # Check if cancelled via Redis flag
@@ -1162,72 +1482,277 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
         if not jira_client:
             raise RuntimeError("JIRA client not initialized")
         
-        if not llm_client:
-            raise RuntimeError("LLM client not initialized")
+        # Branch: OpenCode path (when repos provided) vs Direct LLM path
+        if repos:
+            # OpenCode path - no direct LLM call
+            job.progress = {"message": f"Setting up OpenCode workspace for coverage analysis..."}
+            
+            from src.workspace_manager import WorkspaceManager
+            from src.opencode_runner import OpenCodeRunner, OpenCodeError, DockerUnavailableError
+            from src.prompts.opencode import coverage_check_prompt
+            
+            opencode_config = config.get_opencode_config()
+            git_creds = config.get_git_credentials()
+            
+            workspace_manager = WorkspaceManager(
+                git_username=git_creds.get('username'),
+                git_password=git_creds.get('password'),
+                clone_timeout_seconds=opencode_config.get('clone_timeout_seconds', 300),
+                shallow_clone=opencode_config.get('shallow_clone', True)
+            )
+            
+            opencode_runner = OpenCodeRunner(
+                docker_image=opencode_config.get('docker_image'),
+                job_timeout_minutes=opencode_config.get('job_timeout_minutes', 20),
+                max_result_size_mb=opencode_config.get('max_result_size_mb', 10),
+                result_file=opencode_config.get('result_file', 'result.json'),
+                llm_config=config.get_llm_config() if hasattr(config, 'get_llm_config') else config._config.get('llm', {})
+            )
+            opencode_runner.set_concurrency_limit(opencode_config.get('max_concurrent', 2))
+            
+            workspace_path = None
+            try:
+                # Check if Docker is available
+                if not opencode_runner.is_docker_available():
+                    raise DockerUnavailableError("Docker is not available")
+                
+                # Create workspace and clone repos
+                job.progress = {"message": f"Cloning {len(repos)} repositories..."}
+                workspace_path = await workspace_manager.create_workspace(job_id, repos)
+                
+                # Check cancellation after clone
+                if await check_cancellation(job_id, job):
+                    await workspace_manager.cleanup_workspace(job_id)
+                    unregister_ticket_job(story_key)
+                    return
+                
+                # Get story data
+                story_data = jira_client.get_ticket(story_key)
+                if not story_data:
+                    raise RuntimeError(f"Story {story_key} not found")
+                
+                story_fields = story_data.get('fields', {})
+                
+                # Get existing tasks from multiple sources
+                tasks = []
+                seen_task_keys = set()
+                
+                # 1. Get subtasks (if any)
+                if story_fields.get('subtasks'):
+                    for subtask in story_fields['subtasks']:
+                        task_key = subtask.get('key')
+                        if task_key and task_key not in seen_task_keys:
+                            task_data = jira_client.get_ticket(task_key)
+                            if task_data:
+                                task_fields = task_data.get('fields', {})
+                                tasks.append({
+                                    'key': task_key,
+                                    'summary': task_fields.get('summary', ''),
+                                    'description': task_fields.get('description', '')
+                                })
+                                seen_task_keys.add(task_key)
+                
+                # 2. Get linked issues (Work item split, Relates to, etc.)
+                if story_fields.get('issuelinks'):
+                    for link in story_fields['issuelinks']:
+                        # Check both inward and outward linked issues
+                        linked_issue = link.get('inwardIssue') or link.get('outwardIssue')
+                        if linked_issue:
+                            linked_key = linked_issue.get('key')
+                            linked_type = linked_issue.get('fields', {}).get('issuetype', {}).get('name', '')
+                            
+                            # Only include Task/Sub-task types
+                            if linked_key and linked_key not in seen_task_keys and linked_type in ['Task', 'Sub-task', 'Technical Task']:
+                                task_data = jira_client.get_ticket(linked_key)
+                                if task_data:
+                                    task_fields = task_data.get('fields', {})
+                                    tasks.append({
+                                        'key': linked_key,
+                                        'summary': task_fields.get('summary', ''),
+                                        'description': task_fields.get('description', '')
+                                    })
+                                    seen_task_keys.add(linked_key)
+                
+                logger.info(f"[COVERAGE] Found {len(tasks)} tasks for story {story_key}")
+                
+                # Build prompt
+                repo_names = workspace_manager.list_repos_in_workspace(job_id)
+                prompt = coverage_check_prompt(
+                    story_data={
+                        'key': story_key,
+                        'summary': story_fields.get('summary', ''),
+                        'description': story_fields.get('description', '')
+                    },
+                    tasks=tasks,
+                    repos=repo_names,
+                    additional_context=additional_context
+                )
+                
+                # Execute OpenCode
+                job.progress = {"message": f"Running OpenCode coverage analysis..."}
+                opencode_result = await opencode_runner.execute(
+                    job_id=job_id,
+                    workspace_path=workspace_path,
+                    prompt=prompt,
+                    job_type="coverage_check"
+                )
+                
+                # Build response with proper model conversion
+                from .models.story_analysis import (
+                    StoryCoverageResponse, TaskSummaryModel, CoverageGap,
+                    UpdateTaskSuggestion, NewTaskSuggestion
+                )
+                
+                # Convert tasks to TaskSummaryModel
+                task_models = [
+                    TaskSummaryModel(
+                        task_key=t['key'],
+                        summary=t['summary'],
+                        description=t['description'],
+                        test_cases=None
+                    ) for t in tasks
+                ]
+                
+                # Convert OpenCode gaps to CoverageGap models
+                gap_models = []
+                for gap in opencode_result.get('gaps', []):
+                    gap_models.append(CoverageGap(
+                        requirement=gap.get('requirement', ''),
+                        severity=gap.get('severity', 'minor'),
+                        suggestion=gap.get('missing_tasks', gap.get('suggestion', ''))
+                    ))
+                
+                # Convert OpenCode suggestions for updates
+                update_suggestions = []
+                for sugg in opencode_result.get('suggestions_for_updates', []):
+                    update_suggestions.append(UpdateTaskSuggestion(
+                        task_key=sugg.get('task_key', ''),
+                        current_description=sugg.get('current_description', ''),
+                        suggested_description=sugg.get('suggested_description', ''),
+                        suggested_test_cases=sugg.get('suggested_test_cases'),
+                        ready_to_submit=sugg.get('ready_to_submit', {})
+                    ))
+                
+                # Convert OpenCode suggestions for new tasks
+                new_task_suggestions = []
+                for sugg in opencode_result.get('suggestions_for_new_tasks', []):
+                    new_task_suggestions.append(NewTaskSuggestion(
+                        summary=sugg.get('summary', ''),
+                        description=sugg.get('description', ''),
+                        test_cases=sugg.get('test_cases'),
+                        gap_addressed=sugg.get('gap_addressed', ''),
+                        ready_to_submit=sugg.get('ready_to_submit', {})
+                    ))
+                
+                # Provide default for overall_assessment if missing
+                overall_assessment = opencode_result.get('overall_assessment')
+                if not overall_assessment:
+                    coverage_pct = opencode_result.get('coverage_percentage', 0)
+                    overall_assessment = f"OpenCode coverage analysis completed. Coverage: {coverage_pct}%"
+                
+                coverage_response = StoryCoverageResponse(
+                    success=True,
+                    story_key=story_key,
+                    story_description=story_fields.get('description', ''),
+                    tasks=task_models,
+                    coverage_percentage=opencode_result.get('coverage_percentage', 0),
+                    gaps=gap_models,
+                    overall_assessment=overall_assessment,
+                    suggestions_for_updates=update_suggestions,
+                    suggestions_for_new_tasks=new_task_suggestions,
+                    additional_context=additional_context
+                )
+                
+                job.status = "completed"
+                job.completed_at = datetime.now()
+                job.results = coverage_response.dict()
+                job.additional_context = additional_context
+                job.progress = {
+                    "message": f"OpenCode analysis completed: {opencode_result.get('coverage_percentage', 0)}% coverage",
+                    "coverage_percentage": opencode_result.get('coverage_percentage', 0)
+                }
+                job.successful_tickets = 1
+                
+            except (OpenCodeError, DockerUnavailableError) as e:
+                logger.error(f"OpenCode error for job {job_id}: {e}")
+                job.status = "failed"
+                job.completed_at = datetime.now()
+                job.error = str(e)
+                job.progress = {"message": f"OpenCode failed: {str(e)}"}
+                
+            finally:
+                # Always cleanup workspace
+                if workspace_path:
+                    await workspace_manager.cleanup_workspace(job_id)
         
-        # Create custom LLM client if specified
-        analysis_llm_client = llm_client
-        if llm_provider or llm_model:
-            analysis_llm_client = create_custom_llm_client(llm_provider, llm_model)
-        
-        job.progress = {"message": "Initializing analyzer..."}
-        
-        # Get confluence client and planning service for PRD/RFC fetching
-        from .dependencies import get_confluence_client, get_generator
-        confluence_client = get_confluence_client()
-        generator = get_generator()
-        planning_service = generator.planning_service if generator else None
-        
-        # Import and create the analyzer
-        from src.story_coverage_analyzer import StoryCoverageAnalyzer
-        
-        analyzer = StoryCoverageAnalyzer(
-            jira_client=jira_client,
-            llm_client=analysis_llm_client,
-            config=config.__dict__ if hasattr(config, '__dict__') else {},
-            confluence_client=confluence_client,
-            planning_service=planning_service
-        )
-        
-        job.progress = {"message": "Fetching story and tasks..."}
-        
-        # Perform analysis
-        result = analyzer.analyze_coverage(
-            story_key=story_key,
-            include_test_cases=include_test_cases,
-            additional_context=additional_context
-        )
-        
-        if not result.get('success', False):
-            job.status = "failed"
+        else:
+            # Direct LLM path (original behavior)
+            if not llm_client:
+                raise RuntimeError("LLM client not initialized")
+            
+            # Create custom LLM client if specified
+            analysis_llm_client = llm_client
+            if llm_provider or llm_model:
+                analysis_llm_client = create_custom_llm_client(llm_provider, llm_model)
+            
+            job.progress = {"message": "Initializing analyzer..."}
+            
+            # Get confluence client and planning service for PRD/RFC fetching
+            from .dependencies import get_confluence_client, get_generator
+            confluence_client = get_confluence_client()
+            generator = get_generator()
+            planning_service = generator.planning_service if generator else None
+            
+            # Import and create the analyzer
+            from src.story_coverage_analyzer import StoryCoverageAnalyzer
+            
+            analyzer = StoryCoverageAnalyzer(
+                jira_client=jira_client,
+                llm_client=analysis_llm_client,
+                config=config.__dict__ if hasattr(config, '__dict__') else {},
+                confluence_client=confluence_client,
+                planning_service=planning_service
+            )
+            
+            job.progress = {"message": "Fetching story and tasks..."}
+            
+            # Perform analysis
+            result = analyzer.analyze_coverage(
+                story_key=story_key,
+                include_test_cases=include_test_cases,
+                additional_context=additional_context
+            )
+            
+            if not result.get('success', False):
+                job.status = "failed"
+                job.completed_at = datetime.now()
+                job.error = result.get('error', 'Analysis failed')
+                job.progress = {"message": f"Analysis failed: {result.get('error', 'Unknown error')}"}
+                unregister_ticket_job(story_key)
+                return
+            
+            # Convert result to response format
+            from .models.story_analysis import StoryCoverageResponse
+            
+            # Ensure additional_context is included in result
+            result_with_context = result.copy()
+            result_with_context['additional_context'] = additional_context
+            coverage_response = StoryCoverageResponse(**result_with_context)
+            
+            job.status = "completed"
             job.completed_at = datetime.now()
-            job.error = result.get('error', 'Analysis failed')
-            job.progress = {"message": f"Analysis failed: {result.get('error', 'Unknown error')}"}
-            unregister_ticket_job(story_key)
-            return
-        
-        # Convert result to response format
-        from .models.story_analysis import StoryCoverageResponse
-        
-        # Ensure additional_context is included in result
-        result_with_context = result.copy()
-        result_with_context['additional_context'] = additional_context
-        coverage_response = StoryCoverageResponse(**result_with_context)
-        
-        job.status = "completed"
-        job.completed_at = datetime.now()
-        job.results = coverage_response.dict()
-        job.additional_context = additional_context  # Preserve for job status retrieval
-        job.progress = {
-            "message": f"Analysis completed: {result.get('coverage_percentage', 0)}% coverage",
-            "coverage_percentage": result.get('coverage_percentage', 0)
-        }
-        job.successful_tickets = 1
+            job.results = coverage_response.dict()
+            job.additional_context = additional_context
+            job.progress = {
+                "message": f"Analysis completed: {result.get('coverage_percentage', 0)}% coverage",
+                "coverage_percentage": result.get('coverage_percentage', 0)
+            }
+            job.successful_tickets = 1
         
         # Unregister story key when job completes
         unregister_ticket_job(story_key)
         
-        logger.info(f"Job {job_id} completed: analyzed coverage for story {story_key} - {result.get('coverage_percentage', 0)}% coverage")
+        logger.info(f"Job {job_id} completed: analyzed coverage for story {story_key}" + (" (with OpenCode)" if repos else ""))
         
         # Return results so ARQ stores them in Redis for persistence
         return coverage_response.dict()
