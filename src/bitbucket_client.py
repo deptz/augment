@@ -675,3 +675,158 @@ class BitbucketClient:
         except Exception as e:
             logger.error(f"Bitbucket connection test failed: {e}")
             return False
+    
+    def create_branch(
+        self,
+        workspace: str,
+        repo_slug: str,
+        branch_name: str,
+        source_branch: str = "main"
+    ) -> Dict[str, Any]:
+        """
+        Create a new branch in a repository.
+        
+        Args:
+            workspace: Workspace name
+            repo_slug: Repository slug
+            branch_name: Name of new branch
+            source_branch: Source branch to branch from (default: main)
+            
+        Returns:
+            Branch information dict
+            
+        Raises:
+            requests.RequestException: If API call fails
+        """
+        url = f"{self.base_url}/repositories/{workspace}/{repo_slug}/refs/branches"
+        
+        # Get source branch commit
+        source_url = f"{self.base_url}/repositories/{workspace}/{repo_slug}/refs/branches/{source_branch}"
+        source_response = self.session.get(source_url, timeout=30)
+        source_response.raise_for_status()
+        source_data = source_response.json()
+        target_commit = source_data.get('target', {}).get('hash')
+        
+        if not target_commit:
+            raise ValueError(f"Could not get commit hash for source branch {source_branch}")
+        
+        # Create new branch
+        payload = {
+            "name": branch_name,
+            "target": {
+                "hash": target_commit
+            }
+        }
+        
+        response = self.session.post(url, json=payload, timeout=30)
+        response.raise_for_status()
+        
+        branch_data = response.json()
+        logger.info(f"Created branch {branch_name} in {workspace}/{repo_slug}")
+        return branch_data
+    
+    def push_branch(
+        self,
+        workspace: str,
+        repo_slug: str,
+        branch_name: str,
+        commits: List[Dict[str, Any]]
+    ) -> bool:
+        """
+        Push commits to a branch.
+        
+        Note: This is a placeholder. Actual push should be done via git commands
+        in the workspace, not via Bitbucket API. This method exists for API completeness.
+        
+        Args:
+            workspace: Workspace name
+            repo_slug: Repository slug
+            branch_name: Branch name
+            commits: List of commit information (not used, for reference only)
+            
+        Returns:
+            True if successful
+            
+        Note:
+            Actual pushing should be done using git commands in the workspace directory.
+            This method is kept for API consistency but doesn't perform the actual push.
+        """
+        logger.info(f"Push to {workspace}/{repo_slug}/{branch_name} should be done via git commands")
+        return True
+    
+    def create_draft_pull_request(
+        self,
+        workspace: str,
+        repo_slug: str,
+        title: str,
+        description: str,
+        source_branch: str,
+        destination_branch: str = "main",
+        ticket_key: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Create a draft pull request.
+        
+        Args:
+            workspace: Workspace name
+            repo_slug: Repository slug
+            title: PR title
+            description: PR description
+            source_branch: Source branch
+            destination_branch: Destination branch (default: main)
+            ticket_key: Optional JIRA ticket key to link
+            
+        Returns:
+            PR information dict
+            
+        Raises:
+            requests.RequestException: If API call fails
+        """
+        url = f"{self.base_url}/repositories/{workspace}/{repo_slug}/pullrequests"
+        
+        # Build description with ticket link if provided
+        final_description = description
+        if ticket_key:
+            final_description += f"\n\nRelated JIRA ticket: {ticket_key}"
+        
+        payload = {
+            "title": title,
+            "description": final_description,
+            "source": {
+                "branch": {
+                    "name": source_branch
+                },
+                "repository": {
+                    "full_name": f"{workspace}/{repo_slug}"
+                }
+            },
+            "destination": {
+                "branch": {
+                    "name": destination_branch
+                }
+            },
+            "close_source_branch": False
+        }
+        
+        response = self.session.post(url, json=payload, timeout=30)
+        response.raise_for_status()
+        
+        pr_data = response.json()
+        
+        # Mark as draft (Bitbucket Cloud uses a different field)
+        # Note: Bitbucket Cloud doesn't have a "draft" state like GitHub,
+        # but we can add a label or use the title/description to indicate it's a draft
+        pr_id = pr_data.get('id')
+        if pr_id:
+            # Add draft label if possible
+            try:
+                labels_url = f"{self.base_url}/repositories/{workspace}/{repo_slug}/pullrequests/{pr_id}"
+                update_payload = {
+                    "title": f"[DRAFT] {title}"  # Prefix title to indicate draft
+                }
+                self.session.put(labels_url, json=update_payload, timeout=30)
+            except Exception as e:
+                logger.warning(f"Could not mark PR as draft: {e}")
+        
+        logger.info(f"Created draft PR #{pr_id} in {workspace}/{repo_slug}")
+        return pr_data

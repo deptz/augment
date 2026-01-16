@@ -11,11 +11,16 @@ Complete API reference and guides:
 ### [Features](features/)
 Documentation for specific features:
 - [Features Documentation](features/FEATURES.md) - Comprehensive feature documentation including test generation, team-based task generation, dependencies, background job processing, sprint planning, PRD story sync, and integrations
+- [Draft PR Orchestrator](features/DRAFT_PR_ORCHESTRATOR.md) - Complete guide to the Draft PR Orchestrator pipeline with plan iteration, approval workflows, and safety mechanisms
 
 ### [Templates](templates/)
 Document templates for PRDs and RFCs:
 - [PRD Template](templates/sample-prd-template.md) - Product Requirements Document template
 - [RFC Template](templates/sample-rfc-template.md) - Request for Comments template
+
+### [Frontend](frontend/)
+Frontend implementation guides:
+- [Draft PR Orchestrator Frontend Implementation](frontend/DRAFT_PR_FRONTEND_IMPLEMENTATION.md) - Complete guide for implementing Draft PR Orchestrator UI
 
 ### [Technical Documentation](technical/)
 Technical deep-dives and implementation details:

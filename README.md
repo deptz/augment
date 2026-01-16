@@ -4,6 +4,7 @@
 
 1. **AI-Powered Documentation Generation**: Automatically enrich JIRA tickets with comprehensive, context-aware descriptions by analyzing Product Requirements Documents (PRDs), Pull Requests, and code changes
 2. **Intelligent Task Orchestration**: Break down epics into well-structured, team-aligned tasks with automatic dependency detection and sprint-ready planning capabilities
+3. **Draft PR Orchestrator**: Convert ambiguous stories into safe, code-scoped, reality-verified Draft PRs with a complete PLAN → APPROVAL → APPLY → VERIFY → PACKAGE → DRAFT_PR pipeline
 
 Whether you're backfilling documentation for existing tickets or planning new features, Augment helps teams maintain high-quality project documentation and efficient task management with minimal manual effort.
 
@@ -37,6 +38,7 @@ Whether you're backfilling documentation for existing tickets or planning new fe
 - **Ticket-Based Job Tracking**: Query job status by ticket key for easy integration with status pages and monitoring dashboards
 - **Sprint Planning & Timeline Management**: Capacity-based sprint planning with automatic task assignment and timeline visualization
 - **Team Member Management**: Built-in SQLite database for managing team members, teams, and boards with flexible many-to-many relationships
+- **Draft PR Orchestrator**: Complete pipeline for generating, reviewing, and creating Draft PRs with plan versioning, approval workflows, and safety guards
 
 ### JIRA Integration
 - **Native JIRA Integration**: Creates real JIRA tickets with proper keys, hierarchies, and relationships
@@ -804,6 +806,17 @@ A 1-2 sentence summary of why this task was necessary, based on PRD/RFC goals.
 - `GET /team-members/levels` - Get list of all career levels
 - `GET /team-members/role/{role_id}/capacity` - Get role capacity
 
+**Draft PR Orchestrator:**
+- `POST /draft-pr/create` - Create a new draft PR job (PLAN stage)
+- `GET /draft-pr/jobs/{job_id}` - Get job status and current stage
+- `GET /draft-pr/jobs/{job_id}/plan` - Get latest plan version
+- `GET /draft-pr/jobs/{job_id}/plans/{version}` - Get specific plan version
+- `POST /draft-pr/jobs/{job_id}/revise-plan` - Submit feedback and generate revised plan
+- `GET /draft-pr/jobs/{job_id}/plans/compare` - Compare two plan versions
+- `POST /draft-pr/jobs/{job_id}/approve` - Approve plan to proceed to APPLY stage
+- `GET /draft-pr/jobs/{job_id}/artifacts` - List all artifacts (plans, diffs, logs, PR metadata)
+- `GET /draft-pr/jobs/{job_id}/artifacts/{artifact_type}` - Get specific artifact
+
 **Utility & Configuration:**
 - `GET /health` - Service health check
 - `GET /models` - Available LLM providers and models
@@ -848,6 +861,7 @@ Comprehensive documentation is available in the [`docs/`](docs/) directory:
 ### Documentation Categories
 - **[API Documentation](docs/api/)** - API setup, authentication, and reference
 - **[Features](docs/features/)** - Feature documentation and enhancements
+  - [Draft PR Orchestrator](docs/features/DRAFT_PR_ORCHESTRATOR.md) - Complete guide to Draft PR pipeline
 - **[Guides](docs/guides/)** - Step-by-step guides and how-tos
 - **[Templates](docs/templates/)** - PRD and RFC templates
 - **[Technical](docs/technical/)** - Technical deep-dives and implementation details

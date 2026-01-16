@@ -25,7 +25,8 @@ from api.workers import (
     process_story_creation_worker,
     process_task_creation_worker,
     process_sprint_planning_worker,
-    process_timeline_planning_worker
+    process_timeline_planning_worker,
+    process_draft_pr_worker
 )
 from src.config import Config
 import logging
@@ -134,7 +135,8 @@ async def main():
                 process_story_creation_worker,
                 process_task_creation_worker,
                 process_sprint_planning_worker,
-                process_timeline_planning_worker
+                process_timeline_planning_worker,
+                process_draft_pr_worker
             ],
             redis_settings=WorkerSettings.redis_settings,
             max_jobs=WorkerSettings.max_jobs,

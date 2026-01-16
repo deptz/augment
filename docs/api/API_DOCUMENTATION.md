@@ -25,6 +25,7 @@ This REST API provides programmatic access to Augment, allowing you to:
 - Generate team-based tasks (Backend/Frontend/QA) for stories
 - Generate contextual tasks using epic information
 - Generate comprehensive test cases for stories, tasks, and entire epics
+- **Create Draft PRs from stories** with complete PLAN → APPROVAL → APPLY → VERIFY → PACKAGE → DRAFT_PR pipeline
 - Choose custom LLM providers and models (OpenAI, Anthropic, Google Gemini, Moonshot AI)
 - Extract context from both PRD (Product Requirements Documents) and RFC (Request for Comments) documents
 - Choose between read-only mode (preview) or update mode (write to JIRA)
@@ -771,6 +772,7 @@ In batch processing, if some tickets are already being processed:
 - `test_generation`: Test case generation
 - `sprint_planning`: Sprint planning for epic tasks
 - `timeline_planning`: Timeline schedule creation
+- `draft_pr`: Draft PR orchestrator jobs
 
 ### Job Results Format
 
@@ -1031,6 +1033,480 @@ When OpenCode is used, responses include additional metadata:
 | "Clone timeout" | Increase `OPENCODE_CLONE_TIMEOUT`; check repository access |
 | "Job timeout" | Increase `OPENCODE_TIMEOUT`; reduce repository count |
 | "OpenCode is not enabled" | Set `OPENCODE_ENABLED=true` in config |
+
+---
+
+## Draft PR Orchestrator
+
+The Draft PR Orchestrator converts ambiguous stories into safe, code-scoped, reality-verified Draft PRs through a complete pipeline: **PLAN → APPROVAL → APPLY → VERIFY → PACKAGE → DRAFT_PR**.
+
+### Overview
+
+The Draft PR Orchestrator provides:
+
+- **Structured Planning**: AI-generated plans with scope, tests, failure modes, and rollback procedures
+- **Human-in-the-Loop**: Approval workflow ensures no code changes without human consent
+- **Safety Guards**: Plan-apply guards verify changes match approved plans
+- **Verification**: Automatic test, lint, and build execution before PR creation
+- **Artifact Persistence**: All plans, diffs, logs, and PR metadata are stored for auditability
+- **Plan Iteration**: Revise plans based on feedback with version comparison
+
+### Execution Pipeline
+
+All Draft PR jobs follow this invariant pipeline:
+
+```
+Story + Scope
+   ↓
+PLAN        → plan_vN (read-only, immutable)
+   ↓
+APPROVAL    → binds (job_id, plan_hash)
+   ↓
+APPLY       → mutate workspace (git transaction)
+   ↓
+VERIFY      → tests / lint / build
+   ↓
+PACKAGE     → diff + PR metadata
+   ↓
+DRAFT_PR    → push branch + create Draft PR
+```
+
+### Modes
+
+**Normal Mode (Default)**
+- Requires human approval before APPLY stage
+- Approval is bound to specific plan hash
+- If plan changes, approval is invalidated
+- Use for production changes, shared systems, risky domains
+
+**YOLO Mode**
+- Auto-approval based on policy compliance
+- Policy checks: file count, LOC delta, path restrictions, protected paths
+- Falls back to normal mode if policy not compliant
+- Use for low-risk changes (docs, scripts, tools)
+
+### Prerequisites
+
+1. **OpenCode Enabled**: Required for APPLY stage (code changes)
+2. **Bitbucket Access**: Required for DRAFT_PR stage (PR creation)
+3. **Git Credentials**: Required for repository cloning
+4. **Redis**: Required for background job processing
+
+### Configuration
+
+Add to `config.yaml`:
+
+```yaml
+draft_pr:
+  # YOLO Mode Policy
+  yolo_policy:
+    max_files: 5
+    max_loc_delta: 200
+    allow_paths: ["docs/**", "scripts/**", "tools/**"]
+    deny_paths: ["auth/**", "billing/**", "migrations/**"]
+    require_tests: false
+  
+  # Verification Commands
+  verification:
+    test_command: "pytest"
+    lint_command: "ruff check"
+    build_command: ""  # Optional
+  
+  # Protected Paths (require team approval)
+  protected_paths:
+    billing/**:
+      require: finance_team
+    auth/**:
+      require: security_team
+  
+  # Concurrency Limits
+  concurrency:
+    plan: 5
+    apply: 2
+    verify: 3
+    package: 3
+    draft_pr: 3
+```
+
+### API Endpoints
+
+#### `POST /draft-pr/create`
+
+Create a new Draft PR job. Starts the PLAN stage.
+
+**Request Body:**
+```json
+{
+  "story_key": "STORY-123",
+  "repos": [
+    {
+      "url": "https://bitbucket.org/workspace/repo.git",
+      "branch": "develop"
+    }
+  ],
+  "scope": {
+    "files": ["src/api/", "tests/"]
+  },
+  "additional_context": "Focus on API endpoints only",
+  "mode": "normal"
+}
+```
+
+**Response:**
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "processing",
+  "stage": "PLANNING",
+  "status_url": "/jobs/550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+**Parameters:**
+- `story_key` (required): JIRA story key
+- `repos` (required): List of repositories (max 5)
+- `scope` (optional): File path constraints
+- `additional_context` (optional): Additional context for planning
+- `mode` (optional): `"normal"` or `"yolo"` (default: `"normal"`)
+
+#### `GET /draft-pr/jobs/{job_id}`
+
+Get job status and current pipeline stage.
+
+**Response:**
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "job_type": "draft_pr",
+  "status": "processing",
+  "stage": "WAITING_FOR_APPROVAL",
+  "progress": {
+    "message": "Plan v1 generated. Waiting for approval."
+  },
+  "plan_versions": [
+    {
+      "version": 1,
+      "plan_hash": "abc123...",
+      "plan_spec": {
+        "summary": "Add user authentication endpoint",
+        "scope": {
+          "files": [
+            {"path": "src/api/auth.py", "change": "added"},
+            {"path": "tests/test_auth.py", "change": "added"}
+          ]
+        },
+        "happy_paths": ["User can login with valid credentials"],
+        "edge_cases": ["Invalid credentials", "Expired tokens"],
+        "failure_modes": [
+          {
+            "trigger": "Database connection failure",
+            "impact": "Login fails",
+            "mitigation": "Retry with exponential backoff"
+          }
+        ],
+        "tests": [
+          {"type": "unit", "target": "auth service"},
+          {"type": "integration", "target": "auth API"}
+        ],
+        "rollback": ["Revert commit", "Remove database migrations"]
+      }
+    }
+  ],
+  "approved_plan_hash": null,
+  "workspace_fingerprint": {
+    "repos": [...],
+    "fingerprint_hash": "def456..."
+  }
+}
+```
+
+**Pipeline Stages:**
+- `CREATED`: Job created
+- `PLANNING`: Generating plan
+- `WAITING_FOR_APPROVAL`: Waiting for human approval
+- `REVISING`: Generating revised plan
+- `APPLYING`: Applying code changes
+- `VERIFYING`: Running tests/lint/build
+- `PACKAGING`: Generating PR diff and metadata
+- `DRAFTING`: Creating Draft PR
+- `COMPLETED`: Pipeline completed
+- `FAILED`: Pipeline failed
+
+#### `GET /draft-pr/jobs/{job_id}/plan`
+
+Get the latest plan version.
+
+**Response:**
+```json
+{
+  "version": 1,
+  "plan_hash": "abc123...",
+  "plan_spec": {...},
+  "created_at": "2025-01-15T10:00:00Z"
+}
+```
+
+#### `GET /draft-pr/jobs/{job_id}/plans/{version}`
+
+Get a specific plan version by version number.
+
+#### `POST /draft-pr/jobs/{job_id}/revise-plan`
+
+Submit feedback to generate a revised plan version.
+
+**Request Body:**
+```json
+{
+  "feedback": "The plan should also include rate limiting",
+  "specific_concerns": [
+    "Missing rate limiting",
+    "No mention of error handling for invalid tokens"
+  ],
+  "requested_changes": "Add rate limiting middleware and error handling",
+  "feedback_type": "addition"
+}
+```
+
+**Response:**
+```json
+{
+  "plan_version": 2,
+  "plan_hash": "xyz789...",
+  "changes_summary": "Added rate limiting and error handling sections"
+}
+```
+
+**Note:** Cannot revise if plan is already approved.
+
+#### `GET /draft-pr/jobs/{job_id}/plans/compare`
+
+Compare two plan versions.
+
+**Query Parameters:**
+- `from_version`: Source version number
+- `to_version`: Target version number
+
+**Response:**
+```json
+{
+  "from_version": 1,
+  "to_version": 2,
+  "changes": {
+    "added": ["rate_limiting", "error_handling"],
+    "modified": ["scope.files"],
+    "removed": []
+  },
+  "summary": "Plan v2 adds rate limiting and error handling",
+  "changed_sections": ["scope", "tests", "failure_modes"]
+}
+```
+
+#### `POST /draft-pr/jobs/{job_id}/approve`
+
+Approve a plan to proceed to APPLY stage.
+
+**Request Body:**
+```json
+{
+  "plan_hash": "abc123..."
+}
+```
+
+**Response:**
+```json
+{
+  "approved": true,
+  "plan_hash": "abc123...",
+  "stage": "APPLYING",
+  "results": {
+    "stage": "COMPLETED",
+    "pr_results": {
+      "pr_id": 12345,
+      "pr_url": "https://bitbucket.org/workspace/repo/pull-requests/12345"
+    }
+  }
+}
+```
+
+**Safety Checks:**
+- Plan hash must match latest plan version
+- Job must be in `WAITING_FOR_APPROVAL` stage
+- Prevents duplicate approvals
+- Re-verifies plan before approval (TOCTOU protection)
+
+#### `GET /draft-pr/jobs/{job_id}/artifacts`
+
+List all artifacts for a job.
+
+**Response:**
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "artifacts": [
+    "input_spec",
+    "workspace_fingerprint",
+    "plan_v1",
+    "plan_v2",
+    "approval",
+    "git_diff",
+    "validation_logs",
+    "pr_metadata"
+  ]
+}
+```
+
+#### `GET /draft-pr/jobs/{job_id}/artifacts/{artifact_type}`
+
+Get a specific artifact.
+
+**Example:**
+```bash
+GET /draft-pr/jobs/{job_id}/artifacts/git_diff
+GET /draft-pr/jobs/{job_id}/artifacts/plan_v1
+GET /draft-pr/jobs/{job_id}/artifacts/validation_logs
+```
+
+### Usage Examples
+
+#### Example 1: Create Draft PR (Normal Mode)
+
+```bash
+curl -X POST "http://localhost:8000/draft-pr/create" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "story_key": "STORY-123",
+    "repos": [
+      {
+        "url": "https://bitbucket.org/workspace/api-repo.git",
+        "branch": "develop"
+      }
+    ],
+    "mode": "normal"
+  }'
+```
+
+#### Example 2: Review and Approve Plan
+
+```bash
+# 1. Get job status
+curl "http://localhost:8000/draft-pr/jobs/{job_id}"
+
+# 2. Review latest plan
+curl "http://localhost:8000/draft-pr/jobs/{job_id}/plan"
+
+# 3. Approve plan
+curl -X POST "http://localhost:8000/draft-pr/jobs/{job_id}/approve" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "plan_hash": "abc123..."
+  }'
+```
+
+#### Example 3: Revise Plan Based on Feedback
+
+```bash
+# 1. Submit feedback
+curl -X POST "http://localhost:8000/draft-pr/jobs/{job_id}/revise-plan" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "feedback": "Add rate limiting to the plan",
+    "specific_concerns": ["Missing rate limiting"],
+    "feedback_type": "addition"
+  }'
+
+# 2. Compare versions
+curl "http://localhost:8000/draft-pr/jobs/{job_id}/plans/compare?from_version=1&to_version=2"
+
+# 3. Approve revised plan
+curl -X POST "http://localhost:8000/draft-pr/jobs/{job_id}/approve" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "plan_hash": "xyz789..."
+  }'
+```
+
+#### Example 4: YOLO Mode (Auto-Approval)
+
+```bash
+curl -X POST "http://localhost:8000/draft-pr/create" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "story_key": "STORY-123",
+    "repos": [
+      {
+        "url": "https://bitbucket.org/workspace/docs-repo.git",
+        "branch": "main"
+      }
+    ],
+    "mode": "yolo"
+  }'
+```
+
+YOLO mode will auto-approve if the plan complies with policy (e.g., < 5 files, < 200 LOC, only docs/scripts paths).
+
+### Plan Specification
+
+Plans follow a structured format:
+
+```json
+{
+  "summary": "High-level summary",
+  "scope": {
+    "files": [
+      {"path": "src/api/auth.py", "change": "added"},
+      {"path": "src/api/auth.py", "change": "modified"},
+      {"path": "old_file.py", "change": "deleted"}
+    ]
+  },
+  "happy_paths": ["User can login with valid credentials"],
+  "edge_cases": ["Invalid credentials", "Expired tokens"],
+  "failure_modes": [
+    {
+      "trigger": "Database connection failure",
+      "impact": "Login fails",
+      "mitigation": "Retry with exponential backoff"
+    }
+  ],
+  "assumptions": ["Database is available", "JWT secret is configured"],
+  "unknowns": ["Exact error response format"],
+  "tests": [
+    {"type": "unit", "target": "auth service"},
+    {"type": "integration", "target": "auth API"}
+  ],
+  "rollback": ["Revert commit", "Remove database migrations"],
+  "cross_repo_impacts": [
+    {"repo": "frontend-repo", "reason": "API contract changes"}
+  ]
+}
+```
+
+### Safety Mechanisms
+
+1. **Plan Hash Binding**: Approval is bound to specific plan hash
+2. **Plan-Apply Guards**: Verifies changes match approved plan
+3. **Git Transactions**: Atomic changes with rollback on failure
+4. **Verification Gates**: PR only created if tests/lint/build pass
+5. **Artifact Persistence**: All evidence stored for auditability
+6. **Workspace Fingerprinting**: Reproducible workspace state
+
+### Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| "OpenCode is not enabled" | Set `OPENCODE_ENABLED=true` in config |
+| "Bitbucket client required" | Configure Bitbucket credentials in config |
+| "Plan hash mismatch" | Plan was revised; approve latest version |
+| "Verification failed" | Check validation logs artifact for details |
+| "Branch already exists" | Use different job_id or ticket_key |
+| "Workspace not found" | Workspace may have been cleaned up; restart job |
+
+### Best Practices
+
+1. **Review Plans Thoroughly**: Check scope, tests, and failure modes before approval
+2. **Use Normal Mode for Production**: YOLO mode only for low-risk changes
+3. **Iterate on Plans**: Use revise-plan to refine before approval
+4. **Monitor Verification**: Check validation logs if verification fails
+5. **Review Artifacts**: All artifacts are preserved for debugging
 
 ---
 

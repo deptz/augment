@@ -7,6 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Augment is an AI-powered JIRA automation platform that:
 1. **Documentation Generation**: Enriches JIRA tickets with AI-generated descriptions using PRD/RFC documents, PRs, and code changes
 2. **Task Orchestration**: Breaks down epics into team-aligned tasks (Backend/Frontend/QA) with dependency detection
+3. **Draft PR Orchestrator**: Converts stories into safe, code-scoped Draft PRs with PLAN → APPROVAL → APPLY → VERIFY → PACKAGE → DRAFT_PR pipeline
 
 ## Development Commands
 
@@ -60,13 +61,26 @@ pytest --cov=src --cov=api          # With coverage
 - `enhanced_test_generator.py` - Comprehensive test case generation
 - `story_coverage_analyzer.py` - Analyzes task coverage for stories
 
+### Draft PR Orchestrator (`src/`)
+- `draft_pr_pipeline.py` - Main orchestrator for PLAN → APPROVAL → APPLY → VERIFY → PACKAGE → DRAFT_PR workflow
+- `plan_generator.py` - Generates and revises structured plans using LLM/OpenCode
+- `plan_comparator.py` - Compares plan versions and highlights differences
+- `yolo_policy.py` - YOLO mode auto-approval policy evaluator
+- `code_applier.py` - Applies code changes with git transaction safety and plan-apply guards
+- `verifier.py` - Runs tests, lint, and build commands for verification
+- `package_service.py` - Generates git diff and PR metadata
+- `draft_pr_creator.py` - Creates branches and draft PRs in Bitbucket
+- `draft_pr_models.py` - Pydantic models for plans, approvals, feedback, fingerprints
+- `draft_pr_schemas.py` - JSON schemas for plan validation
+- `artifact_store.py` - Persists all artifacts (plans, diffs, logs, PR metadata)
+
 ### API Layer (`api/`)
 - `main.py` - FastAPI app with CORS, auth, startup/shutdown events
 - `dependencies.py` - Service initialization and dependency injection
 - `job_queue.py` - Redis/ARQ integration for async processing
 - `workers.py` - Background job handlers (large file: ~25k tokens)
-- `routes/` - Endpoint modules: generation, planning, jobs, sprint_planning, team_members, etc.
-- `models/` - Pydantic request/response models
+- `routes/` - Endpoint modules: generation, planning, jobs, sprint_planning, team_members, draft_pr, etc.
+- `models/` - Pydantic request/response models (including `draft_pr.py` for Draft PR endpoints)
 
 ### Background Job System
 Uses ARQ (async Redis queue). All generation endpoints support `async_mode=true`:
@@ -98,7 +112,7 @@ Uses UUID-based `task_id` for stable dependency resolution. Dependencies referen
 - Story-Task relationships via "Work item split" links
 
 ### Prompts
-Centralized in `src/prompts/` with modular templates (generation.py, planning.py, system.py, test_generation.py).
+Centralized in `src/prompts/` with modular templates (generation.py, planning.py, system.py, test_generation.py, draft_pr_planning.py).
 
 ## Configuration
 

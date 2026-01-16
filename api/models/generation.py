@@ -3,10 +3,25 @@ Generation Models
 Request and response models for ticket generation endpoints
 """
 from pydantic import BaseModel, Field, validator
-from typing import Optional, List, Union
+from typing import Optional, List, Union, Dict, Any
 from datetime import datetime
+from enum import Enum
 
 from .opencode import RepoSpec, RepoInput
+
+
+class PipelineStage(str, Enum):
+    """Pipeline stages for draft PR orchestrator"""
+    CREATED = "CREATED"
+    PLANNING = "PLANNING"
+    WAITING_FOR_APPROVAL = "WAITING_FOR_APPROVAL"
+    REVISING = "REVISING"
+    APPLYING = "APPLYING"
+    VERIFYING = "VERIFYING"
+    PACKAGING = "PACKAGING"
+    DRAFTING = "DRAFTING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
 
 
 class JQLRequest(BaseModel):
@@ -181,4 +196,11 @@ class JobStatus(BaseModel):
     prd_url: Optional[str] = Field(None, description="PRD document URL (for prd_story_sync jobs)")
     additional_context: Optional[str] = Field(None, description="Additional context used for processing (preserved for reuse in subsequent operations)")
     repos: Optional[List[str]] = Field(None, description="Repository URLs used for OpenCode processing")
+    
+    # Draft PR Orchestrator fields
+    stage: Optional[str] = Field(None, description="Current pipeline stage (for draft_pr jobs): PLANNING, WAITING_FOR_APPROVAL, REVISING, APPLYING, VERIFYING, PACKAGING, DRAFTING")
+    plan_versions: Optional[List[Dict[str, Any]]] = Field(None, description="List of plan versions (for draft_pr jobs)")
+    approved_plan_hash: Optional[str] = Field(None, description="Hash of approved plan (for draft_pr jobs)")
+    workspace_fingerprint: Optional[Dict[str, Any]] = Field(None, description="Workspace fingerprint (for draft_pr jobs)")
+    artifacts: Optional[Dict[str, Any]] = Field(None, description="Artifact references (for draft_pr jobs)")
 

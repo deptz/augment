@@ -98,6 +98,44 @@ git:
   username: ${GIT_USERNAME:}  # Git username for authentication
   password: ${GIT_PASSWORD:}  # Git password/token for authentication
 
+# Draft PR Orchestrator Configuration (Optional)
+# Configuration for the draft PR orchestrator pipeline
+draft_pr:
+  # YOLO Mode Policy - Auto-approval policy for low-risk changes
+  yolo_policy:
+    max_files: ${DRAFT_PR_YOLO_MAX_FILES:5}  # Maximum number of files that can be changed
+    max_loc_delta: ${DRAFT_PR_YOLO_MAX_LOC:200}  # Maximum lines of code change
+    allow_paths: ${DRAFT_PR_YOLO_ALLOW_PATHS:["docs/**", "scripts/**", "tools/**"]}  # Allowed path patterns
+    deny_paths: ${DRAFT_PR_YOLO_DENY_PATHS:["auth/**", "billing/**", "migrations/**"]}  # Denied path patterns
+    require_tests: ${DRAFT_PR_YOLO_REQUIRE_TESTS:false}  # Whether tests are required
+  
+  # Verification Configuration
+  verification:
+    test_command: ${DRAFT_PR_TEST_COMMAND:pytest}  # Command to run tests
+    lint_command: ${DRAFT_PR_LINT_COMMAND:ruff check}  # Command to run linter
+    build_command: ${DRAFT_PR_BUILD_COMMAND:}  # Command to run build (optional)
+  
+  # Protected Paths - Require explicit team approval
+  # Format: path_pattern: { require: team_name }
+  # Example:
+  #   protected_paths:
+  #     billing/**:
+  #       require: finance_team
+  #     auth/**:
+  #       require: security_team
+  protected_paths: {}
+  
+  # Concurrency Limits per Stage
+  concurrency:
+    plan: ${DRAFT_PR_CONCURRENCY_PLAN:5}  # Max concurrent planning jobs
+    apply: ${DRAFT_PR_CONCURRENCY_APPLY:2}  # Max concurrent apply jobs
+    verify: ${DRAFT_PR_CONCURRENCY_VERIFY:3}  # Max concurrent verify jobs
+    package: ${DRAFT_PR_CONCURRENCY_PACKAGE:3}  # Max concurrent package jobs
+    draft_pr: ${DRAFT_PR_CONCURRENCY_DRAFT_PR:3}  # Max concurrent draft PR jobs
+  
+  # Artifact Retention
+  artifact_retention_days: ${DRAFT_PR_ARTIFACT_RETENTION:30}  # Days to retain artifacts
+
 # Redis Configuration
 # Used for ARQ background job queue
 redis:

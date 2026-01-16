@@ -12,6 +12,7 @@ This document provides comprehensive documentation for all features in the Augme
 6. [Background Job Processing](#background-job-processing)
 7. [Sprint Planning & Capacity Management](#sprint-planning--capacity-management)
 8. [PRD to Story Ticket Sync](#prd-to-story-ticket-sync)
+9. [Draft PR Orchestrator](#draft-pr-orchestrator)
 
 ---
 
@@ -679,6 +680,161 @@ The system uses your configured `LLM_MAX_TOKENS` setting or provider defaults:
 - If `LLM_MAX_TOKENS` is set, uses that value
 - If not set, uses provider-specific defaults (OpenAI: 2000/16000 for GPT-5, Claude: 8000, Gemini: 8192, Kimi: 8000)
 - Falls back to 1000 characters if token information is unavailable
+
+---
+
+## Draft PR Orchestrator
+
+### Overview
+
+The Draft PR Orchestrator converts ambiguous stories into safe, code-scoped, reality-verified Draft PRs through a complete pipeline: **PLAN → APPROVAL → APPLY → VERIFY → PACKAGE → DRAFT_PR**. It enforces CI-grade rigor for the *intent → change* workflow with human-in-the-loop approval, safety guards, and comprehensive artifact persistence.
+
+### Key Features
+
+- **Structured Planning**: AI-generated plans with scope, tests, failure modes, and rollback procedures
+- **Human-in-the-Loop**: Approval workflow ensures no code changes without human consent
+- **Plan Iteration**: Revise plans based on feedback with version comparison
+- **Safety Guards**: Plan-apply guards verify changes match approved plans
+- **Git Transaction Safety**: Atomic changes with rollback on failure
+- **Verification Gates**: Automatic test, lint, and build execution before PR creation
+- **Artifact Persistence**: All plans, diffs, logs, and PR metadata stored for auditability
+- **YOLO Mode**: Policy-based auto-approval for low-risk changes
+
+### Execution Pipeline
+
+All Draft PR jobs follow this invariant pipeline:
+
+```
+Story + Scope
+   ↓
+PLAN        → plan_vN (read-only, immutable)
+   ↓
+APPROVAL    → binds (job_id, plan_hash)
+   ↓
+APPLY       → mutate workspace (git transaction)
+   ↓
+VERIFY      → tests / lint / build
+   ↓
+PACKAGE     → diff + PR metadata
+   ↓
+DRAFT_PR    → push branch + create Draft PR
+```
+
+### Modes
+
+**Normal Mode (Default)**
+- Requires human approval before APPLY stage
+- Approval is bound to specific plan hash
+- If plan changes, approval is invalidated
+- Use for production changes, shared systems, risky domains
+
+**YOLO Mode**
+- Auto-approval based on policy compliance
+- Policy checks: file count, LOC delta, path restrictions
+- Falls back to normal mode if policy not compliant
+- Use for low-risk changes (docs, scripts, tools)
+
+### Plan Specification
+
+Plans are structured artifacts with:
+- **Summary**: High-level overview
+- **Scope**: Files to modify (added, modified, deleted, renamed)
+- **Happy Paths**: Expected successful scenarios
+- **Edge Cases**: Boundary conditions to handle
+- **Failure Modes**: Potential failures with triggers, impact, mitigation
+- **Assumptions**: Assumptions about system state
+- **Unknowns**: Areas requiring investigation
+- **Tests**: Tests to run (unit, integration, e2e)
+- **Rollback**: Steps to revert changes
+- **Cross-Repo Impacts**: Impacts on other repositories
+
+### Plan Iteration
+
+Users can iterate on plans:
+1. Review generated plan
+2. Submit feedback with concerns and change requests
+3. System generates revised plan version
+4. Compare versions to see changes
+5. Approve when satisfied
+
+**Features:**
+- Immutable plan versions (never modified)
+- Feedback history tracked per version
+- Version comparison highlights changes
+- Previous approval invalidated on revision
+
+### Safety Mechanisms
+
+1. **Plan Hash Binding**: Approval cryptographically bound to plan hash
+2. **Plan-Apply Guards**: Verifies actual changes match approved plan
+3. **Git Transaction Safety**: Atomic operations with rollback on failure
+4. **Verification Gates**: PR only created if tests/lint/build pass
+5. **Artifact Persistence**: All evidence stored for auditability
+6. **Workspace Fingerprinting**: Reproducible workspace state
+
+### API Endpoints
+
+- `POST /draft-pr/create` - Create new Draft PR job
+- `GET /draft-pr/jobs/{job_id}` - Get job status
+- `GET /draft-pr/jobs/{job_id}/plan` - Get latest plan
+- `GET /draft-pr/jobs/{job_id}/plans/{version}` - Get specific plan version
+- `POST /draft-pr/jobs/{job_id}/revise-plan` - Submit feedback and revise plan
+- `GET /draft-pr/jobs/{job_id}/plans/compare` - Compare plan versions
+- `POST /draft-pr/jobs/{job_id}/approve` - Approve plan to proceed
+- `GET /draft-pr/jobs/{job_id}/artifacts` - List all artifacts
+- `GET /draft-pr/jobs/{job_id}/artifacts/{artifact_type}` - Get specific artifact
+
+### Configuration
+
+```yaml
+draft_pr:
+  yolo_policy:
+    max_files: 5
+    max_loc_delta: 200
+    allow_paths: ["docs/**", "scripts/**"]
+    deny_paths: ["auth/**", "billing/**"]
+    require_tests: false
+  
+  verification:
+    test_command: "pytest"
+    lint_command: "ruff check"
+    build_command: ""
+  
+  protected_paths:
+    billing/**:
+      require: finance_team
+```
+
+### Usage Example
+
+```bash
+# 1. Create Draft PR job
+POST /draft-pr/create
+{
+  "story_key": "STORY-123",
+  "repos": [{"url": "https://bitbucket.org/workspace/repo.git"}],
+  "mode": "normal"
+}
+
+# 2. Review plan
+GET /draft-pr/jobs/{job_id}/plan
+
+# 3. Approve plan
+POST /draft-pr/jobs/{job_id}/approve
+{
+  "plan_hash": "abc123..."
+}
+
+# 4. Monitor progress
+GET /draft-pr/jobs/{job_id}
+# Pipeline continues: APPLY → VERIFY → PACKAGE → DRAFT_PR
+```
+
+### Related Documentation
+
+- [Draft PR Orchestrator Guide](DRAFT_PR_ORCHESTRATOR.md) - Complete guide with examples
+- [API Documentation](../api/API_DOCUMENTATION.md#draft-pr-orchestrator) - API reference
+- [Product Requirements Document](../../opencode_coder.md) - PRD specification
 
 ---
 

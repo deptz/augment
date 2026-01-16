@@ -2238,3 +2238,153 @@ async def process_timeline_planning_worker(ctx, job_id: str, epic_key: str, boar
             if job.ticket_key:
                 unregister_ticket_job(job.ticket_key)
         raise
+
+
+async def process_draft_pr_worker(
+    ctx,
+    job_id: str,
+    story_key: str,
+    story_summary: str,
+    story_description: Optional[str],
+    repos: List[Dict[str, Any]],
+    scope: Optional[Dict[str, Any]] = None,
+    additional_context: Optional[str] = None,
+    mode: str = "normal"
+):
+    """
+    ARQ worker function for processing draft PR orchestrator jobs.
+    
+    Executes the complete pipeline: PLAN → APPROVAL → APPLY → VERIFY → PACKAGE → DRAFT_PR
+    """
+    _initialize_services_if_needed()
+    config = get_config()
+    
+    try:
+        job = _get_or_create_job(job_id, "draft_pr", f"Processing draft PR for {story_key}...")
+        job.ticket_key = story_key
+        job.stage = "PLANNING"
+        
+        # Get JIRA client to fetch story details if needed
+        jira_client = get_jira_client()
+        if not story_summary and story_key:
+            try:
+                issue = jira_client.get_issue(story_key)
+                story_summary = issue.fields.summary
+                story_description = issue.fields.description or story_description
+            except Exception as e:
+                logger.warning(f"Could not fetch story details from JIRA: {e}")
+        
+        # Initialize pipeline
+        from src.draft_pr_pipeline import DraftPRPipeline
+        from src.plan_generator import PlanGenerator
+        from src.workspace_manager import WorkspaceManager
+        from src.artifact_store import ArtifactStore, get_artifact_store
+        from src.opencode_runner import OpenCodeRunner
+        from src.llm_client import LLMClient
+        from src.bitbucket_client import BitbucketClient
+        from ..utils import create_custom_llm_client
+        
+        artifact_store = get_artifact_store()
+        
+        # Get OpenCode runner
+        opencode_runner = None
+        opencode_config = config.get_opencode_config()
+        if opencode_config.get('enabled'):
+            opencode_runner = OpenCodeRunner(
+                docker_image=opencode_config.get('docker_image'),
+                job_timeout_minutes=opencode_config.get('job_timeout_minutes', 20),
+                max_result_size_mb=opencode_config.get('max_result_size_mb', 10),
+                result_file=opencode_config.get('result_file', 'result.json'),
+                llm_config=config.get_llm_config() if hasattr(config, 'get_llm_config') else config._config.get('llm', {})
+            )
+            opencode_runner.set_concurrency_limit(opencode_config.get('max_concurrent', 2))
+        
+        # Get LLM client
+        llm_client = create_custom_llm_client()
+        
+        # Get workspace manager
+        git_creds = config.get_git_credentials()
+        workspace_manager = WorkspaceManager(
+            git_username=git_creds.get('username'),
+            git_password=git_creds.get('password'),
+            clone_timeout_seconds=opencode_config.get('clone_timeout_seconds', 300),
+            shallow_clone=opencode_config.get('shallow_clone', True)
+        )
+        
+        # Get Bitbucket client
+        bitbucket_client = None
+        bitbucket_config = config._config.get('bitbucket', {})
+        if bitbucket_config.get('email') and bitbucket_config.get('api_token'):
+            bitbucket_client = BitbucketClient(
+                workspaces=bitbucket_config.get('workspaces', []),
+                email=bitbucket_config.get('email'),
+                api_token=bitbucket_config.get('api_token'),
+                jira_server_url=config._config.get('jira', {}).get('server_url')
+            )
+        
+        # Get plan generator
+        plan_generator = PlanGenerator(
+            llm_client=llm_client,
+            opencode_runner=opencode_runner,
+            workspace_manager=workspace_manager
+        )
+        
+        # Get YOLO policy and verification config
+        draft_pr_config = config._config.get('draft_pr', {})
+        yolo_policy = draft_pr_config.get('yolo_policy')
+        verification_config = draft_pr_config.get('verification', {})
+        
+        # Create pipeline
+        pipeline = DraftPRPipeline(
+            plan_generator=plan_generator,
+            workspace_manager=workspace_manager,
+            artifact_store=artifact_store,
+            opencode_runner=opencode_runner,
+            llm_client=llm_client,
+            bitbucket_client=bitbucket_client,
+            yolo_policy=yolo_policy,
+            verification_config=verification_config
+        )
+        
+        # Execute pipeline
+        results = await pipeline.execute_pipeline(
+            job_id=job_id,
+            story_key=story_key,
+            story_summary=story_summary,
+            story_description=story_description,
+            repos=repos,
+            scope=scope,
+            additional_context=additional_context,
+            mode=mode,
+            cancellation_event=None  # TODO: Support cancellation
+        )
+        
+        # Update job with results
+        job.stage = results.get('stage', 'FAILED')
+        job.results = results
+        
+        if results.get('stage') == 'COMPLETED':
+            job.status = "completed"
+            job.completed_at = datetime.now()
+            job.progress = {"message": f"Draft PR created: {results.get('pr_results', {}).get('pr_url', 'N/A')}"}
+        elif results.get('stage') == 'WAITING_FOR_APPROVAL':
+            job.status = "processing"
+            job.progress = {"message": "Waiting for plan approval"}
+        else:
+            job.status = "failed"
+            job.completed_at = datetime.now()
+            job.error = results.get('error', 'Unknown error')
+            job.progress = {"message": f"Pipeline failed: {results.get('error', 'Unknown error')}"}
+        
+        logger.info(f"Job {job_id} completed with stage: {results.get('stage')}")
+        
+    except Exception as e:
+        logger.error(f"Job {job_id} failed: {e}", exc_info=True)
+        if job_id in jobs:
+            job = jobs[job_id]
+            job.status = "failed"
+            job.completed_at = datetime.now()
+            job.error = str(e)
+            job.progress = {"message": f"Job failed: {str(e)}"}
+            job.stage = "FAILED"
+        raise
