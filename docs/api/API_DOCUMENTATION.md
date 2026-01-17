@@ -886,6 +886,13 @@ OpenCode containers can access external data sources (Bitbucket, Jira, Confluenc
   - Each workspace gets its own MCP instance with unique port and hostname
 - **Atlassian MCP**: Single instance providing access to Jira issues and Confluence pages
 
+**Agents.md Distribution:**
+When OpenCode containers are created with the `repos` parameter, the system automatically distributes `Agents.md` files to guide OpenCode agents:
+- **Automatic**: Created in each cloned repository and workspace root
+- **Smart Merging**: Appends to existing `Agents.md` files (preserves existing content)
+- **MCP Guidance**: Instructs agents on available MCP servers, usage patterns, and read-only constraints
+- **Idempotent**: Safe to run multiple times (prevents duplicate content)
+
 **Configuration:**
 **IMPORTANT**: MCP servers use the **SAME environment variables as the main application**. No duplicate variables needed!
 

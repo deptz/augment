@@ -189,6 +189,33 @@ When OpenCode containers are spawned (via API endpoints with `repos` parameter),
    - Bitbucket MCP: `http://bitbucket-mcp-{workspace}:{port}/mcp` (port depends on workspace index)
    - Atlassian MCP: `http://atlassian-mcp:{port}/mcp` (port is 7002 or next available after Bitbucket instances)
 
+## Agents.md Distribution
+
+When OpenCode containers are spawned, the system automatically distributes an OpenCode-specific `Agents.md` file to guide agents on MCP usage:
+
+1. **Automatic Distribution**: `Agents.md` files are created/updated in:
+   - Each cloned repository root directory
+   - Workspace root directory
+
+2. **Smart Appending**: 
+   - If a repository already has an `Agents.md` file, the OpenCode MCP integration section is appended (not overwritten)
+   - Existing content is preserved with a clear separator (`---`)
+   - Prevents duplicate content (idempotent - safe to run multiple times)
+
+3. **Content**: The `Agents.md` file includes:
+   - Available MCP servers (Bitbucket and Atlassian)
+   - When to use each MCP (code vs documentation vs tickets)
+   - Read-only constraints and safety rules
+   - Best practices for data fetching (always fetch real data, minimize calls)
+   - Reference to `/app/opencode.json` for MCP configuration
+
+4. **Safety Features**:
+   - Path sanitization prevents security issues
+   - File size limits (10MB max for existing files)
+   - Encoding error handling (UTF-8 with fallback)
+   - Atomic file writes (prevents corruption)
+   - Idempotency checks (prevents duplicate appends)
+
 **Example - Single workspace**: If analyzing repos from `workspace1`:
 - Container gets `opencode.json` with `bitbucket-workspace1` key:
   ```json

@@ -510,6 +510,17 @@ GIT_PASSWORD=your-git-token-or-password  # Git password, personal access token, 
 - MCP servers must be running before OpenCode containers can access external data
 - See [MCP Setup Guide](docs/technical/MCP_SETUP.md) for complete setup instructions
 
+**Agents.md Distribution:**
+- OpenCode-specific `Agents.md` files are automatically distributed to all cloned repositories
+- If a repository already has an `Agents.md` file, the OpenCode MCP integration section is appended (not overwritten)
+- If no `Agents.md` exists, a new file is created with OpenCode MCP usage instructions
+- The `Agents.md` file guides OpenCode agents on:
+  - Available MCP servers (Bitbucket and Atlassian)
+  - When to use each MCP for different tasks
+  - Read-only constraints and best practices
+  - Data fetching guidelines (fetch real data, don't hallucinate)
+- Also created at workspace root level for easy reference
+
 **Using OpenCode in API calls:**
 
 Add the `repos` parameter to enable code-aware generation:

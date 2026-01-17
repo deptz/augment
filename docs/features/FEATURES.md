@@ -877,6 +877,34 @@ curl -X POST "http://localhost:8000/analyze/story-coverage" \
   }'
 ```
 
+### Agents.md Distribution
+
+When OpenCode containers are created with the `repos` parameter, the system automatically distributes `Agents.md` files to guide OpenCode agents on MCP usage:
+
+**Automatic Distribution:**
+- `Agents.md` files are created in each cloned repository root directory
+- Also created at workspace root level for easy reference
+- Happens automatically after repositories are cloned
+
+**Smart Content Merging:**
+- **If `Agents.md` exists**: OpenCode MCP integration section is appended (existing content preserved)
+- **If `Agents.md` doesn't exist**: New file is created with OpenCode MCP instructions
+- **Idempotent**: Safe to run multiple times (prevents duplicate content)
+
+**Content Includes:**
+- Available MCP servers (Bitbucket and Atlassian)
+- When to use each MCP (code vs documentation vs tickets)
+- Read-only constraints and safety rules
+- Best practices for data fetching (always fetch real data, minimize calls)
+- Reference to `/app/opencode.json` for MCP configuration
+
+**Safety Features:**
+- Path sanitization prevents security issues
+- File size limits (10MB max for existing files)
+- Encoding error handling (UTF-8 with fallback)
+- Atomic file writes (prevents corruption)
+- Idempotency checks (prevents duplicate appends)
+
 ### Repository Specification
 
 The `repos` parameter accepts an array of repository specifications:
