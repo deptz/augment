@@ -973,169 +973,169 @@ class OpenCodeRunner:
         
         try:
             for attempt in range(SSE_MAX_RETRIES):
-            # Check cancellation before each attempt
-            if cancellation_event and cancellation_event.is_set():
-                raise asyncio.CancelledError("Job cancelled during SSE streaming")
-            
-            try:
-                async with httpx.AsyncClient(
-                    timeout=httpx.Timeout(self.job_timeout_seconds, connect=30.0)
-                ) as client:
-                    # First, make the request and check Content-Type
-                    response = await client.post(url, headers=headers, json=payload)
-                    content_type = response.headers.get("content-type", "")
-                    
-                    # If response is JSON, OpenCode completed synchronously or returned an error
-                    if "application/json" in content_type:
-                        try:
-                            data = response.json()
-                            # Log the response for debugging
-                            logger.debug(f"[OpenCode] Job {job_id}: JSON response: {json.dumps(data, indent=2)[:500]}")
-                            
-                            # Store response data for later diagnostics (before error checking)
-                            self._last_json_response = data
-                            
-                            # Check for error in various possible locations in the response
-                            error_info = None
-                            error_location = None
-                            
-                            # Check direct "error" key
-                            if "error" in data:
-                                error_info = data.get('error', {})
-                                error_location = "root"
-                            # Check nested "info.error" structure (common in OpenCode responses)
-                            elif "info" in data and isinstance(data.get('info'), dict) and "error" in data['info']:
-                                error_info = data['info'].get('error', {})
-                                error_location = "info.error"
-                            
-                            if error_info:
-                                # Extract error details
-                                error_msg = 'Unknown error'
-                                error_name = ''
-                                status_code = None
+                # Check cancellation before each attempt
+                if cancellation_event and cancellation_event.is_set():
+                    raise asyncio.CancelledError("Job cancelled during SSE streaming")
+                
+                try:
+                    async with httpx.AsyncClient(
+                        timeout=httpx.Timeout(self.job_timeout_seconds, connect=30.0)
+                    ) as client:
+                        # First, make the request and check Content-Type
+                        response = await client.post(url, headers=headers, json=payload)
+                        content_type = response.headers.get("content-type", "")
+                        
+                        # If response is JSON, OpenCode completed synchronously or returned an error
+                        if "application/json" in content_type:
+                            try:
+                                data = response.json()
+                                # Log the response for debugging
+                                logger.debug(f"[OpenCode] Job {job_id}: JSON response: {json.dumps(data, indent=2)[:500]}")
                                 
-                                if isinstance(error_info, dict):
-                                    error_msg = error_info.get('message', error_info.get('data', {}).get('message', 'Unknown error'))
-                                    error_name = error_info.get('name', '')
-                                    # Check both direct statusCode and nested in data
-                                    status_code = error_info.get('statusCode') or error_info.get('data', {}).get('statusCode')
-                                else:
-                                    # Error is a string
-                                    error_msg = str(error_info)
+                                # Store response data for later diagnostics (before error checking)
+                                self._last_json_response = data
                                 
-                                # Check for authentication errors
-                                if status_code == 401 or 'authentication' in error_msg.lower() or 'invalid auth' in error_msg.lower():
-                                    provider = self.llm_config.get('provider', 'unknown')
-                                    provider_to_env_key = {
-                                        'openai': 'OPENAI_API_KEY',
-                                        'claude': 'ANTHROPIC_API_KEY',
-                                        'gemini': 'GOOGLE_API_KEY',
-                                        'kimi': 'MOONSHOT_API_KEY',
-                                    }
-                                    required_key = provider_to_env_key.get(provider, 'API_KEY')
+                                # Check for error in various possible locations in the response
+                                error_info = None
+                                error_location = None
+                                
+                                # Check direct "error" key
+                                if "error" in data:
+                                    error_info = data.get('error', {})
+                                    error_location = "root"
+                                # Check nested "info.error" structure (common in OpenCode responses)
+                                elif "info" in data and isinstance(data.get('info'), dict) and "error" in data['info']:
+                                    error_info = data['info'].get('error', {})
+                                    error_location = "info.error"
+                                
+                                if error_info:
+                                    # Extract error details
+                                    error_msg = 'Unknown error'
+                                    error_name = ''
+                                    status_code = None
                                     
-                                    # Map provider to OpenCode-specific env var names (ONLY OpenCode keys are used)
-                                    opencode_env_var_map = {
-                                        'openai': 'OPENCODE_OPENAI_API_KEY',
-                                        'claude': 'OPENCODE_ANTHROPIC_API_KEY',
-                                        'gemini': 'OPENCODE_GOOGLE_API_KEY',
-                                        'kimi': 'OPENCODE_MOONSHOT_API_KEY',
-                                    }
-                                    opencode_env_var = opencode_env_var_map.get(provider, '')
+                                    if isinstance(error_info, dict):
+                                        error_msg = error_info.get('message', error_info.get('data', {}).get('message', 'Unknown error'))
+                                        error_name = error_info.get('name', '')
+                                        # Check both direct statusCode and nested in data
+                                        status_code = error_info.get('statusCode') or error_info.get('data', {}).get('statusCode')
+                                    else:
+                                        # Error is a string
+                                        error_msg = str(error_info)
                                     
-                                    logger.error(
-                                        f"[OpenCode] Job {job_id}: Authentication error (401) from OpenCode. "
-                                        f"Location: {error_location}, Provider: {provider}, Required env var: {opencode_env_var}. "
-                                        f"Error: {error_msg}"
-                                    )
-                                    raise ContainerError(
-                                        f"OpenCode authentication failed (401). "
-                                        f"The LLM API key for provider '{provider}' may be missing, invalid, or expired. "
-                                        f"Please set {opencode_env_var} in your .env file. "
-                                        f"OpenCode ONLY uses OpenCode-specific API keys and does not fall back to main LLM configuration."
-                                    )
+                                    # Check for authentication errors
+                                    if status_code == 401 or 'authentication' in error_msg.lower() or 'invalid auth' in error_msg.lower():
+                                        provider = self.llm_config.get('provider', 'unknown')
+                                        provider_to_env_key = {
+                                            'openai': 'OPENAI_API_KEY',
+                                            'claude': 'ANTHROPIC_API_KEY',
+                                            'gemini': 'GOOGLE_API_KEY',
+                                            'kimi': 'MOONSHOT_API_KEY',
+                                        }
+                                        required_key = provider_to_env_key.get(provider, 'API_KEY')
+                                        
+                                        # Map provider to OpenCode-specific env var names (ONLY OpenCode keys are used)
+                                        opencode_env_var_map = {
+                                            'openai': 'OPENCODE_OPENAI_API_KEY',
+                                            'claude': 'OPENCODE_ANTHROPIC_API_KEY',
+                                            'gemini': 'OPENCODE_GOOGLE_API_KEY',
+                                            'kimi': 'OPENCODE_MOONSHOT_API_KEY',
+                                        }
+                                        opencode_env_var = opencode_env_var_map.get(provider, '')
+                                        
+                                        logger.error(
+                                            f"[OpenCode] Job {job_id}: Authentication error (401) from OpenCode. "
+                                            f"Location: {error_location}, Provider: {provider}, Required env var: {opencode_env_var}. "
+                                            f"Error: {error_msg}"
+                                        )
+                                        raise ContainerError(
+                                            f"OpenCode authentication failed (401). "
+                                            f"The LLM API key for provider '{provider}' may be missing, invalid, or expired. "
+                                            f"Please set {opencode_env_var} in your .env file. "
+                                            f"OpenCode ONLY uses OpenCode-specific API keys and does not fall back to main LLM configuration."
+                                        )
+                                    
+                                    logger.error(f"[OpenCode] Job {job_id}: OpenCode returned error ({error_location}): {error_name} - {error_msg}")
+                                    raise ContainerError(f"OpenCode returned error: {error_name} - {error_msg}")
                                 
-                                logger.error(f"[OpenCode] Job {job_id}: OpenCode returned error ({error_location}): {error_name} - {error_msg}")
-                                raise ContainerError(f"OpenCode returned error: {error_name} - {error_msg}")
-                            
-                            # Otherwise, assume it completed successfully
-                            logger.info(f"[OpenCode] Job {job_id}: Received JSON response (non-streaming completion)")
-                            # For non-streaming responses, record the JSON response as an event
-                            if self.debug_conversation_logging:
-                                event_record = {
-                                    "timestamp": time.time(),
-                                    "event_type": "json_response",
-                                    "data": json.dumps(data),
-                                    "raw_event": data
-                                }
-                                self._conversation_logs.append(event_record)
-                                await self._save_conversation_logs(job_id)
-                            return
-                        except json.JSONDecodeError as e:
-                            logger.warning(f"[OpenCode] Job {job_id}: Invalid JSON in response: {e}")
-                            logger.warning(f"[OpenCode] Job {job_id}: Response text: {response.text[:500]}")
-                            raise ContainerError("Invalid JSON response from OpenCode")
-                    
-                    # For SSE responses, use httpx-sse
-                    if "text/event-stream" not in content_type:
-                        raise SSEError(f"Unexpected Content-Type: {content_type}")
-                    
-                    # Re-make request for SSE streaming
-                    async with aconnect_sse(
-                        client,
-                        "POST",
-                        url,
-                        headers=headers,
-                        json=payload
-                    ) as event_source:
-                        async for event in event_source.aiter_sse():
-                            # Check cancellation periodically during streaming
-                            if cancellation_event and cancellation_event.is_set():
-                                logger.info(f"[OpenCode] Job {job_id}: Cancellation requested during streaming")
-                                raise asyncio.CancelledError("Job cancelled during SSE streaming")
-                            
-                            self._process_sse_event_obj(event, job_id)
-                            
-                            # Check for done event
-                            if event.event == "done":
-                                logger.info(f"[OpenCode] Job {job_id}: Prompt streaming completed")
+                                # Otherwise, assume it completed successfully
+                                logger.info(f"[OpenCode] Job {job_id}: Received JSON response (non-streaming completion)")
+                                # For non-streaming responses, record the JSON response as an event
+                                if self.debug_conversation_logging:
+                                    event_record = {
+                                        "timestamp": time.time(),
+                                        "event_type": "json_response",
+                                        "data": json.dumps(data),
+                                        "raw_event": data
+                                    }
+                                    self._conversation_logs.append(event_record)
+                                    await self._save_conversation_logs(job_id)
                                 return
+                            except json.JSONDecodeError as e:
+                                logger.warning(f"[OpenCode] Job {job_id}: Invalid JSON in response: {e}")
+                                logger.warning(f"[OpenCode] Job {job_id}: Response text: {response.text[:500]}")
+                                raise ContainerError("Invalid JSON response from OpenCode")
+                        
+                        # For SSE responses, use httpx-sse
+                        if "text/event-stream" not in content_type:
+                            raise SSEError(f"Unexpected Content-Type: {content_type}")
+                        
+                        # Re-make request for SSE streaming
+                        async with aconnect_sse(
+                            client,
+                            "POST",
+                            url,
+                            headers=headers,
+                            json=payload
+                        ) as event_source:
+                            async for event in event_source.aiter_sse():
+                                # Check cancellation periodically during streaming
+                                if cancellation_event and cancellation_event.is_set():
+                                    logger.info(f"[OpenCode] Job {job_id}: Cancellation requested during streaming")
+                                    raise asyncio.CancelledError("Job cancelled during SSE streaming")
+                                
+                                self._process_sse_event_obj(event, job_id)
+                                
+                                # Check for done event
+                                if event.event == "done":
+                                    logger.info(f"[OpenCode] Job {job_id}: Prompt streaming completed")
+                                    return
+                    
+                    # If we get here without 'done', streaming completed normally
+                    logger.info(f"[OpenCode] Job {job_id}: Prompt streaming completed")
+                    return
+                    
+                except asyncio.CancelledError:
+                    raise  # Re-raise cancellation errors
+                    
+                except SSEError as e:
+                    last_error = e
+                    logger.warning(
+                        f"[OpenCode] Job {job_id}: SSE error on attempt {attempt + 1}/{SSE_MAX_RETRIES}: {e}"
+                    )
+                    
+                except httpx.ConnectError as e:
+                    last_error = e
+                    logger.warning(
+                        f"[OpenCode] Job {job_id}: Connection error on attempt {attempt + 1}/{SSE_MAX_RETRIES}: {e}"
+                    )
+                    
+                except httpx.ReadError as e:
+                    last_error = e
+                    logger.warning(
+                        f"[OpenCode] Job {job_id}: Read error on attempt {attempt + 1}/{SSE_MAX_RETRIES}: {e}"
+                    )
                 
-                # If we get here without 'done', streaming completed normally
-                logger.info(f"[OpenCode] Job {job_id}: Prompt streaming completed")
-                return
-                
-            except asyncio.CancelledError:
-                raise  # Re-raise cancellation errors
-                
-            except SSEError as e:
-                last_error = e
-                logger.warning(
-                    f"[OpenCode] Job {job_id}: SSE error on attempt {attempt + 1}/{SSE_MAX_RETRIES}: {e}"
-                )
-                
-            except httpx.ConnectError as e:
-                last_error = e
-                logger.warning(
-                    f"[OpenCode] Job {job_id}: Connection error on attempt {attempt + 1}/{SSE_MAX_RETRIES}: {e}"
-                )
-                
-            except httpx.ReadError as e:
-                last_error = e
-                logger.warning(
-                    f"[OpenCode] Job {job_id}: Read error on attempt {attempt + 1}/{SSE_MAX_RETRIES}: {e}"
-                )
+                # Exponential backoff before retry
+                if attempt < SSE_MAX_RETRIES - 1:
+                    logger.info(f"[OpenCode] Job {job_id}: Retrying in {backoff:.1f}s...")
+                    await asyncio.sleep(backoff)
+                    backoff = min(backoff * SSE_BACKOFF_MULTIPLIER, SSE_MAX_BACKOFF)
             
-            # Exponential backoff before retry
-            if attempt < SSE_MAX_RETRIES - 1:
-                logger.info(f"[OpenCode] Job {job_id}: Retrying in {backoff:.1f}s...")
-                await asyncio.sleep(backoff)
-                backoff = min(backoff * SSE_BACKOFF_MULTIPLIER, SSE_MAX_BACKOFF)
-        
-        # All retries exhausted
-        raise ContainerError(
-            f"SSE streaming failed after {SSE_MAX_RETRIES} attempts: {last_error}"
-        )
+            # All retries exhausted
+            raise ContainerError(
+                f"SSE streaming failed after {SSE_MAX_RETRIES} attempts: {last_error}"
+            )
         finally:
             # Save conversation logs even on failure if debug mode enabled
             if self.debug_conversation_logging:
