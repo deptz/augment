@@ -264,7 +264,7 @@ async def _reconstruct_job_from_redis(job_id: str) -> Optional[JobStatus]:
          response_model=JobStatus,
          tags=["Jobs"],
          summary="Get job status and results",
-         description="Get the status and results of a background job. Works with batch, single, story_coverage, story_generation, task_generation, test_generation, and prd_story_sync jobs.")
+         description="Get the status and results of a background job. Works with batch, single, story_coverage, story_generation, task_generation, test_generation, prd_story_sync, and draft_pr jobs.")
 async def get_job_status(job_id: str, current_user: str = Depends(get_current_user)):
     """Get the status of a batch processing job"""
     # Check in-memory first
@@ -310,7 +310,7 @@ async def get_job_status(job_id: str, current_user: str = Depends(get_current_us
          description="List all background jobs with their status. Filter by status, job_type, job_id, ticket_key, or story_key. Sort by any field with ascending or descending order.")
 async def list_jobs(
     status: Optional[str] = Query(None, description="Filter by job status (started, processing, completed, failed, cancelled)"),
-    job_type: Optional[str] = Query(None, description="Filter by job type (batch, single, story_coverage, story_generation, task_generation, test_generation, prd_story_sync, sprint_planning, timeline_planning, bulk_story_update, bulk_task_creation, epic_creation, story_creation, task_creation)"),
+    job_type: Optional[str] = Query(None, description="Filter by job type (batch, single, story_coverage, story_generation, task_generation, test_generation, prd_story_sync, sprint_planning, timeline_planning, bulk_story_update, bulk_task_creation, epic_creation, story_creation, task_creation, draft_pr)"),
     job_id: Optional[str] = Query(None, description="Filter by job ID (exact match)"),
     ticket_key: Optional[str] = Query(None, description="Filter by ticket key (matches ticket_key field or ticket_keys list)"),
     story_key: Optional[str] = Query(None, description="Filter by story key (matches story_key field or story_keys list)"),

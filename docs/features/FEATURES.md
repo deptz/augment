@@ -778,6 +778,7 @@ Users can iterate on plans:
 - `POST /draft-pr/create` - Create new Draft PR job
 - `GET /draft-pr/jobs/{job_id}` - Get job status
 - `GET /draft-pr/jobs/{job_id}/plan` - Get latest plan
+- `GET /draft-pr/jobs/{job_id}/plans` - List all plan versions with metadata
 - `GET /draft-pr/jobs/{job_id}/plans/{version}` - Get specific plan version
 - `POST /draft-pr/jobs/{job_id}/revise-plan` - Submit feedback and revise plan
 - `GET /draft-pr/jobs/{job_id}/plans/compare` - Compare plan versions

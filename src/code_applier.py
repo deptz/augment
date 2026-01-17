@@ -4,6 +4,7 @@ Service for applying code changes to workspace with git transaction safety
 """
 import logging
 import subprocess
+import asyncio
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from contextlib import contextmanager
@@ -146,6 +147,10 @@ class CodeApplier:
         
         # Use git transaction for safety
         with self.git_transaction(primary_repo_path) as repo:
+            # Store original state for verification
+            original_commit = repo.head.commit.hexsha
+            original_dirty = repo.is_dirty()
+            
             # Execute OpenCode to apply changes
             try:
                 result = await opencode_runner.execute(
@@ -155,12 +160,51 @@ class CodeApplier:
                     job_type="code_application",
                     cancellation_event=cancellation_event
                 )
+            except asyncio.TimeoutError as e:
+                # OpenCode timeout - verify workspace state
+                current_commit = repo.head.commit.hexsha
+                current_dirty = repo.is_dirty()
+                
+                # Check if workspace was modified before timeout
+                if current_commit != original_commit or (not original_dirty and current_dirty):
+                    logger.warning(f"OpenCode timed out but workspace was modified. Commit: {original_commit[:8]} -> {current_commit[:8]}, Dirty: {original_dirty} -> {current_dirty}")
+                    # Workspace was partially modified - transaction will rollback
+                
+                raise CodeApplierError(f"OpenCode execution timed out: {e}")
             except Exception as e:
-                raise CodeApplierError(f"OpenCode execution failed: {e}")
+                # Verify workspace state after failure
+                current_commit = repo.head.commit.hexsha
+                current_dirty = repo.is_dirty()
+                
+                # Check if workspace was modified before failure
+                if current_commit != original_commit or (not original_dirty and current_dirty):
+                    logger.warning(f"OpenCode failed but workspace was modified. Commit: {original_commit[:8]} -> {current_commit[:8]}, Dirty: {original_dirty} -> {current_dirty}")
+                    # Workspace was partially modified - transaction will rollback
+                    raise CodeApplierError(
+                        f"OpenCode execution failed and workspace was partially modified. "
+                        f"Workspace will be rolled back to checkpoint. Error: {e}"
+                    )
+                else:
+                    # No changes made - safe failure
+                    raise CodeApplierError(f"OpenCode execution failed (no workspace changes): {e}")
+            
+            # Verify OpenCode result is valid
+            if not result:
+                raise CodeApplierError("OpenCode returned empty result")
             
             # Get changed files (before staging)
             changed_files = self._get_changed_files(repo)
             loc_delta = self._calculate_loc_delta(repo)
+            
+            # Verify workspace state after OpenCode execution
+            final_commit = repo.head.commit.hexsha
+            final_dirty = repo.is_dirty()
+            
+            # Log workspace state for debugging
+            logger.info(
+                f"OpenCode execution completed. Workspace state: commit={final_commit[:8]}, "
+                f"dirty={final_dirty}, changed_files={len(changed_files)}, loc_delta={loc_delta}"
+            )
             
             # Plan-Apply guard: verify changes match plan BEFORE staging
             # This way if guard fails, we can abort without staging

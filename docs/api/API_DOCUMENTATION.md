@@ -1385,9 +1385,41 @@ Get the latest plan version.
 }
 ```
 
+#### `GET /draft-pr/jobs/{job_id}/plans`
+
+List all plan versions with metadata (version, hash, summary).
+
+**Response:**
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "plans": [
+    {
+      "version": 1,
+      "plan_hash": "abc123...",
+      "previous_version_hash": null,
+      "generated_by": "opencode",
+      "summary": "Add user authentication endpoint"
+    },
+    {
+      "version": 2,
+      "plan_hash": "xyz789...",
+      "previous_version_hash": "abc123...",
+      "generated_by": "opencode",
+      "summary": "Add user authentication endpoint with rate limiting"
+    }
+  ]
+}
+```
+
+**Use Cases:**
+- Display plan history in UI
+- Quick overview of all plan iterations
+- Select specific version for comparison
+
 #### `GET /draft-pr/jobs/{job_id}/plans/{version}`
 
-Get a specific plan version by version number.
+Get a specific plan version by version number (full plan details).
 
 #### `POST /draft-pr/jobs/{job_id}/revise-plan`
 
@@ -1472,6 +1504,9 @@ Approve a plan to proceed to APPLY stage.
 - Job must be in `WAITING_FOR_APPROVAL` stage
 - Prevents duplicate approvals
 - Re-verifies plan before approval (TOCTOU protection)
+- Checks if job was cancelled (cannot approve cancelled jobs)
+- Distributed Redis lock prevents concurrent approval requests
+- Lock timeout: 60 seconds (increased for network latency)
 
 #### `GET /draft-pr/jobs/{job_id}/artifacts`
 
@@ -1553,10 +1588,13 @@ curl -X POST "http://localhost:8000/draft-pr/jobs/{job_id}/revise-plan" \
     "feedback_type": "addition"
   }'
 
-# 2. Compare versions
+# 2. List all plan versions
+curl "http://localhost:8000/draft-pr/jobs/{job_id}/plans"
+
+# 3. Compare versions
 curl "http://localhost:8000/draft-pr/jobs/{job_id}/plans/compare?from_version=1&to_version=2"
 
-# 3. Approve revised plan
+# 4. Approve revised plan
 curl -X POST "http://localhost:8000/draft-pr/jobs/{job_id}/approve" \
   -H "Content-Type: application/json" \
   -d '{
@@ -1627,6 +1665,12 @@ Plans follow a structured format:
 4. **Verification Gates**: PR only created if tests/lint/build pass
 5. **Artifact Persistence**: All evidence stored for auditability
 6. **Workspace Fingerprinting**: Reproducible workspace state
+7. **Distributed Locking**: Redis-based locks prevent concurrent approvals
+8. **Cancellation Support**: Jobs can be cancelled at any stage with automatic cleanup
+9. **Job Status Persistence**: Redis persistence enables crash recovery
+10. **Branch Collision Handling**: Automatic retry with suffix (up to 5 attempts)
+11. **Partial Failure Recovery**: Detects and stores recovery info for branch-pushed-but-PR-failed scenarios
+12. **Workspace State Verification**: Checks workspace state before/after OpenCode execution
 
 ### Troubleshooting
 
@@ -1636,8 +1680,13 @@ Plans follow a structured format:
 | "Bitbucket client required" | Configure Bitbucket credentials in config |
 | "Plan hash mismatch" | Plan was revised; approve latest version |
 | "Verification failed" | Check validation logs artifact for details |
-| "Branch already exists" | Use different job_id or ticket_key |
-| "Workspace not found" | Workspace may have been cleaned up; restart job |
+| "Branch already exists" | System will retry with suffix (up to 5 attempts) |
+| "Workspace not found" | Workspace may have been cleaned up; system attempts recreation for plan revision |
+| "Job was cancelled" | Cannot approve cancelled jobs; workspace cleaned up automatically |
+| "Another approval request in progress" | Wait for concurrent approval to complete (distributed lock) |
+| "Plan was modified during approval" | Refresh and approve latest version (TOCTOU protection) |
+| "Partial failure: Branch pushed but PR failed" | Check `partial_failure` artifact for recovery information |
+| "Artifact storage failed" | Retry logic handles transient failures (up to 3 attempts) |
 
 ### Best Practices
 

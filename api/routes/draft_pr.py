@@ -145,7 +145,8 @@ async def create_draft_pr(
         progress={"message": "Creating draft PR job..."},
         started_at=datetime.now(),
         stage=PipelineStageEnum.CREATED.value,
-        ticket_key=request.story_key
+        ticket_key=request.story_key,
+        mode=request.mode
     )
     jobs[job_id] = job
     
@@ -230,6 +231,51 @@ async def get_latest_plan(
         raise HTTPException(status_code=404, detail="Plan not found")
     
     return plan
+
+
+@router.get("/draft-pr/jobs/{job_id}/plans",
+          tags=["Draft PR"],
+          summary="List all plan versions",
+          description="Get a list of all plan versions with metadata (version, hash, created_at).")
+async def list_plan_versions(
+    job_id: str,
+    current_user: str = Depends(get_current_user)
+):
+    """List all plan versions with metadata"""
+    artifact_store = get_artifact_store()
+    
+    # Find all plan versions
+    artifacts = artifact_store.list_artifacts(job_id)
+    plan_versions = [a for a in artifacts if a.startswith('plan_v')]
+    
+    if not plan_versions:
+        return {
+            "job_id": job_id,
+            "plans": []
+        }
+    
+    # Get metadata for each plan version
+    plans_summary = []
+    for plan_name in sorted(plan_versions, key=lambda x: int(x.split('_v')[1])):
+        try:
+            version_num = int(plan_name.split('_v')[1])
+            plan_dict = artifact_store.retrieve_artifact(job_id, plan_name)
+            if plan_dict:
+                plans_summary.append({
+                    "version": version_num,
+                    "plan_hash": plan_dict.get('plan_hash', ''),
+                    "previous_version_hash": plan_dict.get('previous_version_hash'),
+                    "generated_by": plan_dict.get('generated_by', 'unknown'),
+                    "summary": plan_dict.get('plan_spec', {}).get('summary', '') if isinstance(plan_dict.get('plan_spec'), dict) else ''
+                })
+        except (ValueError, KeyError) as e:
+            logger.warning(f"Failed to parse plan version {plan_name}: {e}")
+            continue
+    
+    return {
+        "job_id": job_id,
+        "plans": plans_summary
+    }
 
 
 @router.get("/draft-pr/jobs/{job_id}/plans/{version}",
@@ -339,13 +385,38 @@ async def revise_plan(
     pipeline = _get_draft_pr_pipeline()
     workspace_path = pipeline.workspace_manager.get_workspace_path(job_id)
     
+    # Check if workspace exists - if not and OpenCode is needed, we can't revise
+    workspace_exists = workspace_path.exists()
+    use_opencode = bool(pipeline.opencode_runner)
+    
+    if use_opencode and not workspace_exists:
+        # Workspace was deleted but OpenCode is required - try to recreate it
+        logger.warning(f"Workspace for job {job_id} not found, attempting to recreate for plan revision")
+        try:
+            input_spec = artifact_store.retrieve_artifact(job_id, "input_spec")
+            if input_spec and input_spec.get('repos'):
+                workspace_path = await pipeline.workspace_manager.create_workspace(job_id, input_spec.get('repos'))
+                workspace_exists = True
+                logger.info(f"Recreated workspace for job {job_id} for plan revision")
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Workspace not found and cannot be recreated (no repos in input_spec). Cannot revise plan with OpenCode."
+                )
+        except Exception as e:
+            logger.error(f"Failed to recreate workspace for plan revision: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Workspace not found and recreation failed: {e}. Cannot revise plan with OpenCode."
+            )
+    
     try:
         new_version = await pipeline.plan_generator.revise_plan(
             job_id=job_id,
             previous_version=previous_version,
             feedback=feedback,
-            use_opencode=bool(pipeline.opencode_runner),
-            workspace_path=workspace_path if workspace_path.exists() else None
+            use_opencode=use_opencode and workspace_exists,
+            workspace_path=workspace_path if workspace_exists else None
         )
         
         # Store new version
@@ -362,6 +433,13 @@ async def revise_plan(
         if job.approved_plan_hash and job.approved_plan_hash != new_version.plan_hash:
             logger.info(f"Job {job_id}: Plan revised, invalidating previous approval")
             job.approved_plan_hash = None
+        
+        # Persist job status to Redis after revision
+        try:
+            from ..job_queue import persist_job_status
+            await persist_job_status(job_id, job.dict())
+        except Exception as e:
+            logger.warning(f"Failed to persist job status after plan revision: {e}")
         
         # Compare versions
         comparator = PlanComparator()
@@ -442,6 +520,21 @@ async def approve_plan(
     
     job = jobs[job_id]
     
+    # Check if job was cancelled
+    if job.status == "cancelled":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Job {job_id} has been cancelled and cannot be approved."
+        )
+    
+    # Check for cancellation flag in Redis (in case job status hasn't been updated yet)
+    from ..job_queue import is_job_cancelled
+    if await is_job_cancelled(job_id):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Job {job_id} has been cancelled and cannot be approved."
+        )
+    
     # Check job is in WAITING_FOR_APPROVAL stage
     if job.stage != PipelineStageEnum.WAITING_FOR_APPROVAL.value:
         raise HTTPException(
@@ -456,79 +549,161 @@ async def approve_plan(
             detail=f"Plan with hash {request.plan_hash[:8]}... is already approved. Pipeline should be executing."
         )
     
-    # Verify plan hash exists and matches latest plan
-    artifact_store = get_artifact_store()
-    artifacts = artifact_store.list_artifacts(job_id)
-    plan_versions = [a for a in artifacts if a.startswith('plan_v')]
+    # Acquire distributed lock for approval to prevent race conditions
+    from ..job_queue import get_redis_pool
+    import asyncio
     
-    if not plan_versions:
-        raise HTTPException(status_code=404, detail="No plans found for this job")
+    redis_pool = await get_redis_pool()
+    lock_key = f"draft_pr:approval_lock:{job_id}"
+    lock_timeout = 60  # Lock expires after 60 seconds (increased for network latency)
     
-    # Get latest plan version
-    latest_version_name = max(plan_versions, key=lambda x: int(x.split('_v')[1]))
-    latest_plan_dict = artifact_store.retrieve_artifact(job_id, latest_version_name)
-    
-    if not latest_plan_dict:
-        raise HTTPException(status_code=404, detail="Latest plan not found")
-    
-    latest_plan_hash = latest_plan_dict.get('plan_hash')
-    
-    # Safety check: approved plan hash must match latest plan hash
-    # This prevents approving an old plan version
-    if request.plan_hash != latest_plan_hash:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Plan hash mismatch. Latest plan hash is {latest_plan_hash[:8]}..., but approval requested for {request.plan_hash[:8]}.... You must approve the latest plan version."
-        )
-    
-    # Create approval record
-    approval = Approval(
-        job_id=job_id,
-        plan_hash=request.plan_hash,
-        approver=current_user
-    )
-    
-    # Double-check: Verify job hasn't changed state (race condition protection)
-    if job.stage != PipelineStageEnum.WAITING_FOR_APPROVAL.value:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Job state changed during approval. Current stage: {job.stage}. Please refresh and try again."
-        )
-    
-    # Verify plan still exists and matches (prevent TOCTOU - Time Of Check Time Of Use)
-    latest_plan_dict_check = artifact_store.retrieve_artifact(job_id, latest_version_name)
-    if not latest_plan_dict_check or latest_plan_dict_check.get('plan_hash') != request.plan_hash:
-        raise HTTPException(
-            status_code=409,
-            detail="Plan was modified during approval. Please refresh and approve the latest version."
-        )
-    
-    # Update job
-    job.approved_plan_hash = request.plan_hash
-    job.stage = PipelineStageEnum.APPLYING.value
-    job.progress = {"message": "Plan approved, proceeding to APPLY stage"}
-    
-    # Store approval
+    # Try to acquire lock with timeout
+    lock_acquired = False
     try:
-        artifact_store.store_artifact(job_id, "approval", approval.dict())
-    except Exception as e:
-        # Approval storage failed - rollback job state
+        # Use SET with NX (only if not exists) and EX (expiration)
+        lock_acquired = await redis_pool.set(lock_key, current_user, ex=lock_timeout, nx=True)
+        
+        if not lock_acquired:
+            # Check if lock is held by another process
+            lock_holder = await redis_pool.get(lock_key)
+            raise HTTPException(
+                status_code=409,
+                detail=f"Another approval request is in progress for this job. Please wait and try again. (Lock held by: {lock_holder or 'unknown'})"
+            )
+        
+        logger.info(f"Acquired approval lock for job {job_id} by user {current_user}")
+        
+        # Verify plan hash exists and matches latest plan
+        artifact_store = get_artifact_store()
+        artifacts = artifact_store.list_artifacts(job_id)
+        plan_versions = [a for a in artifacts if a.startswith('plan_v')]
+        
+        if not plan_versions:
+            raise HTTPException(status_code=404, detail="No plans found for this job")
+        
+        # Get latest plan version
+        latest_version_name = max(plan_versions, key=lambda x: int(x.split('_v')[1]))
+        latest_plan_dict = artifact_store.retrieve_artifact(job_id, latest_version_name)
+        
+        if not latest_plan_dict:
+            raise HTTPException(status_code=404, detail="Latest plan not found")
+        
+        latest_plan_hash = latest_plan_dict.get('plan_hash')
+        
+        # Safety check: approved plan hash must match latest plan hash
+        # This prevents approving an old plan version
+        if request.plan_hash != latest_plan_hash:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Plan hash mismatch. Latest plan hash is {latest_plan_hash[:8]}..., but approval requested for {request.plan_hash[:8]}.... You must approve the latest plan version."
+            )
+        
+        # Create approval record
+        approval = Approval(
+            job_id=job_id,
+            plan_hash=request.plan_hash,
+            approver=current_user
+        )
+        
+        # Double-check: Verify job hasn't changed state (race condition protection)
+        if job.stage != PipelineStageEnum.WAITING_FOR_APPROVAL.value:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Job state changed during approval. Current stage: {job.stage}. Please refresh and try again."
+            )
+        
+        # Verify plan still exists and matches (prevent TOCTOU - Time Of Check Time Of Use)
+        latest_plan_dict_check = artifact_store.retrieve_artifact(job_id, latest_version_name)
+        if not latest_plan_dict_check or latest_plan_dict_check.get('plan_hash') != request.plan_hash:
+            raise HTTPException(
+                status_code=409,
+                detail="Plan was modified during approval. Please refresh and approve the latest version."
+            )
+        
+        # Update job (within lock)
+        job.approved_plan_hash = request.plan_hash
+        job.stage = PipelineStageEnum.APPLYING.value
+        job.progress = {"message": "Plan approved, proceeding to APPLY stage"}
+        
+        # Persist job status to Redis before storing approval
+        try:
+            from ..job_queue import persist_job_status
+            await persist_job_status(job_id, job.dict())
+        except Exception as e:
+            logger.warning(f"Failed to persist job status before approval: {e}")
+        
+        # Store approval
+        try:
+            artifact_store.store_artifact(job_id, "approval", approval.dict())
+        except Exception as e:
+            # Approval storage failed - rollback job state
+            job.approved_plan_hash = None
+            job.stage = PipelineStageEnum.WAITING_FOR_APPROVAL.value
+            logger.error(f"Failed to store approval artifact for job {job_id}: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to store approval: {e}"
+            )
+    finally:
+        # Always release lock
+        if lock_acquired:
+            try:
+                await redis_pool.delete(lock_key)
+                logger.info(f"Released approval lock for job {job_id}")
+            except Exception as e:
+                logger.warning(f"Failed to release approval lock for job {job_id}: {e}")
+    
+    # Check for cancellation one more time before continuing pipeline
+    from ..job_queue import is_job_cancelled
+    if await is_job_cancelled(job_id):
+        # Job was cancelled - rollback approval state
         job.approved_plan_hash = None
         job.stage = PipelineStageEnum.WAITING_FOR_APPROVAL.value
-        logger.error(f"Failed to store approval artifact for job {job_id}: {e}")
+        job.progress = {"message": "Job was cancelled before pipeline continuation"}
         raise HTTPException(
-            status_code=500,
-            detail=f"Failed to store approval: {e}"
+            status_code=409,
+            detail=f"Job {job_id} was cancelled and cannot proceed with pipeline execution."
         )
     
     # Continue pipeline execution
     try:
+        import asyncio
         pipeline = _get_draft_pr_pipeline()
-        results = await pipeline.continue_pipeline_after_approval(
-            job_id=job_id,
-            approved_plan_hash=request.plan_hash,
-            cancellation_event=None
-        )
+        
+        # Create cancellation event and monitor for cancellation
+        cancellation_event = asyncio.Event()
+        
+        async def monitor_cancellation():
+            """Monitor Redis for cancellation flag and set event when detected"""
+            from ..job_queue import is_job_cancelled, clear_cancellation_flag
+            while not cancellation_event.is_set():
+                try:
+                    if await is_job_cancelled(job_id):
+                        cancellation_event.set()
+                        await clear_cancellation_flag(job_id)
+                        logger.info(f"Job {job_id} cancellation detected during approval continuation")
+                        break
+                    await asyncio.sleep(1)  # Check every second
+                except Exception as e:
+                    logger.warning(f"Error monitoring cancellation for job {job_id}: {e}")
+                    await asyncio.sleep(1)
+        
+        # Start cancellation monitor
+        monitor_task = asyncio.create_task(monitor_cancellation())
+        
+        try:
+            results = await pipeline.continue_pipeline_after_approval(
+                job_id=job_id,
+                approved_plan_hash=request.plan_hash,
+                cancellation_event=cancellation_event
+            )
+        finally:
+            # Cancel monitor task
+            monitor_task.cancel()
+            try:
+                await monitor_task
+            except asyncio.CancelledError:
+                pass
         
         # Update job with results
         job.stage = results.get('stage', PipelineStageEnum.APPLYING.value)
@@ -538,11 +713,26 @@ async def approve_plan(
             job.status = "completed"
             job.completed_at = datetime.now()
             job.progress = {"message": f"Draft PR created: {results.get('pr_results', {}).get('pr_url', 'N/A')}"}
+            # Cleanup workspace after successful completion
+            workspace_path = pipeline.workspace_manager.get_workspace_path(job_id)
+            if workspace_path.exists():
+                await pipeline.workspace_manager.cleanup_workspace(job_id)
         elif results.get('stage') == 'FAILED':
             job.status = "failed"
             job.completed_at = datetime.now()
             job.error = results.get('error', 'Unknown error')
             job.progress = {"message": f"Pipeline failed: {results.get('error', 'Unknown error')}"}
+            # Cleanup workspace on failure
+            workspace_path = pipeline.workspace_manager.get_workspace_path(job_id)
+            if workspace_path.exists():
+                await pipeline.workspace_manager.cleanup_workspace(job_id)
+        
+        # Persist job status to Redis
+        try:
+            from ..job_queue import persist_job_status
+            await persist_job_status(job_id, job.dict())
+        except Exception as e:
+            logger.warning(f"Failed to persist job status to Redis: {e}")
         
         return {
             "approved": True,
@@ -551,10 +741,38 @@ async def approve_plan(
             "results": results
         }
         
+    except asyncio.CancelledError as e:
+        logger.info(f"Job {job_id} was cancelled during approval continuation: {e}")
+        job.status = "cancelled"
+        job.completed_at = datetime.now()
+        job.progress = {"message": "Job was cancelled"}
+        job.stage = "FAILED"
+        
+        # Cleanup workspace on cancellation
+        try:
+            pipeline = _get_draft_pr_pipeline()
+            workspace_path = pipeline.workspace_manager.get_workspace_path(job_id)
+            if workspace_path.exists():
+                await pipeline.workspace_manager.cleanup_workspace(job_id)
+        except Exception as cleanup_error:
+            logger.warning(f"Failed to cleanup workspace for job {job_id} after cancellation: {cleanup_error}")
+        
+        raise HTTPException(status_code=409, detail=f"Job was cancelled: {e}")
+        
     except Exception as e:
         logger.error(f"Failed to continue pipeline after approval: {e}", exc_info=True)
         job.status = "failed"
         job.error = str(e)
+        
+        # Cleanup workspace on exception
+        try:
+            pipeline = _get_draft_pr_pipeline()
+            workspace_path = pipeline.workspace_manager.get_workspace_path(job_id)
+            if workspace_path.exists():
+                await pipeline.workspace_manager.cleanup_workspace(job_id)
+        except Exception as cleanup_error:
+            logger.warning(f"Failed to cleanup workspace for job {job_id} after approval exception: {cleanup_error}")
+        
         raise HTTPException(status_code=500, detail=f"Failed to continue pipeline: {e}")
 
 

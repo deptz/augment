@@ -992,6 +992,7 @@ A 1-2 sentence summary of why this task was necessary, based on PRD/RFC goals.
 - `POST /draft-pr/create` - Create a new draft PR job (PLAN stage)
 - `GET /draft-pr/jobs/{job_id}` - Get job status and current stage
 - `GET /draft-pr/jobs/{job_id}/plan` - Get latest plan version
+- `GET /draft-pr/jobs/{job_id}/plans` - List all plan versions with metadata
 - `GET /draft-pr/jobs/{job_id}/plans/{version}` - Get specific plan version
 - `POST /draft-pr/jobs/{job_id}/revise-plan` - Submit feedback and generate revised plan
 - `GET /draft-pr/jobs/{job_id}/plans/compare` - Compare two plan versions

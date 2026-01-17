@@ -203,4 +203,5 @@ class JobStatus(BaseModel):
     approved_plan_hash: Optional[str] = Field(None, description="Hash of approved plan (for draft_pr jobs)")
     workspace_fingerprint: Optional[Dict[str, Any]] = Field(None, description="Workspace fingerprint (for draft_pr jobs)")
     artifacts: Optional[Dict[str, Any]] = Field(None, description="Artifact references (for draft_pr jobs)")
+    mode: Optional[str] = Field(None, description="Pipeline mode: 'normal' or 'yolo' (for draft_pr jobs)")
 

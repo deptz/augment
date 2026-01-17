@@ -2385,18 +2385,66 @@ async def process_draft_pr_worker(
             verification_config=verification_config
         )
         
-        # Execute pipeline
-        results = await pipeline.execute_pipeline(
-            job_id=job_id,
-            story_key=story_key,
-            story_summary=story_summary,
-            story_description=story_description,
-            repos=repos,
-            scope=scope,
-            additional_context=additional_context,
-            mode=mode,
-            cancellation_event=None  # TODO: Support cancellation
-        )
+        # Check for cancellation before starting pipeline
+        if await check_cancellation(job_id, job):
+            # Cleanup workspace if it exists
+            workspace_path = workspace_manager.get_workspace_path(job_id)
+            if workspace_path.exists():
+                await workspace_manager.cleanup_workspace(job_id)
+            from ..dependencies import unregister_ticket_job
+            unregister_ticket_job(story_key)
+            return
+        
+        # Create cancellation event and monitor for cancellation
+        import asyncio
+        cancellation_event = asyncio.Event()
+        
+        async def monitor_cancellation():
+            """Monitor Redis for cancellation flag and set event when detected"""
+            from ..job_queue import is_job_cancelled, clear_cancellation_flag
+            while not cancellation_event.is_set():
+                try:
+                    if await is_job_cancelled(job_id):
+                        cancellation_event.set()
+                        await clear_cancellation_flag(job_id)
+                        logger.info(f"Job {job_id} cancellation detected, setting cancellation event")
+                        break
+                    await asyncio.sleep(1)  # Check every second
+                except Exception as e:
+                    logger.warning(f"Error monitoring cancellation for job {job_id}: {e}")
+                    await asyncio.sleep(1)
+        
+        # Start cancellation monitor
+        monitor_task = asyncio.create_task(monitor_cancellation())
+        
+        try:
+            # Execute pipeline
+            results = await pipeline.execute_pipeline(
+                job_id=job_id,
+                story_key=story_key,
+                story_summary=story_summary,
+                story_description=story_description,
+                repos=repos,
+                scope=scope,
+                additional_context=additional_context,
+                mode=mode,
+                cancellation_event=cancellation_event
+            )
+        finally:
+            # Cancel monitor task
+            monitor_task.cancel()
+            try:
+                await monitor_task
+            except asyncio.CancelledError:
+                pass
+            
+            # If cancelled, cleanup workspace
+            if cancellation_event.is_set():
+                workspace_path = workspace_manager.get_workspace_path(job_id)
+                if workspace_path.exists():
+                    await workspace_manager.cleanup_workspace(job_id)
+                from ..dependencies import unregister_ticket_job
+                unregister_ticket_job(story_key)
         
         # Update job with results
         job.stage = results.get('stage', 'FAILED')
@@ -2406,16 +2454,53 @@ async def process_draft_pr_worker(
             job.status = "completed"
             job.completed_at = datetime.now()
             job.progress = {"message": f"Draft PR created: {results.get('pr_results', {}).get('pr_url', 'N/A')}"}
+            # Cleanup workspace after successful completion
+            workspace_path = workspace_manager.get_workspace_path(job_id)
+            if workspace_path.exists():
+                await workspace_manager.cleanup_workspace(job_id)
         elif results.get('stage') == 'WAITING_FOR_APPROVAL':
             job.status = "processing"
             job.progress = {"message": "Waiting for plan approval"}
+            # Workspace is preserved for approval stage - will be cleaned up after completion or failure
         else:
             job.status = "failed"
             job.completed_at = datetime.now()
             job.error = results.get('error', 'Unknown error')
             job.progress = {"message": f"Pipeline failed: {results.get('error', 'Unknown error')}"}
+            # Cleanup workspace on failure
+            workspace_path = workspace_manager.get_workspace_path(job_id)
+            if workspace_path.exists():
+                await workspace_manager.cleanup_workspace(job_id)
+        
+        # Persist job status to Redis
+        try:
+            from ..job_queue import persist_job_status
+            await persist_job_status(job_id, job.dict())
+        except Exception as e:
+            logger.warning(f"Failed to persist job status to Redis: {e}")
         
         logger.info(f"Job {job_id} completed with stage: {results.get('stage')}")
+        
+    except asyncio.CancelledError as e:
+        logger.info(f"Job {job_id} was cancelled: {e}")
+        if job_id in jobs:
+            job = jobs[job_id]
+            job.status = "cancelled"
+            job.completed_at = datetime.now()
+            job.progress = {"message": "Job was cancelled"}
+            job.stage = "FAILED"
+        
+        # Cleanup workspace on cancellation
+        try:
+            workspace_path = workspace_manager.get_workspace_path(job_id)
+            if workspace_path.exists():
+                await workspace_manager.cleanup_workspace(job_id)
+        except Exception as cleanup_error:
+            logger.warning(f"Failed to cleanup workspace for job {job_id} after cancellation: {cleanup_error}")
+        
+        from ..dependencies import unregister_ticket_job
+        unregister_ticket_job(story_key)
+        return
         
     except Exception as e:
         logger.error(f"Job {job_id} failed: {e}", exc_info=True)
@@ -2426,4 +2511,15 @@ async def process_draft_pr_worker(
             job.error = str(e)
             job.progress = {"message": f"Job failed: {str(e)}"}
             job.stage = "FAILED"
+        
+        # Cleanup workspace on exception
+        try:
+            workspace_path = workspace_manager.get_workspace_path(job_id)
+            if workspace_path.exists():
+                await workspace_manager.cleanup_workspace(job_id)
+        except Exception as cleanup_error:
+            logger.warning(f"Failed to cleanup workspace for job {job_id} after exception: {cleanup_error}")
+        
+        from ..dependencies import unregister_ticket_job
+        unregister_ticket_job(story_key)
         raise

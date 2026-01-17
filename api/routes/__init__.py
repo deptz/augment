@@ -16,6 +16,7 @@ from .jira_operations import router as jira_operations_router
 from .prompt_testing import router as prompt_testing_router
 from .sprint_planning import router as sprint_planning_router
 from .team_members import router as team_members_router
+from .draft_pr import router as draft_pr_router
 
 # Create main router
 api_router = APIRouter()
@@ -32,3 +33,4 @@ api_router.include_router(jira_operations_router)
 api_router.include_router(prompt_testing_router)
 api_router.include_router(sprint_planning_router)
 api_router.include_router(team_members_router)
+api_router.include_router(draft_pr_router)

@@ -3,6 +3,7 @@ Draft PR Pipeline
 Orchestrates the complete PLAN → APPROVAL → APPLY → VERIFY → PACKAGE → DRAFT_PR workflow
 """
 import logging
+import asyncio
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 from datetime import datetime
@@ -190,6 +191,11 @@ class DraftPRPipeline:
             # STAGE 3: APPLY
             logger.info(f"Job {job_id}: Starting APPLY stage")
             
+            # Check for cancellation before APPLY
+            if cancellation_event and cancellation_event.is_set():
+                await self.workspace_manager.cleanup_workspace(job_id)
+                raise asyncio.CancelledError(f"Job {job_id} was cancelled before APPLY stage")
+            
             if not self.opencode_runner:
                 raise ValueError("OpenCode runner required for APPLY stage")
             
@@ -201,6 +207,11 @@ class DraftPRPipeline:
                 cancellation_event=cancellation_event
             )
             
+            # Check for cancellation after APPLY
+            if cancellation_event and cancellation_event.is_set():
+                await self.workspace_manager.cleanup_workspace(job_id)
+                raise asyncio.CancelledError(f"Job {job_id} was cancelled after APPLY stage")
+            
             # Store git diff
             git_diff = apply_results.get("git_diff", "")
             self.artifact_store.store_artifact(job_id, "git_diff", git_diff)
@@ -210,6 +221,11 @@ class DraftPRPipeline:
             # STAGE 4: VERIFY
             current_stage = PipelineStage.VERIFYING
             logger.info(f"Job {job_id}: Starting VERIFY stage")
+            
+            # Check for cancellation before VERIFY
+            if cancellation_event and cancellation_event.is_set():
+                await self.workspace_manager.cleanup_workspace(job_id)
+                raise asyncio.CancelledError(f"Job {job_id} was cancelled before VERIFY stage")
             
             verifier = Verifier(
                 test_command=self.verification_config.get("test_command"),
@@ -223,17 +239,35 @@ class DraftPRPipeline:
                 repos=repos
             )
             
+            # Check for cancellation after VERIFY
+            if cancellation_event and cancellation_event.is_set():
+                await self.workspace_manager.cleanup_workspace(job_id)
+                raise asyncio.CancelledError(f"Job {job_id} was cancelled after VERIFY stage")
+            
             self.artifact_store.store_artifact(job_id, "validation_logs", verification_results)
+            
+            # Check if any verification commands were configured
+            has_verification = bool(
+                self.verification_config.get("test_command") or
+                self.verification_config.get("lint_command") or
+                self.verification_config.get("build_command")
+            )
             
             if not verification_results.get("passed"):
                 current_stage = PipelineStage.FAILED
+                error_msg = "Verification failed"
+                if not has_verification:
+                    error_msg += " (no verification commands configured - this should not happen)"
                 return {
                     "stage": current_stage,
-                    "error": "Verification failed",
+                    "error": error_msg,
                     "verification_results": verification_results
                 }
             
-            logger.info(f"Job {job_id}: Verification passed")
+            if has_verification:
+                logger.info(f"Job {job_id}: Verification passed")
+            else:
+                logger.warning(f"Job {job_id}: No verification commands configured - skipping verification")
             
             # STAGE 5: PACKAGE
             current_stage = PipelineStage.PACKAGING
@@ -258,21 +292,44 @@ class DraftPRPipeline:
             story_key = input_spec.get('story_key') if input_spec else None
             
             draft_pr_creator = DraftPRCreator(workspace_path, self.bitbucket_client)
-            pr_results = draft_pr_creator.create_draft_pr(
-                plan_version=approved_plan,
-                pr_metadata=package_results["pr_metadata"],
-                job_id=job_id,
-                ticket_key=story_key
-            )
-            
-            self.artifact_store.store_artifact(job_id, "pr_metadata", {
-                **package_results["pr_metadata"],
-                **pr_results
-            })
+            try:
+                # Default branch detection is handled by DraftPRCreator.create_draft_pr()
+                # It will automatically detect the default branch if "main" is provided
+                pr_results = draft_pr_creator.create_draft_pr(
+                    plan_version=approved_plan,
+                    pr_metadata=package_results["pr_metadata"],
+                    job_id=job_id,
+                    ticket_key=story_key
+                )
+                
+                self.artifact_store.store_artifact(job_id, "pr_metadata", {
+                    **package_results["pr_metadata"],
+                    **pr_results
+                })
+            except DraftPRCreatorError as e:
+                # Check if this is a partial failure (branch pushed but PR failed)
+                error_msg = str(e)
+                if "was pushed successfully" in error_msg and "PR creation failed" in error_msg:
+                    # Partial failure - store recovery information
+                    from src.draft_pr_creator import DraftPRCreatorError
+                    partial_failure = {
+                        "error": error_msg,
+                        "stage": "DRAFTING",
+                        "recoverable": True,
+                        "message": "Branch was pushed but PR creation failed. Branch can be used to manually create PR."
+                    }
+                    self.artifact_store.store_artifact(job_id, "partial_failure", partial_failure)
+                    logger.error(f"Job {job_id}: Partial failure during PR creation: {error_msg}")
+                    raise  # Re-raise to mark job as failed
+                else:
+                    # Complete failure - re-raise
+                    raise
             
             # STAGE 7: COMPLETED
             current_stage = PipelineStage.COMPLETED
             logger.info(f"Job {job_id}: Pipeline completed, PR #{pr_results.get('pr_id')} created")
+            
+            # Note: Job status persistence is handled by the worker/API layer, not the pipeline
             
             return {
                 "stage": current_stage,
@@ -282,6 +339,12 @@ class DraftPRPipeline:
                 "pr_results": pr_results
             }
             
+        except asyncio.CancelledError as e:
+            current_stage = PipelineStage.FAILED
+            logger.info(f"Job {job_id}: Pipeline cancelled at stage {current_stage}: {e}")
+            # Workspace cleanup handled by caller
+            raise  # Re-raise to propagate cancellation
+        
         except Exception as e:
             current_stage = PipelineStage.FAILED
             logger.error(f"Job {job_id}: Pipeline failed at stage {current_stage}: {e}", exc_info=True)
@@ -342,8 +405,17 @@ class DraftPRPipeline:
             current_stage = PipelineStage.PLANNING
             logger.info(f"Job {job_id}: Starting PLANNING stage")
             
+            # Check for cancellation before starting
+            if cancellation_event and cancellation_event.is_set():
+                raise asyncio.CancelledError(f"Job {job_id} was cancelled during PLANNING stage")
+            
             # Create workspace
             workspace_path = await self.workspace_manager.create_workspace(job_id, repos)
+            
+            # Check for cancellation after workspace creation
+            if cancellation_event and cancellation_event.is_set():
+                await self.workspace_manager.cleanup_workspace(job_id)
+                raise asyncio.CancelledError(f"Job {job_id} was cancelled after workspace creation")
             
             # Generate workspace fingerprint
             workspace_fingerprint = self._generate_workspace_fingerprint(repos, scope)
@@ -363,6 +435,11 @@ class DraftPRPipeline:
                 workspace_path=workspace_path,
                 cancellation_event=cancellation_event
             )
+            
+            # Check for cancellation after plan generation
+            if cancellation_event and cancellation_event.is_set():
+                await self.workspace_manager.cleanup_workspace(job_id)
+                raise asyncio.CancelledError(f"Job {job_id} was cancelled after plan generation")
             
             plan_versions.append(plan_v1)
             self.artifact_store.store_artifact(job_id, f"plan_v{plan_v1.version}", plan_v1.dict())
@@ -406,6 +483,11 @@ class DraftPRPipeline:
             current_stage = PipelineStage.APPLYING
             logger.info(f"Job {job_id}: Starting APPLY stage")
             
+            # Check for cancellation before APPLY
+            if cancellation_event and cancellation_event.is_set():
+                await self.workspace_manager.cleanup_workspace(job_id)
+                raise asyncio.CancelledError(f"Job {job_id} was cancelled before APPLY stage")
+            
             if not self.opencode_runner:
                 raise ValueError("OpenCode runner required for APPLY stage")
             
@@ -417,6 +499,11 @@ class DraftPRPipeline:
                 cancellation_event=cancellation_event
             )
             
+            # Check for cancellation after APPLY
+            if cancellation_event and cancellation_event.is_set():
+                await self.workspace_manager.cleanup_workspace(job_id)
+                raise asyncio.CancelledError(f"Job {job_id} was cancelled after APPLY stage")
+            
             # Store git diff
             git_diff = apply_results.get("git_diff", "")
             self.artifact_store.store_artifact(job_id, "git_diff", git_diff)
@@ -426,6 +513,11 @@ class DraftPRPipeline:
             # STAGE 4: VERIFY
             current_stage = PipelineStage.VERIFYING
             logger.info(f"Job {job_id}: Starting VERIFY stage")
+            
+            # Check for cancellation before VERIFY
+            if cancellation_event and cancellation_event.is_set():
+                await self.workspace_manager.cleanup_workspace(job_id)
+                raise asyncio.CancelledError(f"Job {job_id} was cancelled before VERIFY stage")
             
             verifier = Verifier(
                 test_command=self.verification_config.get("test_command"),
@@ -439,17 +531,35 @@ class DraftPRPipeline:
                 repos=repos
             )
             
+            # Check for cancellation after VERIFY
+            if cancellation_event and cancellation_event.is_set():
+                await self.workspace_manager.cleanup_workspace(job_id)
+                raise asyncio.CancelledError(f"Job {job_id} was cancelled after VERIFY stage")
+            
             self.artifact_store.store_artifact(job_id, "validation_logs", verification_results)
+            
+            # Check if any verification commands were configured
+            has_verification = bool(
+                self.verification_config.get("test_command") or
+                self.verification_config.get("lint_command") or
+                self.verification_config.get("build_command")
+            )
             
             if not verification_results.get("passed"):
                 current_stage = PipelineStage.FAILED
+                error_msg = "Verification failed"
+                if not has_verification:
+                    error_msg += " (no verification commands configured - this should not happen)"
                 return {
                     "stage": current_stage,
-                    "error": "Verification failed",
+                    "error": error_msg,
                     "verification_results": verification_results
                 }
             
-            logger.info(f"Job {job_id}: Verification passed")
+            if has_verification:
+                logger.info(f"Job {job_id}: Verification passed")
+            else:
+                logger.warning(f"Job {job_id}: No verification commands configured - skipping verification")
             
             # STAGE 5: PACKAGE
             current_stage = PipelineStage.PACKAGING
@@ -470,11 +580,17 @@ class DraftPRPipeline:
                 raise ValueError("Bitbucket client required for DRAFT_PR stage")
             
             draft_pr_creator = DraftPRCreator(workspace_path, self.bitbucket_client)
+            
+            # Default branch detection is handled by DraftPRCreator
+            # Just use "main" as default - DraftPRCreator will detect the actual default branch
+            destination_branch = "main"
+            
             pr_results = draft_pr_creator.create_draft_pr(
                 plan_version=plan_v1,
                 pr_metadata=package_results["pr_metadata"],
                 job_id=job_id,
-                ticket_key=story_key
+                ticket_key=story_key,
+                destination_branch=destination_branch
             )
             
             self.artifact_store.store_artifact(job_id, "pr_metadata", {
@@ -496,6 +612,12 @@ class DraftPRPipeline:
                 "pr_results": pr_results
             }
             
+        except asyncio.CancelledError as e:
+            current_stage = PipelineStage.FAILED
+            logger.info(f"Job {job_id}: Pipeline cancelled at stage {current_stage}: {e}")
+            # Workspace cleanup handled by caller
+            raise  # Re-raise to propagate cancellation
+        
         except Exception as e:
             current_stage = PipelineStage.FAILED
             logger.error(f"Job {job_id}: Pipeline failed at stage {current_stage}: {e}", exc_info=True)

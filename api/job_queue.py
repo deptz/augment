@@ -4,7 +4,7 @@ Redis connection pool management for ARQ background jobs
 """
 from arq import create_pool, ArqRedis
 from arq.connections import RedisSettings
-from typing import Optional
+from typing import Optional, Dict, Any
 import os
 import logging
 
@@ -117,4 +117,80 @@ async def clear_cancellation_flag(job_id: str):
         logger.debug(f"Cancellation flag cleared for job {job_id}")
     except Exception as e:
         logger.warning(f"Failed to clear cancellation flag for job {job_id}: {e}")
+
+
+# Job status persistence constants and functions
+JOB_STATUS_KEY_PREFIX = "job:status:"
+JOB_STATUS_TTL = 86400 * 7  # 7 days - job status persists for a week
+
+
+async def persist_job_status(job_id: str, job_status: dict) -> bool:
+    """
+    Persist job status to Redis for crash recovery.
+    
+    Args:
+        job_id: The ID of the job
+        job_status: Job status dictionary (from JobStatus.dict())
+        
+    Returns:
+        True if persistence succeeded
+    """
+    try:
+        import json
+        from datetime import datetime
+        
+        pool = await get_redis_pool()
+        key = f"{JOB_STATUS_KEY_PREFIX}{job_id}"
+        
+        # Serialize job status, handling datetime objects
+        def json_serializer(obj):
+            if isinstance(obj, datetime):
+                return obj.isoformat()
+            raise TypeError(f"Type {type(obj)} not serializable")
+        
+        status_json = json.dumps(job_status, default=json_serializer)
+        await pool.set(key, status_json, ex=JOB_STATUS_TTL)
+        logger.debug(f"Persisted job status for {job_id} to Redis")
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to persist job status for {job_id}: {e}")
+        return False
+
+
+async def retrieve_job_status(job_id: str) -> Optional[dict]:
+    """
+    Retrieve job status from Redis.
+    
+    Args:
+        job_id: The ID of the job
+        
+    Returns:
+        Job status dictionary or None if not found
+    """
+    try:
+        import json
+        from datetime import datetime
+        
+        pool = await get_redis_pool()
+        key = f"{JOB_STATUS_KEY_PREFIX}{job_id}"
+        
+        status_json = await pool.get(key)
+        if not status_json:
+            return None
+        
+        # Deserialize job status, handling datetime strings
+        def json_deserializer(dct):
+            for key, value in dct.items():
+                if isinstance(value, str) and 'T' in value and ('+' in value or value.endswith('Z')):
+                    try:
+                        dct[key] = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                    except (ValueError, AttributeError):
+                        pass
+            return dct
+        
+        status = json.loads(status_json)
+        return status
+    except Exception as e:
+        logger.warning(f"Failed to retrieve job status for {job_id}: {e}")
+        return None
 

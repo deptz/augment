@@ -15,6 +15,11 @@ logger = logging.getLogger(__name__)
 ARTIFACT_BASE_DIR = Path("/tmp/augment/artifacts")
 
 
+class ArtifactStoreError(Exception):
+    """Exception raised for artifact store errors"""
+    pass
+
+
 class ArtifactStore:
     """
     Manages artifact persistence for draft PR orchestrator jobs.
@@ -45,16 +50,69 @@ class ArtifactStore:
         job_id: str,
         artifact_type: str,
         artifact_data: Any,
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        max_retries: int = 3
     ) -> str:
         """
-        Store an artifact for a job.
+        Store an artifact for a job with retry logic.
         
         Args:
             job_id: Job identifier
             artifact_type: Type of artifact (input_spec, plan_v1, plan_v2, git_diff, validation_logs, etc.)
             artifact_data: The artifact data (dict, string, bytes, etc.)
             metadata: Optional metadata about the artifact
+            max_retries: Maximum number of retry attempts (default: 3)
+            
+        Returns:
+            Path to stored artifact (relative to base_dir)
+            
+        Raises:
+            ArtifactStoreError: If storage fails after all retries
+        """
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                return self._store_artifact_internal(job_id, artifact_type, artifact_data, metadata)
+            except (OSError, IOError, PermissionError) as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    logger.warning(
+                        f"Failed to store artifact {artifact_type} for job {job_id} (attempt {attempt + 1}/{max_retries}): {e}. Retrying..."
+                    )
+                    import time
+                    time.sleep(0.5 * (attempt + 1))  # Exponential backoff
+                    continue
+                else:
+                    logger.error(f"Failed to store artifact {artifact_type} for job {job_id} after {max_retries} attempts: {e}")
+                    raise ArtifactStoreError(
+                        f"Failed to store artifact {artifact_type} for job {job_id} after {max_retries} attempts: {e}"
+                    )
+            except Exception as e:
+                # Non-retryable errors (e.g., validation errors)
+                logger.error(f"Non-retryable error storing artifact {artifact_type} for job {job_id}: {e}")
+                raise ArtifactStoreError(f"Failed to store artifact {artifact_type} for job {job_id}: {e}")
+        
+        # Should never reach here, but just in case
+        raise ArtifactStoreError(
+            f"Failed to store artifact {artifact_type} for job {job_id} after {max_retries} attempts: {last_error}"
+        )
+    
+    def _store_artifact_internal(
+        self,
+        job_id: str,
+        artifact_type: str,
+        artifact_data: Any,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """
+        Internal method to store an artifact (without retry logic).
+        
+        Args:
+            job_id: Job identifier
+            artifact_type: Type of artifact
+            artifact_data: The artifact data
+            metadata: Optional metadata
             
         Returns:
             Path to stored artifact (relative to base_dir)
@@ -120,6 +178,16 @@ class ArtifactStore:
         if metadata:
             metadata_path = job_dir / f"{artifact_type}.metadata.json"
             metadata_path.write_text(json.dumps(metadata, indent=2, default=str), encoding='utf-8')
+        
+        # Validate that artifact was stored successfully
+        if not file_path.exists():
+            raise ArtifactStoreError(f"Artifact file was not created: {file_path}")
+        
+        # Verify file is readable
+        try:
+            file_path.read_text(encoding='utf-8')
+        except Exception as e:
+            raise ArtifactStoreError(f"Stored artifact is not readable: {e}")
         
         logger.info(f"Stored artifact {artifact_type} for job {job_id} at {file_path}")
         return str(file_path.relative_to(self.base_dir))
