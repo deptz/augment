@@ -119,6 +119,24 @@ git:
   username: ${GIT_USERNAME:}  # Git username for authentication
   password: ${GIT_PASSWORD:}  # Git password/token for authentication
 
+# MCP Server Configuration (Optional)
+# Model Context Protocol servers for external data access
+# MCP servers run as persistent services via docker-compose.mcp.yml
+mcp:
+  network_name: ${MCP_NETWORK_NAME:augment-mcp-network}  # Docker network name for MCP services
+  bitbucket:
+    enabled: ${MCP_BITBUCKET_ENABLED:false}  # Enable Bitbucket MCP server
+    url: ${MCP_BITBUCKET_URL:http://bitbucket-mcp:7001/mcp}  # MCP server URL (Docker network hostname)
+    hostname: ${MCP_BITBUCKET_HOSTNAME:bitbucket-mcp}  # Docker network hostname
+    port: ${MCP_BITBUCKET_PORT:7001}  # MCP server port
+  atlassian:
+    enabled: ${MCP_ATLASSIAN_ENABLED:false}  # Enable Atlassian MCP server
+    url: ${MCP_ATLASSIAN_URL:http://atlassian-mcp:7002/mcp}  # MCP server URL (Docker network hostname)
+    hostname: ${MCP_ATLASSIAN_HOSTNAME:atlassian-mcp}  # Docker network hostname
+    port: ${MCP_ATLASSIAN_PORT:7002}  # MCP server port
+  policy:
+    max_calls_per_run: ${MCP_MAX_CALLS:50}  # Maximum MCP calls per OpenCode run
+
 # Redis Configuration
 # Used for ARQ background job queue
 redis:

@@ -1,0 +1,112 @@
+version: '3.8'
+
+networks:
+  augment-mcp:
+    name: augment-mcp-network
+    driver: bridge
+
+services:
+  bitbucket-mcp-terbang-ventures:
+    image: node:20-alpine
+    container_name: augment-bitbucket-mcp-terbang-ventures
+    working_dir: /app
+    entrypoint: ["/bin/sh"]
+    command:
+      - -c
+      - |
+        apk add --no-cache wget git 2>&1 || echo 'Packages may already be installed' &&
+        export ATLASSIAN_USER_EMAIL="$${BITBUCKET_EMAIL}" &&
+        export ATLASSIAN_API_TOKEN="$${BITBUCKET_API_TOKEN}" &&
+        export BITBUCKET_DEFAULT_WORKSPACE="$${BITBUCKET_WORKSPACE}" &&
+        export PORT=7001 &&
+        export TRANSPORT_MODE=http &&
+        echo "Starting Bitbucket MCP server for workspace: $${BITBUCKET_WORKSPACE} on port 7001" &&
+        echo "Transport mode: http (SSE)" &&
+        echo "MCP endpoint: http://0.0.0.0:7001/mcp" &&
+        if [ -z "$${ATLASSIAN_USER_EMAIL}" ] || [ -z "$${ATLASSIAN_API_TOKEN}" ]; then
+          echo "ERROR: Missing credentials" >&2
+          exit 1
+        fi &&
+        echo "Credentials configured for: $${ATLASSIAN_USER_EMAIL}" &&
+        echo "Launching MCP server..." &&
+        exec npx -y @aashari/mcp-server-atlassian-bitbucket@latest 2>&1
+    ports:
+      - "7001:7001"
+    environment:
+      - JIRA_SERVER_URL=${JIRA_SERVER_URL}
+      - CONFLUENCE_SERVER_URL=${CONFLUENCE_SERVER_URL}
+      - BITBUCKET_EMAIL=${BITBUCKET_EMAIL}
+      - BITBUCKET_API_TOKEN=${BITBUCKET_API_TOKEN}
+      - BITBUCKET_WORKSPACE=terbang-ventures
+      - BITBUCKET_URL=https://api.bitbucket.org/2.0
+      - PORT=7001
+      - TRANSPORT_MODE=http
+    networks:
+      - augment-mcp
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7001/ 2>/dev/null || wget --no-verbose --tries=1 --spider http://localhost:7001/mcp 2>/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  atlassian-mcp:
+    image: ghcr.io/sooperset/mcp-atlassian:latest
+    container_name: augment-atlassian-mcp
+    entrypoint: ["/bin/sh"]
+    command:
+      - -c
+      - |
+        export JIRA_URL="$${JIRA_SERVER_URL}" &&
+        export CONFLUENCE_URL="$${CONFLUENCE_SERVER_URL}" &&
+        export JIRA_USERNAME="$${JIRA_USERNAME}" &&
+        export JIRA_API_TOKEN="$${JIRA_API_TOKEN}" &&
+        export CONFLUENCE_USERNAME="$${CONFLUENCE_USERNAME:-$${JIRA_USERNAME}}" &&
+        export CONFLUENCE_API_TOKEN="$${CONFLUENCE_API_TOKEN:-$${JIRA_API_TOKEN}}" &&
+        echo "Starting Atlassian MCP server on port 7002" &&
+        echo "JIRA_URL: $${JIRA_URL}" &&
+        echo "CONFLUENCE_URL: $${CONFLUENCE_URL}" &&
+        (apk add --no-cache wget curl 2>/dev/null || (apt-get update && apt-get install -y wget curl) 2>/dev/null || true) &&
+        if command -v mcp-atlassian >/dev/null 2>&1; then
+        echo "Found mcp-atlassian command, starting server..." &&
+        exec mcp-atlassian --transport streamable-http --port 7002 --host 0.0.0.0
+        elif command -v uvx >/dev/null 2>&1; then
+        echo "Found uvx, using it to run mcp-atlassian..." &&
+        exec uvx mcp-atlassian --transport streamable-http --port 7002 --host 0.0.0.0
+        elif python3 -m mcp_atlassian --help >/dev/null 2>&1; then
+        echo "Found python3 mcp_atlassian module, starting server..." &&
+        exec python3 -m mcp_atlassian --transport streamable-http --port 7002 --host 0.0.0.0
+        elif python -m mcp_atlassian --help >/dev/null 2>&1; then
+        echo "Found python mcp_atlassian module, starting server..." &&
+        exec python -m mcp_atlassian --transport streamable-http --port 7002 --host 0.0.0.0
+        else
+        echo "ERROR: Could not find mcp-atlassian command or module." &&
+        echo "Available in PATH: $$(echo $$PATH)" &&
+        echo "Checking for commands:" &&
+        (command -v mcp-atlassian || echo "  mcp-atlassian: not found") &&
+        (command -v uvx || echo "  uvx: not found") &&
+        (command -v python3 || echo "  python3: not found") &&
+        (command -v python || echo "  python: not found") &&
+        echo "The image may have a different entrypoint. Check image documentation." &&
+        echo "Container will exit with error." &&
+        exit 1
+        fi
+    ports:
+      - "7002:7002"
+    environment:
+      - JIRA_SERVER_URL=${JIRA_SERVER_URL}
+      - JIRA_USERNAME=${JIRA_USERNAME}
+      - JIRA_API_TOKEN=${JIRA_API_TOKEN}
+      - CONFLUENCE_SERVER_URL=${CONFLUENCE_SERVER_URL}
+      - CONFLUENCE_USERNAME=${CONFLUENCE_USERNAME:-${JIRA_USERNAME}}
+      - CONFLUENCE_API_TOKEN=${CONFLUENCE_API_TOKEN:-${JIRA_API_TOKEN}}
+    networks:
+      - augment-mcp
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7002/health 2>/dev/null || wget --no-verbose --tries=1 --spider http://localhost:7002/ 2>/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s

@@ -90,8 +90,13 @@ async def main():
                     logger.info(f"Cleaned up {workspace_count} orphaned workspaces")
                 
                 # Cleanup orphaned containers and pre-pull image
+                # Get MCP network name if MCP is configured (for consistency, though not used during cleanup)
+                mcp_config = config.get_mcp_config()
+                mcp_network_name = mcp_config.get('network_name') if mcp_config else None
+                
                 opencode_runner = OpenCodeRunner(
-                    docker_image=opencode_config.get('docker_image')
+                    docker_image=opencode_config.get('docker_image'),
+                    mcp_network_name=mcp_network_name
                 )
                 if opencode_runner.is_docker_available():
                     container_count = await opencode_runner.cleanup_orphaned_containers()

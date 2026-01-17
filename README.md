@@ -324,6 +324,28 @@ CONFLUENCE_USERNAME=your-email@company.com
 CONFLUENCE_API_TOKEN=your-confluence-api-token
 ```
 
+**MCP Servers (for OpenCode external data access - Optional):**
+```bash
+# MCP Server Configuration
+MCP_BITBUCKET_ENABLED=true
+MCP_ATLASSIAN_ENABLED=true
+MCP_NETWORK_NAME=augment-mcp-network
+MCP_MAX_CALLS=50
+
+# MCP Server Images (optional, have defaults)
+MCP_ATLASSIAN_IMAGE=ghcr.io/sooperset/mcp-atlassian:latest
+MCP_BITBUCKET_IMAGE=node:20-alpine
+```
+
+**IMPORTANT:** MCP servers use the **SAME environment variables as the main application** (configured above):
+- `JIRA_SERVER_URL`, `JIRA_USERNAME`, `JIRA_API_TOKEN` (from JIRA Configuration)
+- `CONFLUENCE_SERVER_URL`, `CONFLUENCE_USERNAME`, `CONFLUENCE_API_TOKEN` (from Confluence Configuration)
+- `BITBUCKET_EMAIL`, `BITBUCKET_API_TOKEN`, `BITBUCKET_WORKSPACES` (from Bitbucket Configuration)
+
+**Multi-Workspace Support:** If `BITBUCKET_WORKSPACES` contains multiple workspaces, one Bitbucket MCP instance is created per workspace automatically.
+
+**Note:** MCP servers use the **SAME environment variables as the main application** (`JIRA_SERVER_URL`, `CONFLUENCE_SERVER_URL`, `BITBUCKET_EMAIL`). No duplicate variables needed! If `BITBUCKET_WORKSPACES` contains multiple workspaces, the system automatically creates one Bitbucket MCP instance per workspace. See [MCP Setup Guide](docs/technical/MCP_SETUP.md) for complete configuration.
+
 **Authentication (for API security):**
 ```bash
 AUTH_ENABLED=false
@@ -469,6 +491,13 @@ GIT_PASSWORD=your-git-token-or-password  # Git password, personal access token, 
 - The OpenCode Docker image is automatically pulled on worker startup
 - **All OpenCode-specific LLM configuration must be set** (`OPENCODE_LLM_PROVIDER`, `OPENCODE_*_API_KEY`, `OPENCODE_*_MODEL`)
 
+**MCP Server Integration (Optional):**
+- MCP servers provide read-only access to Bitbucket, Jira, and Confluence for OpenCode containers
+- MCP servers run as persistent Docker services via `docker-compose.mcp.yml`
+- Start MCP servers with: `python main.py mcp start`
+- MCP servers must be running before OpenCode containers can access external data
+- See [MCP Setup Guide](docs/technical/MCP_SETUP.md) for complete setup instructions
+
 **Using OpenCode in API calls:**
 
 Add the `repos` parameter to enable code-aware generation:
@@ -495,6 +524,70 @@ curl -X POST "http://localhost:8000/plan/tasks/generate" \
     "repos": ["https://github.com/org/api.git"]
   }'
 ```
+
+**MCP Server Integration (Optional - for external data access):**
+
+OpenCode containers can access external data sources (Bitbucket, Jira, Confluence) via MCP (Model Context Protocol) servers. MCP servers run as persistent services separate from OpenCode containers, providing read-only access to external APIs.
+
+**What MCP Provides:**
+- **Bitbucket MCP**: One instance per workspace (automatically created based on `BITBUCKET_WORKSPACES`)
+  - Provides access to repositories, files, pull requests, and commits
+  - Each workspace gets its own MCP instance with unique port and hostname
+- **Atlassian MCP**: Single instance providing access to Jira issues and Confluence pages
+- **Read-Only Access**: All MCP servers are configured for read-only operations for safety
+- **Dynamic Configuration**: `docker-compose.mcp.yml` is generated automatically based on your workspace configuration
+
+**Quick Start:**
+```bash
+# Start MCP servers
+python main.py mcp start
+
+# Check status
+python main.py mcp status
+
+# Stop MCP servers
+python main.py mcp stop
+
+# Destroy MCP servers (removes containers and network)
+python main.py mcp destroy
+```
+
+**Configuration:**
+Add to your `.env` file:
+```bash
+# MCP Server Configuration
+MCP_BITBUCKET_ENABLED=true
+MCP_ATLASSIAN_ENABLED=true
+MCP_NETWORK_NAME=augment-mcp-network
+MCP_MAX_CALLS=50
+
+# MCP Server Images (optional, have defaults)
+MCP_ATLASSIAN_IMAGE=ghcr.io/sooperset/mcp-atlassian:latest
+MCP_BITBUCKET_IMAGE=node:20-alpine
+```
+
+**IMPORTANT:** MCP servers use the **SAME environment variables as the main application**:
+- `JIRA_SERVER_URL`, `JIRA_USERNAME`, `JIRA_API_TOKEN` (from JIRA Configuration section above)
+- `CONFLUENCE_SERVER_URL`, `CONFLUENCE_USERNAME`, `CONFLUENCE_API_TOKEN` (from Confluence Configuration section above)
+- `BITBUCKET_EMAIL`, `BITBUCKET_API_TOKEN`, `BITBUCKET_WORKSPACES` (from Bitbucket Configuration section above)
+
+**Multi-Workspace Support:**
+- If `BITBUCKET_WORKSPACES=workspace1,workspace2,workspace3`, the system automatically creates:
+  - `bitbucket-mcp-workspace1` on port 7001
+  - `bitbucket-mcp-workspace2` on port 7002
+  - `bitbucket-mcp-workspace3` on port 7003
+- Each workspace gets its own dedicated MCP instance for full access
+- Atlassian MCP uses port 7002 when there's a single workspace, or the next available port after all Bitbucket instances (e.g., port 7003 for 2 workspaces, 7004 for 3 workspaces)
+
+**Important Notes:**
+- **No duplicate variables needed**: MCP servers automatically use main app variables (`JIRA_SERVER_URL`, `CONFLUENCE_SERVER_URL`, `BITBUCKET_EMAIL`)
+- `docker-compose.mcp.yml` is generated automatically when you run `python main.py mcp start`
+- OpenCode containers automatically connect to the MCP network and get dynamically generated `opencode.json` based on repos being analyzed
+  - All workspaces use `"bitbucket-{workspace}"` format in `opencode.json` (single or multiple)
+  - Workspaces are automatically detected from repository URLs in the `repos` parameter
+- MCP servers must be started before using OpenCode with `repos` parameter
+
+For detailed MCP setup, configuration, and troubleshooting, see [MCP Setup Guide](docs/technical/MCP_SETUP.md).
 
 **Note:** When `repos` is provided:
 - `async_mode` must be `true` (OpenCode execution takes 5-20 minutes)
@@ -1084,6 +1177,22 @@ For more details, see [Background Jobs Documentation](docs/api/API_DOCUMENTATION
     - For GitHub, use a Personal Access Token as password
     - For Bitbucket, use an App Password or API token
     - Increase `OPENCODE_CLONE_TIMEOUT` for large repositories
+
+15. **MCP servers fail to start**
+    - Verify Docker is running: `docker ps`
+    - Check environment variables are set correctly (use `JIRA_SERVER_URL`, `CONFLUENCE_SERVER_URL`, `BITBUCKET_EMAIL` - same as main app)
+    - Verify `BITBUCKET_WORKSPACES` is set if you have multiple workspaces
+    - Check container logs: `docker compose -f docker-compose.mcp.yml logs`
+    - Verify API tokens have correct scopes and are valid
+    - Ensure ports 7001, 7002, 7003... (depending on number of workspaces) are not already in use
+    - Check generated `docker-compose.mcp.yml` to verify it was created correctly
+
+16. **OpenCode containers can't reach MCP servers**
+    - Verify MCP servers are running: `python main.py mcp status`
+    - Check network exists: `docker network ls | grep augment-mcp-network`
+    - Verify MCP servers are healthy: `docker compose -f docker-compose.mcp.yml ps`
+    - Check network connectivity: `docker network inspect augment-mcp-network`
+    - Ensure MCP servers are started before running OpenCode jobs
 
 ### Debug Mode
 

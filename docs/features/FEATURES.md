@@ -991,6 +991,42 @@ GIT_PASSWORD=your-token
 - You can use different providers/models for OpenCode vs main LLM calls
 - All OpenCode-specific variables (`OPENCODE_LLM_PROVIDER`, `OPENCODE_*_API_KEY`, `OPENCODE_*_MODEL`) are **REQUIRED**
 
+### MCP Server Integration
+
+OpenCode containers can access external data sources (Bitbucket, Jira, Confluence) via MCP (Model Context Protocol) servers. MCP servers run as persistent services separate from OpenCode containers.
+
+**Benefits:**
+- **Real Data Access**: OpenCode can fetch actual Jira issues, Confluence pages, and Bitbucket files/PRs
+- **Read-Only Safety**: All MCP servers are configured for read-only operations
+- **Network Isolation**: MCP servers run on isolated Docker network for security
+- **Automatic Connection**: OpenCode containers automatically connect to MCP network when available
+
+**Setup:**
+1. Start MCP servers: `python main.py mcp start` (automatically generates `docker-compose.mcp.yml` based on workspaces)
+2. OpenCode containers automatically get dynamically generated `opencode.json` with appropriate MCP URLs based on repos being analyzed (no manual configuration needed)
+3. Ensure MCP servers are running before using OpenCode with `repos` parameter
+
+**MCP Servers:**
+- **Bitbucket MCP**: One instance per workspace (automatically created based on `BITBUCKET_WORKSPACES`)
+  - Provides access to repositories, files, PRs, and commits
+  - Each workspace gets its own MCP instance with unique port and hostname (`bitbucket-mcp-{workspace}`)
+- **Atlassian MCP**: Single instance providing access to Jira issues and Confluence pages
+
+**Configuration:**
+**IMPORTANT**: MCP servers use the **SAME environment variables as the main application**. No duplicate variables needed!
+
+MCP servers automatically use:
+- `JIRA_SERVER_URL`, `JIRA_USERNAME`, `JIRA_API_TOKEN` (from main app configuration)
+- `CONFLUENCE_SERVER_URL`, `CONFLUENCE_USERNAME`, `CONFLUENCE_API_TOKEN` (from main app configuration)
+- `BITBUCKET_EMAIL`, `BITBUCKET_API_TOKEN`, `BITBUCKET_WORKSPACES` (from main app configuration)
+
+**Multi-Workspace Support:**
+If `BITBUCKET_WORKSPACES` contains multiple workspaces (comma-separated), the system automatically creates one Bitbucket MCP instance per workspace with unique ports (7001, 7002, 7003...) and hostnames.
+
+The generated `opencode.json` always uses `bitbucket-{workspace}` format for all workspaces (single or multiple), ensuring consistent behavior and full access to all configured workspaces.
+
+For detailed MCP setup instructions, see [MCP Setup Guide](../technical/MCP_SETUP.md).
+
 ### Technical Details
 
 #### Configuration Flow

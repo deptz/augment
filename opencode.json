@@ -1,0 +1,18 @@
+{
+  "_comment": "This is a template. Actual opencode.json is generated dynamically based on repos being analyzed. All workspaces use 'bitbucket-{workspace}' format (single or multiple).",
+  "mcp": {
+    "bitbucket-workspace1": {
+      "enabled": true,
+      "url": "http://bitbucket-mcp-workspace1:7001/mcp",
+      "read_only": true
+    },
+    "atlassian": {
+      "enabled": true,
+      "url": "http://atlassian-mcp:7002/mcp",
+      "read_only": true
+    }
+  },
+  "policy": {
+    "max_calls_per_run": 50
+  }
+}

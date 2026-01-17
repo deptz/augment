@@ -143,12 +143,17 @@ async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update
             # This will raise ValueError if OpenCode-specific config is missing
             opencode_llm_config = config.get_opencode_llm_config(llm_provider, llm_model)
             
+            # Get MCP network name if MCP is configured
+            mcp_config = config.get_mcp_config()
+            mcp_network_name = mcp_config.get('network_name') if mcp_config else None
+            
             opencode_runner = OpenCodeRunner(
                 docker_image=opencode_config.get('docker_image'),
                 job_timeout_minutes=opencode_config.get('job_timeout_minutes', 20),
                 max_result_size_mb=opencode_config.get('max_result_size_mb', 10),
                 result_file=opencode_config.get('result_file', 'result.json'),
-                llm_config=opencode_llm_config
+                llm_config=opencode_llm_config,
+                mcp_network_name=mcp_network_name
             )
             opencode_runner.set_concurrency_limit(opencode_config.get('max_concurrent', 2))
             
@@ -187,7 +192,9 @@ async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update
                     job_id=job_id,
                     workspace_path=workspace_path,
                     prompt=prompt,
-                    job_type="ticket_description"
+                    job_type="ticket_description",
+                    repos=repos,
+                    mcp_config=mcp_config
                 )
                 
                 # Extract result
@@ -632,12 +639,17 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
             # This will raise ValueError if OpenCode-specific config is missing
             opencode_llm_config = config.get_opencode_llm_config(llm_provider, llm_model)
             
+            # Get MCP network name if MCP is configured
+            mcp_config = config.get_mcp_config()
+            mcp_network_name = mcp_config.get('network_name') if mcp_config else None
+            
             opencode_runner = OpenCodeRunner(
                 docker_image=opencode_config.get('docker_image'),
                 job_timeout_minutes=opencode_config.get('job_timeout_minutes', 20),
                 max_result_size_mb=opencode_config.get('max_result_size_mb', 10),
                 result_file=opencode_config.get('result_file', 'result.json'),
-                llm_config=opencode_llm_config
+                llm_config=opencode_llm_config,
+                mcp_network_name=mcp_network_name
             )
             opencode_runner.set_concurrency_limit(opencode_config.get('max_concurrent', 2))
             
@@ -704,7 +716,9 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
                         job_id=f"{job_id}-s{idx}",  # Use simple index suffix
                         workspace_path=workspace_path,
                         prompt=prompt,
-                        job_type="task_breakdown"
+                        job_type="task_breakdown",
+                        repos=repos,
+                        mcp_config=mcp_config
                     )
                     
                     # Extract tasks from result
@@ -1513,12 +1527,17 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
             # This will raise ValueError if OpenCode-specific config is missing
             opencode_llm_config = config.get_opencode_llm_config(llm_provider, llm_model)
             
+            # Get MCP network name if MCP is configured
+            mcp_config = config.get_mcp_config()
+            mcp_network_name = mcp_config.get('network_name') if mcp_config else None
+            
             opencode_runner = OpenCodeRunner(
                 docker_image=opencode_config.get('docker_image'),
                 job_timeout_minutes=opencode_config.get('job_timeout_minutes', 20),
                 max_result_size_mb=opencode_config.get('max_result_size_mb', 10),
                 result_file=opencode_config.get('result_file', 'result.json'),
-                llm_config=opencode_llm_config
+                llm_config=opencode_llm_config,
+                mcp_network_name=mcp_network_name
             )
             opencode_runner.set_concurrency_limit(opencode_config.get('max_concurrent', 2))
             
@@ -1606,7 +1625,9 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
                     job_id=job_id,
                     workspace_path=workspace_path,
                     prompt=prompt,
-                    job_type="coverage_check"
+                    job_type="coverage_check",
+                    repos=repos,
+                    mcp_config=mcp_config
                 )
                 
                 # Build response with proper model conversion

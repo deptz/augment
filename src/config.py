@@ -282,6 +282,10 @@ class Config:
             'password': git_config.get('password') or os.getenv('GIT_PASSWORD'),
         }
     
+    def get_mcp_config(self) -> Dict[str, Any]:
+        """Get MCP server configuration"""
+        return self._config.get('mcp', {})
+    
     def get_cors_origins(self) -> List[str]:
         """
         Get list of CORS allowed origins from configuration.

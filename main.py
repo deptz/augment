@@ -307,5 +307,120 @@ def test(ctx):
         sys.exit(1)
 
 
+@click.group()
+def mcp():
+    """Manage MCP servers (Bitbucket and Atlassian)"""
+    pass
+
+
+@mcp.command()
+@click.option('--compose-file', default='docker-compose.mcp.yml', help='Docker compose file for MCP services')
+def start(compose_file):
+    """Start MCP servers"""
+    import subprocess
+    import os
+    
+    # Generate docker-compose.mcp.yml dynamically based on workspaces
+    click.echo("Generating docker-compose.mcp.yml from configuration...")
+    generate_script = os.path.join(os.path.dirname(__file__), 'scripts', 'generate-mcp-compose.py')
+    if not os.path.exists(generate_script):
+        click.echo(f"Error: Generation script not found: {generate_script}", err=True)
+        sys.exit(1)
+    
+    result = subprocess.run(
+        [sys.executable, generate_script, compose_file],
+        check=False
+    )
+    
+    if result.returncode != 0:
+        click.echo("❌ Failed to generate docker-compose.mcp.yml", err=True)
+        sys.exit(1)
+    
+    if not os.path.exists(compose_file):
+        click.echo(f"Error: Generated {compose_file} not found", err=True)
+        sys.exit(1)
+    
+    click.echo(f"Starting MCP servers from {compose_file}...")
+    result = subprocess.run(
+        ['docker', 'compose', '-f', compose_file, 'up', '-d'],
+        check=False
+    )
+    
+    if result.returncode == 0:
+        click.echo("✅ MCP servers started successfully")
+        # Show status
+        subprocess.run(['docker', 'compose', '-f', compose_file, 'ps'])
+    else:
+        click.echo("❌ Failed to start MCP servers", err=True)
+        sys.exit(1)
+
+
+@mcp.command()
+@click.option('--compose-file', default='docker-compose.mcp.yml', help='Docker compose file for MCP services')
+def stop(compose_file):
+    """Stop MCP servers"""
+    import subprocess
+    import os
+    
+    if not os.path.exists(compose_file):
+        click.echo(f"Error: {compose_file} not found", err=True)
+        sys.exit(1)
+    
+    click.echo(f"Stopping MCP servers from {compose_file}...")
+    result = subprocess.run(
+        ['docker', 'compose', '-f', compose_file, 'stop'],
+        check=False
+    )
+    
+    if result.returncode == 0:
+        click.echo("✅ MCP servers stopped")
+    else:
+        click.echo("❌ Failed to stop MCP servers", err=True)
+        sys.exit(1)
+
+
+@mcp.command()
+@click.option('--compose-file', default='docker-compose.mcp.yml', help='Docker compose file for MCP services')
+def status(compose_file):
+    """Show MCP server status"""
+    import subprocess
+    import os
+    
+    if not os.path.exists(compose_file):
+        click.echo(f"Error: {compose_file} not found", err=True)
+        sys.exit(1)
+    
+    subprocess.run(['docker', 'compose', '-f', compose_file, 'ps'])
+
+
+@mcp.command()
+@click.option('--compose-file', default='docker-compose.mcp.yml', help='Docker compose file for MCP services')
+@click.confirmation_option(prompt='Are you sure you want to destroy MCP servers and remove volumes?')
+def destroy(compose_file):
+    """Stop and remove MCP servers, networks, and volumes"""
+    import subprocess
+    import os
+    
+    if not os.path.exists(compose_file):
+        click.echo(f"Error: {compose_file} not found", err=True)
+        sys.exit(1)
+    
+    click.echo(f"Destroying MCP servers from {compose_file}...")
+    result = subprocess.run(
+        ['docker', 'compose', '-f', compose_file, 'down', '-v'],
+        check=False
+    )
+    
+    if result.returncode == 0:
+        click.echo("✅ MCP servers destroyed")
+    else:
+        click.echo("❌ Failed to destroy MCP servers", err=True)
+        sys.exit(1)
+
+
+# Register MCP command group
+cli.add_command(mcp)
+
+
 if __name__ == '__main__':
     cli()
