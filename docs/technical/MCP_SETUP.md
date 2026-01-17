@@ -29,47 +29,74 @@ MCP (Model Context Protocol) servers provide read-only access to external data s
 
 ### Environment Variables
 
-**IMPORTANT**: MCP servers use the **SAME environment variables as the main application**. No duplicate variables needed!
+**IMPORTANT**: MCP servers require **separate read-only credentials** with `MCP_` prefix. URLs are shared from main app configuration.
 
-Add the following to your `.env` file:
+#### Credential Separation
+
+MCP servers use **separate credentials** from the main application to enforce read-only access:
+
+- **MCP Credentials** (required, `MCP_` prefix): Read-only username and API tokens for MCP servers
+- **Shared Configuration** (no prefix): URLs and workspace configuration shared from main app
+
+This separation ensures:
+- **Security**: MCP servers can only read data, not modify
+- **Principle of Least Privilege**: MCP credentials have minimal read-only scopes
+- **Isolation**: Main app credentials (with write permissions) are not exposed to MCP containers
+
+#### Required Variables
+
+Add the following MCP credential variables to your `.env` file:
 
 ```bash
-# Main Application Configuration (REQUIRED - used by both main app and MCP servers)
+# ============================================================================
+# Shared Configuration (used by both main app and MCP servers)
+# ============================================================================
 JIRA_SERVER_URL=https://your-company.atlassian.net
-JIRA_USERNAME=your.email@company.com
-JIRA_API_TOKEN=your_jira_api_token
 CONFLUENCE_SERVER_URL=https://your-company.atlassian.net/wiki
-CONFLUENCE_USERNAME=your.email@company.com  # Optional: defaults to JIRA_USERNAME if not set
-CONFLUENCE_API_TOKEN=your_confluence_api_token  # Optional: defaults to JIRA_API_TOKEN if not set
+BITBUCKET_URL=https://api.bitbucket.org/2.0  # Optional, defaults to https://api.bitbucket.org/2.0
 
-# Bitbucket Configuration (REQUIRED for Bitbucket MCP)
+# Bitbucket Workspaces (for MCP server generation)
 # For multiple workspaces, use comma-separated list:
 BITBUCKET_WORKSPACES=workspace1,workspace2,workspace3
 # OR for single workspace (backward compatible):
 # BITBUCKET_WORKSPACE=your-workspace
-BITBUCKET_EMAIL=your-email@company.com
-BITBUCKET_API_TOKEN=your_bitbucket_app_password
 
-# MCP Docker Network
-MCP_NETWORK_NAME=augment-mcp-network
+# ============================================================================
+# MCP Read-Only Credentials (REQUIRED - separate from main app credentials)
+# ============================================================================
+# These credentials MUST have READ-ONLY permissions/scopes
 
-# MCP Server Configuration
-MCP_BITBUCKET_ENABLED=true
-MCP_ATLASSIAN_ENABLED=true
-MCP_MAX_CALLS=50
+# JIRA Read-Only Credentials
+MCP_JIRA_USERNAME=your.readonly.email@company.com
+MCP_JIRA_API_TOKEN=your_readonly_jira_api_token
 
-# Optional: MCP Server Image Overrides
+# Confluence Read-Only Credentials (Optional - defaults to JIRA credentials)
+# MCP_CONFLUENCE_USERNAME=your.readonly.email@company.com  # Optional
+# MCP_CONFLUENCE_API_TOKEN=your_readonly_confluence_api_token  # Optional
+
+# Bitbucket Read-Only Credentials
+MCP_BITBUCKET_EMAIL=your.readonly.email@company.com
+MCP_BITBUCKET_API_TOKEN=your_readonly_bitbucket_app_password
+
+# ============================================================================
+# MCP Server Configuration (Optional)
+# ============================================================================
+MCP_NETWORK_NAME=augment-mcp-network  # Optional: defaults to augment-mcp-network
 MCP_BITBUCKET_IMAGE=node:20-alpine  # Optional: defaults to node:20-alpine
 MCP_ATLASSIAN_IMAGE=ghcr.io/sooperset/mcp-atlassian:latest  # Optional: defaults to ghcr.io/sooperset/mcp-atlassian:latest
 ```
 
 **Important Notes**:
-- **Unified Variables**: MCP servers automatically use `JIRA_SERVER_URL`, `CONFLUENCE_SERVER_URL`, and `BITBUCKET_EMAIL` from your main app configuration. No need to set `JIRA_URL`, `CONFLUENCE_URL`, or `BITBUCKET_USERNAME` separately.
+- **MCP Credentials are REQUIRED**: No fallback to main app credentials. If `MCP_*` variables are missing, MCP services will fail to start.
+- **Read-Only Scopes**: MCP credentials must have read-only permissions:
+  - **Jira**: Read-only access to issues, projects, boards (NO write, delete, or admin)
+  - **Confluence**: Read-only access to pages, spaces (NO write, delete, or admin)
+  - **Bitbucket**: Read-only access to repositories, PRs, commits (NO write, delete, or admin)
+- **URLs are Shared**: `JIRA_SERVER_URL`, `CONFLUENCE_SERVER_URL`, and `BITBUCKET_URL` are shared from main app configuration (no `MCP_` prefix needed).
 - **Multi-Workspace Support**: If `BITBUCKET_WORKSPACES` contains multiple workspaces (comma-separated), the system automatically creates one Bitbucket MCP instance per workspace:
   - Each instance gets a unique port (7001, 7002, 7003...) and hostname (`bitbucket-mcp-{workspace}`)
   - Example: `BITBUCKET_WORKSPACES=workspace1,workspace2,workspace3` creates 3 Bitbucket MCP instances
-- Ensure your API tokens (`BITBUCKET_API_TOKEN`, `JIRA_API_TOKEN`) have read-only scopes to restrict write operations at the API level.
-- Image variables (`MCP_BITBUCKET_IMAGE`, `MCP_ATLASSIAN_IMAGE`) are optional and have defaults.
+- **See `.env.example`**: For detailed documentation on creating read-only API tokens and required scopes.
 
 ## Starting MCP Servers
 
@@ -229,24 +256,32 @@ If you see warnings about the MCP network not being found:
 If MCP server health checks are failing:
 
 1. Check container logs: `docker compose -f docker-compose.mcp.yml logs`
-2. Verify environment variables are set correctly in `.env`
-3. Ensure API tokens have correct scopes and are valid
-4. Health checks use `wget` and may fall back to root endpoint (`/`) if `/health` doesn't exist
-5. Verify containers are actually running: `docker compose -f docker-compose.mcp.yml ps`
+2. Verify MCP credential environment variables are set correctly:
+   - Check for `MCP_JIRA_USERNAME`, `MCP_JIRA_API_TOKEN`, `MCP_BITBUCKET_EMAIL`, `MCP_BITBUCKET_API_TOKEN` in `.env`
+3. Ensure MCP API tokens have **read-only** scopes and are valid
+4. Verify shared URLs are set: `JIRA_SERVER_URL`, `CONFLUENCE_SERVER_URL` (no `MCP_` prefix needed)
+5. Health checks use `wget` and may fall back to root endpoint (`/`) if `/health` doesn't exist
+6. Verify containers are actually running: `docker compose -f docker-compose.mcp.yml ps`
+7. If MCP credentials are missing, the compose generation will fail with clear error messages
 
 ### Environment Variable Issues
 
-**IMPORTANT**: MCP servers now use the same variable names as the main application. The system automatically maps them internally.
+**IMPORTANT**: MCP servers use separate `MCP_*` prefixed credentials. URLs are shared from main app.
 
 **Variable Mapping**:
-- Main app uses: `JIRA_SERVER_URL` → MCP servers use: `JIRA_URL` (mapped automatically)
-- Main app uses: `CONFLUENCE_SERVER_URL` → MCP servers use: `CONFLUENCE_URL` (mapped automatically)
-- Main app uses: `BITBUCKET_EMAIL` → MCP servers use: `BITBUCKET_USERNAME` (mapped automatically)
+- **URLs (shared)**: `JIRA_SERVER_URL` → mapped to `JIRA_URL` inside container
+- **URLs (shared)**: `CONFLUENCE_SERVER_URL` → mapped to `CONFLUENCE_URL` inside container
+- **Credentials (MCP only)**: `MCP_JIRA_USERNAME` → mapped to `JIRA_USERNAME` inside container
+- **Credentials (MCP only)**: `MCP_JIRA_API_TOKEN` → mapped to `JIRA_API_TOKEN` inside container
+- **Credentials (MCP only)**: `MCP_BITBUCKET_EMAIL` → mapped to `ATLASSIAN_USER_EMAIL` inside container
+- **Credentials (MCP only)**: `MCP_BITBUCKET_API_TOKEN` → mapped to `ATLASSIAN_API_TOKEN` inside container
 
 **Common mistakes**:
-- Setting duplicate variables (`JIRA_URL`, `CONFLUENCE_URL`, `BITBUCKET_USERNAME`) - **Not needed!** Use main app variables instead.
-- Missing `CONFLUENCE_USERNAME` or `CONFLUENCE_API_TOKEN` - these default to Jira values if not set
-- Not setting `BITBUCKET_WORKSPACES` when you have multiple workspaces - this prevents multi-instance creation
+- **Missing `MCP_*` credentials**: MCP credentials are REQUIRED. No fallback to main app credentials. If missing, MCP services will fail to start with clear error messages.
+- **Using main app credentials**: Do NOT use `JIRA_USERNAME`, `JIRA_API_TOKEN`, `BITBUCKET_EMAIL`, etc. for MCP. Use `MCP_*` prefixed variables instead.
+- **Missing read-only scopes**: MCP credentials must have read-only permissions. Using write-enabled credentials is a security risk.
+- **Not setting `BITBUCKET_WORKSPACES`**: When you have multiple workspaces, set `BITBUCKET_WORKSPACES` (comma-separated) to create multiple Bitbucket MCP instances.
+- **Missing MCP credentials**: Ensure all required `MCP_*` variables are set in your `.env` file. See `.env.example` for the complete list.
 
 ### Container Startup Issues
 

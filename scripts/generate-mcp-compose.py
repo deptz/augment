@@ -102,17 +102,17 @@ def generate_bitbucket_mcp_service(workspace: str, index: int, base_port: int = 
     container_name = f"augment-{service_name}"
     hostname = service_name
     
-    # Shell command to map main app env vars to MCP-expected names
+    # Shell command to map MCP-specific credentials to MCP-expected names
     # Using @aashari/mcp-server-atlassian-bitbucket which supports HTTP/SSE transport
     # This package expects: ATLASSIAN_USER_EMAIL, ATLASSIAN_API_TOKEN, BITBUCKET_DEFAULT_WORKSPACE
-    # Main app uses: BITBUCKET_EMAIL, BITBUCKET_API_TOKEN, BITBUCKET_WORKSPACE
+    # MCP uses: MCP_BITBUCKET_EMAIL, MCP_BITBUCKET_API_TOKEN (read-only credentials)
     # Note: TRANSPORT_MODE=http enables HTTP/SSE server mode (listens on /mcp endpoint)
     # The node:20-alpine image already includes nodejs and npm, so we only need wget and git
     # Use list format for command to avoid YAML parsing issues with complex shell scripts
     # Use $$ to escape $ for Docker Compose variable interpolation
     command_content = f'''apk add --no-cache wget git 2>&1 || echo 'Packages may already be installed' &&
-export ATLASSIAN_USER_EMAIL=\"$${{BITBUCKET_EMAIL}}\" &&
-export ATLASSIAN_API_TOKEN=\"$${{BITBUCKET_API_TOKEN}}\" &&
+export ATLASSIAN_USER_EMAIL=\"$${{MCP_BITBUCKET_EMAIL}}\" &&
+export ATLASSIAN_API_TOKEN=\"$${{MCP_BITBUCKET_API_TOKEN}}\" &&
 export BITBUCKET_DEFAULT_WORKSPACE=\"$${{BITBUCKET_WORKSPACE}}\" &&
 export PORT={port} &&
 export TRANSPORT_MODE=http &&
@@ -120,7 +120,7 @@ echo \"Starting Bitbucket MCP server for workspace: $${{BITBUCKET_WORKSPACE}} on
 echo \"Transport mode: http (SSE)\" &&
 echo \"MCP endpoint: http://0.0.0.0:{port}/mcp\" &&
 if [ -z \"$${{ATLASSIAN_USER_EMAIL}}\" ] || [ -z \"$${{ATLASSIAN_API_TOKEN}}\" ]; then
-  echo \"ERROR: Missing credentials\" >&2
+  echo \"ERROR: Missing MCP credentials. Required: MCP_BITBUCKET_EMAIL and MCP_BITBUCKET_API_TOKEN\" >&2
   exit 1
 fi &&
 echo \"Credentials configured for: $${{ATLASSIAN_USER_EMAIL}}\" &&
@@ -145,8 +145,8 @@ exec npx -y @aashari/mcp-server-atlassian-bitbucket@latest 2>&1'''
     environment:
       - JIRA_SERVER_URL=${{JIRA_SERVER_URL}}
       - CONFLUENCE_SERVER_URL=${{CONFLUENCE_SERVER_URL}}
-      - BITBUCKET_EMAIL=${{BITBUCKET_EMAIL}}
-      - BITBUCKET_API_TOKEN=${{BITBUCKET_API_TOKEN}}
+      - MCP_BITBUCKET_EMAIL=${{MCP_BITBUCKET_EMAIL}}
+      - MCP_BITBUCKET_API_TOKEN=${{MCP_BITBUCKET_API_TOKEN}}
       - BITBUCKET_WORKSPACE={workspace}
       - BITBUCKET_URL={bitbucket_url}
       - PORT={port}
@@ -181,22 +181,27 @@ def generate_atlassian_mcp_service(bitbucket_services_count: int, base_port: int
     if port is None:
         port = base_port + bitbucket_services_count if bitbucket_services_count > 1 else 7002
     
-    # Shell command to map main app env vars to MCP-expected names
+    # Shell command to map MCP-specific credentials to MCP-expected names
     # mcp-atlassian expects: JIRA_URL, CONFLUENCE_URL, JIRA_USERNAME, JIRA_API_TOKEN
-    # Main app uses: JIRA_SERVER_URL, CONFLUENCE_SERVER_URL
+    # URLs are shared: JIRA_SERVER_URL, CONFLUENCE_SERVER_URL
+    # MCP uses: MCP_JIRA_USERNAME, MCP_JIRA_API_TOKEN (read-only credentials)
     # The Docker image should have mcp-atlassian pre-installed
     # Note: Using $$ to escape $ for Docker Compose interpolation
     # Note: Since entrypoint is /bin/sh, command should be -c "..." not sh -c "..."
     command = f'''-c "
         export JIRA_URL=\"$${{JIRA_SERVER_URL}}\" &&
         export CONFLUENCE_URL=\"$${{CONFLUENCE_SERVER_URL}}\" &&
-        export JIRA_USERNAME=\"$${{JIRA_USERNAME}}\" &&
-        export JIRA_API_TOKEN=\"$${{JIRA_API_TOKEN}}\" &&
-        export CONFLUENCE_USERNAME=\"$${{CONFLUENCE_USERNAME:-$${{JIRA_USERNAME}}}}\" &&
-        export CONFLUENCE_API_TOKEN=\"$${{CONFLUENCE_API_TOKEN:-$${{JIRA_API_TOKEN}}}}\" &&
+        export JIRA_USERNAME=\"$${{MCP_JIRA_USERNAME}}\" &&
+        export JIRA_API_TOKEN=\"$${{MCP_JIRA_API_TOKEN}}\" &&
+        export CONFLUENCE_USERNAME=\"$${{MCP_CONFLUENCE_USERNAME:-$${{MCP_JIRA_USERNAME}}}}\" &&
+        export CONFLUENCE_API_TOKEN=\"$${{MCP_CONFLUENCE_API_TOKEN:-$${{MCP_JIRA_API_TOKEN}}}}\" &&
         echo \"Starting Atlassian MCP server on port {port}\" &&
         echo \"JIRA_URL: $${{JIRA_URL}}\" &&
         echo \"CONFLUENCE_URL: $${{CONFLUENCE_URL}}\" &&
+        if [ -z \"$${{JIRA_USERNAME}}\" ] || [ -z \"$${{JIRA_API_TOKEN}}\" ]; then
+          echo \"ERROR: Missing MCP credentials. Required: MCP_JIRA_USERNAME and MCP_JIRA_API_TOKEN\" >&2
+          exit 1
+        fi &&
         (apk add --no-cache wget curl 2>/dev/null || (apt-get update && apt-get install -y wget curl) 2>/dev/null || true) &&
         if command -v mcp-atlassian >/dev/null 2>&1; then
           echo \"Found mcp-atlassian command, starting server...\" &&
@@ -261,11 +266,11 @@ def generate_atlassian_mcp_service(bitbucket_services_count: int, base_port: int
       - "{port}:{port}"
     environment:
       - JIRA_SERVER_URL=${{JIRA_SERVER_URL}}
-      - JIRA_USERNAME=${{JIRA_USERNAME}}
-      - JIRA_API_TOKEN=${{JIRA_API_TOKEN}}
+      - MCP_JIRA_USERNAME=${{MCP_JIRA_USERNAME}}
+      - MCP_JIRA_API_TOKEN=${{MCP_JIRA_API_TOKEN}}
       - CONFLUENCE_SERVER_URL=${{CONFLUENCE_SERVER_URL}}
-      - CONFLUENCE_USERNAME=${{CONFLUENCE_USERNAME:-${{JIRA_USERNAME}}}}
-      - CONFLUENCE_API_TOKEN=${{CONFLUENCE_API_TOKEN:-${{JIRA_API_TOKEN}}}}
+      - MCP_CONFLUENCE_USERNAME=${{MCP_CONFLUENCE_USERNAME:-${{MCP_JIRA_USERNAME}}}}
+      - MCP_CONFLUENCE_API_TOKEN=${{MCP_CONFLUENCE_API_TOKEN:-${{MCP_JIRA_API_TOKEN}}}}
     networks:
       - augment-mcp
     restart: unless-stopped
@@ -278,6 +283,36 @@ def generate_atlassian_mcp_service(bitbucket_services_count: int, base_port: int
 '''
 
 
+def validate_mcp_credentials() -> None:
+    """
+    Validate that required MCP credential environment variables are present.
+    
+    Raises:
+        SystemExit: If required MCP credentials are missing
+    """
+    required_vars = [
+        'MCP_JIRA_USERNAME',
+        'MCP_JIRA_API_TOKEN',
+        'MCP_BITBUCKET_EMAIL',
+        'MCP_BITBUCKET_API_TOKEN',
+    ]
+    
+    missing_vars = []
+    for var in required_vars:
+        value = os.getenv(var)
+        if not value or not value.strip():
+            missing_vars.append(var)
+    
+    if missing_vars:
+        print("ERROR: Missing required MCP credential environment variables:", file=sys.stderr)
+        for var in missing_vars:
+            print(f"  - {var}", file=sys.stderr)
+        print("\nMCP servers require separate read-only credentials with MCP_ prefix.", file=sys.stderr)
+        print("Set these variables in your .env file.", file=sys.stderr)
+        print("See .env.example for required variables.", file=sys.stderr)
+        sys.exit(1)
+
+
 def generate_compose_file(output_path: str = "docker-compose.mcp.yml") -> None:
     """
     Generate docker-compose.mcp.yml file based on configured workspaces.
@@ -285,6 +320,9 @@ def generate_compose_file(output_path: str = "docker-compose.mcp.yml") -> None:
     Args:
         output_path: Path to output docker-compose file
     """
+    # Validate MCP credentials are present (required, no fallback)
+    validate_mcp_credentials()
+    
     try:
         config = Config()
     except Exception as e:

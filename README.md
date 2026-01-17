@@ -337,14 +337,20 @@ MCP_ATLASSIAN_IMAGE=ghcr.io/sooperset/mcp-atlassian:latest
 MCP_BITBUCKET_IMAGE=node:20-alpine
 ```
 
-**IMPORTANT:** MCP servers use the **SAME environment variables as the main application** (configured above):
-- `JIRA_SERVER_URL`, `JIRA_USERNAME`, `JIRA_API_TOKEN` (from JIRA Configuration)
-- `CONFLUENCE_SERVER_URL`, `CONFLUENCE_USERNAME`, `CONFLUENCE_API_TOKEN` (from Confluence Configuration)
-- `BITBUCKET_EMAIL`, `BITBUCKET_API_TOKEN`, `BITBUCKET_WORKSPACES` (from Bitbucket Configuration)
+**IMPORTANT:** MCP servers require **separate read-only credentials** with `MCP_` prefix. URLs are shared from main app.
+
+**MCP Credentials (Required - Read-Only):**
+- `MCP_JIRA_USERNAME`, `MCP_JIRA_API_TOKEN` (read-only JIRA credentials)
+- `MCP_CONFLUENCE_USERNAME`, `MCP_CONFLUENCE_API_TOKEN` (optional, defaults to JIRA credentials)
+- `MCP_BITBUCKET_EMAIL`, `MCP_BITBUCKET_API_TOKEN` (read-only Bitbucket credentials)
+
+**Shared Configuration (from main app):**
+- `JIRA_SERVER_URL`, `CONFLUENCE_SERVER_URL`, `BITBUCKET_URL` (shared, no prefix needed)
+- `BITBUCKET_WORKSPACES` (shared, for workspace configuration)
 
 **Multi-Workspace Support:** If `BITBUCKET_WORKSPACES` contains multiple workspaces, one Bitbucket MCP instance is created per workspace automatically.
 
-**Note:** MCP servers use the **SAME environment variables as the main application** (`JIRA_SERVER_URL`, `CONFLUENCE_SERVER_URL`, `BITBUCKET_EMAIL`). No duplicate variables needed! If `BITBUCKET_WORKSPACES` contains multiple workspaces, the system automatically creates one Bitbucket MCP instance per workspace. See [MCP Setup Guide](docs/technical/MCP_SETUP.md) for complete configuration.
+**Note:** MCP credentials must have **read-only** scopes to enforce read-only access. Add `MCP_*` variables to your `.env` file. See [MCP Setup Guide](docs/technical/MCP_SETUP.md) for complete configuration and `.env.example` for required variables.
 
 **Authentication (for API security):**
 ```bash
@@ -461,6 +467,10 @@ OPENCODE_CLONE_TIMEOUT=300  # Git clone timeout in seconds (default: 300). Timeo
 OPENCODE_SHALLOW_CLONE=true  # Use shallow clone with --depth 1 (default: true). Faster cloning, only latest commit.
 OPENCODE_MAX_RESULT_SIZE=10  # Maximum result file size in MB (default: 10). Prevents oversized result files.
 
+# OpenCode Debug Conversation Logging (Optional)
+OPENCODE_DEBUG_LOGGING=false  # Enable conversation logging for debugging (default: false). Saves logs to logs/opencode/
+OPENCODE_LOG_DIR=logs/opencode  # Directory for conversation log files (default: logs/opencode)
+
 # Git Credentials (Required for Private Repositories, Optional for Public)
 # These credentials are used when cloning private repositories via HTTPS
 # For public repositories, these can be left empty
@@ -479,6 +489,8 @@ GIT_PASSWORD=your-git-token-or-password  # Git password, personal access token, 
 | `OPENCODE_CLONE_TIMEOUT` | No | `300` | Git clone timeout in seconds |
 | `OPENCODE_SHALLOW_CLONE` | No | `true` | Use shallow clone (--depth 1) |
 | `OPENCODE_MAX_RESULT_SIZE` | No | `10` | Maximum result file size in MB |
+| `OPENCODE_DEBUG_LOGGING` | No | `false` | Enable conversation logging for debugging |
+| `OPENCODE_LOG_DIR` | No | `logs/opencode` | Directory for conversation log files |
 | `GIT_USERNAME` | Yes* | - | Git username (required for private repos) |
 | `GIT_PASSWORD` | Yes* | - | Git password/token (required for private repos) |
 
@@ -566,10 +578,16 @@ MCP_ATLASSIAN_IMAGE=ghcr.io/sooperset/mcp-atlassian:latest
 MCP_BITBUCKET_IMAGE=node:20-alpine
 ```
 
-**IMPORTANT:** MCP servers use the **SAME environment variables as the main application**:
-- `JIRA_SERVER_URL`, `JIRA_USERNAME`, `JIRA_API_TOKEN` (from JIRA Configuration section above)
-- `CONFLUENCE_SERVER_URL`, `CONFLUENCE_USERNAME`, `CONFLUENCE_API_TOKEN` (from Confluence Configuration section above)
-- `BITBUCKET_EMAIL`, `BITBUCKET_API_TOKEN`, `BITBUCKET_WORKSPACES` (from Bitbucket Configuration section above)
+**IMPORTANT:** MCP servers require **separate read-only credentials** with `MCP_` prefix. URLs are shared from main app.
+
+**MCP Credentials (Required - Read-Only):**
+- `MCP_JIRA_USERNAME`, `MCP_JIRA_API_TOKEN` (read-only JIRA credentials - REQUIRED)
+- `MCP_CONFLUENCE_USERNAME`, `MCP_CONFLUENCE_API_TOKEN` (optional, defaults to JIRA credentials)
+- `MCP_BITBUCKET_EMAIL`, `MCP_BITBUCKET_API_TOKEN` (read-only Bitbucket credentials - REQUIRED)
+
+**Shared Configuration (from main app, no prefix needed):**
+- `JIRA_SERVER_URL`, `CONFLUENCE_SERVER_URL`, `BITBUCKET_URL` (shared URLs)
+- `BITBUCKET_WORKSPACES` (shared, for workspace configuration)
 
 **Multi-Workspace Support:**
 - If `BITBUCKET_WORKSPACES=workspace1,workspace2,workspace3`, the system automatically creates:
@@ -580,7 +598,10 @@ MCP_BITBUCKET_IMAGE=node:20-alpine
 - Atlassian MCP uses port 7002 when there's a single workspace, or the next available port after all Bitbucket instances (e.g., port 7003 for 2 workspaces, 7004 for 3 workspaces)
 
 **Important Notes:**
-- **No duplicate variables needed**: MCP servers automatically use main app variables (`JIRA_SERVER_URL`, `CONFLUENCE_SERVER_URL`, `BITBUCKET_EMAIL`)
+- **MCP credentials are REQUIRED**: No fallback to main app credentials. If `MCP_*` variables are missing, MCP services will fail to start.
+- **Read-Only Scopes**: MCP credentials must have read-only permissions (Jira: read issues/projects, Confluence: read pages/spaces, Bitbucket: read repos/PRs/commits)
+- **Configuration**: Add `MCP_*` variables to your `.env` file. See `.env.example` for details.
+- **URLs are Shared**: `JIRA_SERVER_URL`, `CONFLUENCE_SERVER_URL`, `BITBUCKET_URL` are shared from main app (no `MCP_` prefix needed)
 - `docker-compose.mcp.yml` is generated automatically when you run `python main.py mcp start`
 - OpenCode containers automatically connect to the MCP network and get dynamically generated `opencode.json` based on repos being analyzed
   - All workspaces use `"bitbucket-{workspace}"` format in `opencode.json` (single or multiple)
@@ -604,6 +625,17 @@ For detailed MCP setup, configuration, and troubleshooting, see [MCP Setup Guide
   - **JSON response**: For non-streaming responses, immediate JSON response indicates completion
 - **Post-Completion**: After streaming completes, there's a brief 1-second delay to allow file system writes, then the result file (`result.json`) is read from the workspace
 - **Timeout Protection**: Overall job timeout (`OPENCODE_TIMEOUT`) applies to the entire operation, ensuring jobs don't hang indefinitely
+
+**Debug Conversation Logging (Optional):**
+
+OpenCode includes an optional debug mode that captures and stores full conversation logs for troubleshooting:
+
+- **Enable**: Set `OPENCODE_DEBUG_LOGGING=true` in your `.env` file
+- **Log Files**: Creates two files per job in `logs/opencode/`:
+  - `{job_id}.json` - Structured JSON with complete conversation data
+  - `{job_id}.log` - Human-readable text format with formatted timestamps
+- **Use Cases**: Troubleshooting unexpected results, analyzing prompt processing, debugging errors, performance analysis
+- **Note**: Disabled by default. Enable only when needed to avoid unnecessary I/O overhead.
 
 **Team Member Database (Optional):**
 ```bash
@@ -1172,7 +1204,13 @@ For more details, see [Background Jobs Documentation](docs/api/API_DOCUMENTATION
     - Use `OPENCODE_SHALLOW_CLONE=true` for faster cloning
     - Check if repositories are large or have slow network access
 
-14. **Git clone fails in OpenCode**
+14. **OpenCode generates unexpected results**
+    - Enable debug conversation logging: `OPENCODE_DEBUG_LOGGING=true`
+    - Review log files in `logs/opencode/` to see full conversation flow
+    - Check the prompt that was sent and how OpenCode responded
+    - Verify repository contents match expectations
+
+15. **Git clone fails in OpenCode**
     - Verify `GIT_USERNAME` and `GIT_PASSWORD` are set correctly
     - For GitHub, use a Personal Access Token as password
     - For Bitbucket, use an App Password or API token

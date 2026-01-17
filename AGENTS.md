@@ -93,10 +93,18 @@ Model Context Protocol servers provide read-only access to external data sources
 - **Dynamic Compose Generation**: `scripts/generate-mcp-compose.py` generates `docker-compose.mcp.yml` based on `BITBUCKET_WORKSPACES`
   - Single workspace: Creates one Bitbucket MCP instance
   - Multiple workspaces: Creates one Bitbucket MCP instance per workspace (ports 7001, 7002, 7003...)
-- **Environment Variable Alignment**: MCP servers use the same variables as main app:
-  - `JIRA_SERVER_URL` → mapped to `JIRA_URL` inside containers
-  - `CONFLUENCE_SERVER_URL` → mapped to `CONFLUENCE_URL` inside containers
-  - `BITBUCKET_EMAIL` → mapped to `BITBUCKET_USERNAME` inside containers
+- **Credential Separation**: MCP servers use separate read-only credentials with `MCP_` prefix:
+  - **MCP Credentials (required)**: `MCP_JIRA_USERNAME`, `MCP_JIRA_API_TOKEN`, `MCP_BITBUCKET_EMAIL`, `MCP_BITBUCKET_API_TOKEN`
+  - **Shared URLs (no prefix)**: `JIRA_SERVER_URL`, `CONFLUENCE_SERVER_URL`, `BITBUCKET_URL` shared from main app
+  - **Security**: MCP credentials must have read-only scopes to enforce read-only access
+  - **Configuration**: Add `MCP_*` variables to your `.env` file (see `.env.example`)
+- **Variable Mapping** (inside containers):
+  - `JIRA_SERVER_URL` (shared) → mapped to `JIRA_URL` inside containers
+  - `CONFLUENCE_SERVER_URL` (shared) → mapped to `CONFLUENCE_URL` inside containers
+  - `MCP_JIRA_USERNAME` → mapped to `JIRA_USERNAME` inside containers
+  - `MCP_JIRA_API_TOKEN` → mapped to `JIRA_API_TOKEN` inside containers
+  - `MCP_BITBUCKET_EMAIL` → mapped to `ATLASSIAN_USER_EMAIL` inside containers
+  - `MCP_BITBUCKET_API_TOKEN` → mapped to `ATLASSIAN_API_TOKEN` inside containers
 - **Dynamic opencode.json**: Each OpenCode container gets a custom `opencode.json` generated based on repos being analyzed:
   - Extracts workspace from repo URLs
   - Includes appropriate Bitbucket MCP URLs for those workspaces
