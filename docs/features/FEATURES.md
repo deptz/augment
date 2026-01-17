@@ -1033,6 +1033,34 @@ curl -X POST "http://localhost:8000/analyze/story-coverage" \
   }'
 ```
 
+### Agents.md Distribution
+
+When OpenCode containers are created with the `repos` parameter, the system automatically distributes `Agents.md` files to guide OpenCode agents on MCP usage:
+
+**Automatic Distribution:**
+- `Agents.md` files are created in each cloned repository root directory
+- Also created at workspace root level for easy reference
+- Happens automatically after repositories are cloned
+
+**Smart Content Merging:**
+- **If `Agents.md` exists**: OpenCode MCP integration section is appended (existing content preserved)
+- **If `Agents.md` doesn't exist**: New file is created with OpenCode MCP instructions
+- **Idempotent**: Safe to run multiple times (prevents duplicate content)
+
+**Content Includes:**
+- Available MCP servers (Bitbucket and Atlassian)
+- When to use each MCP (code vs documentation vs tickets)
+- Read-only constraints and safety rules
+- Best practices for data fetching (always fetch real data, minimize calls)
+- Reference to `/app/opencode.json` for MCP configuration
+
+**Safety Features:**
+- Path sanitization prevents security issues
+- File size limits (10MB max for existing files)
+- Encoding error handling (UTF-8 with fallback)
+- Atomic file writes (prevents corruption)
+- Idempotency checks (prevents duplicate appends)
+
 ### Repository Specification
 
 The `repos` parameter accepts an array of repository specifications:
@@ -1146,6 +1174,143 @@ GIT_PASSWORD=your-token
 - OpenCode uses `OPENCODE_*` prefixed variables, which are **separate** from main LLM configuration
 - You can use different providers/models for OpenCode vs main LLM calls
 - All OpenCode-specific variables (`OPENCODE_LLM_PROVIDER`, `OPENCODE_*_API_KEY`, `OPENCODE_*_MODEL`) are **REQUIRED**
+
+### MCP Server Integration
+
+OpenCode containers can access external data sources (Bitbucket, Jira, Confluence) via MCP (Model Context Protocol) servers. MCP servers run as persistent services separate from OpenCode containers.
+
+**Benefits:**
+- **Real Data Access**: OpenCode can fetch actual Jira issues, Confluence pages, and Bitbucket files/PRs
+- **Read-Only Safety**: All MCP servers are configured for read-only operations
+- **Network Isolation**: MCP servers run on isolated Docker network for security
+- **Automatic Connection**: OpenCode containers automatically connect to MCP network when available
+
+**Setup:**
+1. Start MCP servers: `python main.py mcp start` (automatically generates `docker-compose.mcp.yml` based on workspaces)
+2. OpenCode containers automatically get dynamically generated `opencode.json` with appropriate MCP URLs based on repos being analyzed (no manual configuration needed)
+3. Ensure MCP servers are running before using OpenCode with `repos` parameter
+
+**MCP Servers:**
+- **Bitbucket MCP**: One instance per workspace (automatically created based on `BITBUCKET_WORKSPACES`)
+  - Provides access to repositories, files, PRs, and commits
+  - Each workspace gets its own MCP instance with unique port and hostname (`bitbucket-mcp-{workspace}`)
+- **Atlassian MCP**: Single instance providing access to Jira issues and Confluence pages
+
+**Configuration:**
+**IMPORTANT**: MCP servers use the **SAME environment variables as the main application**. No duplicate variables needed!
+
+MCP servers automatically use:
+- `JIRA_SERVER_URL`, `JIRA_USERNAME`, `JIRA_API_TOKEN` (from main app configuration)
+- `CONFLUENCE_SERVER_URL`, `CONFLUENCE_USERNAME`, `CONFLUENCE_API_TOKEN` (from main app configuration)
+- `BITBUCKET_EMAIL`, `BITBUCKET_API_TOKEN`, `BITBUCKET_WORKSPACES` (from main app configuration)
+
+**Multi-Workspace Support:**
+If `BITBUCKET_WORKSPACES` contains multiple workspaces (comma-separated), the system automatically creates one Bitbucket MCP instance per workspace with unique ports (7001, 7002, 7003...) and hostnames.
+
+The generated `opencode.json` always uses `bitbucket-{workspace}` format for all workspaces (single or multiple), ensuring consistent behavior and full access to all configured workspaces.
+
+For detailed MCP setup instructions, see [MCP Setup Guide](../technical/MCP_SETUP.md).
+
+### Debug Conversation Logging
+
+OpenCode includes an optional debug mode that captures and stores full conversation logs for troubleshooting and analysis.
+
+#### Overview
+
+When enabled, debug conversation logging:
+- **Captures full SSE events**: Records complete event data (not truncated) from OpenCode conversations
+- **Saves dual-format logs**: Creates both JSON (structured) and text (human-readable) files
+- **Preserves on errors**: Logs are saved even if jobs fail or are cancelled
+- **Zero performance impact when disabled**: Debug mode is off by default
+
+#### Configuration
+
+Enable debug conversation logging in your `.env` file:
+
+```bash
+# Enable debug conversation logging
+OPENCODE_DEBUG_LOGGING=true
+
+# Optional: Custom log directory (defaults to logs/opencode)
+OPENCODE_LOG_DIR=logs/opencode
+```
+
+Or in `config.yaml`:
+
+```yaml
+opencode:
+  debug_conversation_logging: true
+  conversation_log_dir: logs/opencode  # Optional, defaults to logs/opencode
+```
+
+#### Log Files
+
+When debug mode is enabled, two files are created for each OpenCode job:
+
+1. **`{job_id}.json`** - Structured JSON format with:
+   - Job metadata (job_id, start_time, end_time, duration)
+   - Full prompt text
+   - Complete event log with timestamps, event types, and data
+
+2. **`{job_id}.log`** - Human-readable text format with:
+   - Job summary (start time, end time, duration)
+   - Full prompt text
+   - Chronological event log with formatted timestamps
+
+**Example JSON structure:**
+```json
+{
+  "job_id": "abc123",
+  "start_time": "2024-01-01T12:00:00.000Z",
+  "end_time": "2024-01-01T12:05:30.123Z",
+  "duration_seconds": 330.123,
+  "prompt": "Generate task breakdown for...",
+  "events": [
+    {
+      "timestamp": 1704110400.123,
+      "event_type": "message",
+      "data": "Event data...",
+      "raw_event": {...}
+    }
+  ]
+}
+```
+
+**Example text format:**
+```
+OpenCode Conversation Log - Job: abc123
+Started: 2024-01-01T12:00:00.000Z
+Ended: 2024-01-01T12:05:30.123Z
+Duration: 330.123s
+
+================================================================================
+PROMPT
+================================================================================
+Generate task breakdown for...
+
+================================================================================
+EVENTS
+================================================================================
+[2024-01-01 12:00:00.123] [message] Event data...
+[2024-01-01 12:00:01.456] [done]
+```
+
+#### Use Cases
+
+Debug conversation logging is useful for:
+- **Troubleshooting**: Understanding why OpenCode generated unexpected results
+- **Prompt optimization**: Analyzing how prompts are processed and responded to
+- **Performance analysis**: Reviewing conversation flow and timing
+- **Debugging errors**: Inspecting full event sequences when jobs fail
+- **Audit trails**: Maintaining records of AI-generated content
+
+#### Important Notes
+
+- **Disabled by default**: Debug logging is off by default to avoid unnecessary I/O
+- **Error resilient**: Log failures don't impact job execution (warnings logged, job continues)
+- **Automatic directory creation**: Log directory is created automatically if it doesn't exist
+- **Per-job files**: Each job gets its own log files, identified by `job_id`
+- **Full event capture**: All SSE events are captured, including errors and completion events
 
 ### Technical Details
 

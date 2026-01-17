@@ -865,6 +865,50 @@ Use OpenCode when you want AI-generated content that:
    - `OPENCODE_LLM_PROVIDER` (REQUIRED)
    - `OPENCODE_*_API_KEY` for your provider (REQUIRED)
    - `OPENCODE_*_MODEL` for your provider (REQUIRED)
+5. **MCP Servers (Optional)**: For external data access (Bitbucket, Jira, Confluence). See [MCP Setup Guide](../technical/MCP_SETUP.md) for setup instructions.
+
+### MCP Server Integration (Optional)
+
+OpenCode containers can access external data sources (Bitbucket, Jira, Confluence) via MCP (Model Context Protocol) servers. MCP servers run as persistent services separate from OpenCode containers, providing read-only access to external APIs.
+
+**Benefits:**
+- **Real Data Access**: OpenCode can fetch actual Jira issues, Confluence pages, and Bitbucket files/PRs
+- **Read-Only Safety**: All MCP servers are configured for read-only operations
+- **Network Isolation**: MCP servers run on isolated Docker network for security
+- **Automatic Connection**: OpenCode containers automatically connect to MCP network when available
+
+**Setup:**
+1. Start MCP servers: `python main.py mcp start` (automatically generates `docker-compose.mcp.yml` based on workspaces)
+2. OpenCode containers automatically get dynamically generated `opencode.json` with appropriate MCP URLs
+3. Ensure MCP servers are running before using OpenCode with `repos` parameter
+
+**MCP Servers:**
+- **Bitbucket MCP**: One instance per workspace (automatically created based on `BITBUCKET_WORKSPACES`)
+  - Provides access to repositories, files, PRs, and commits
+  - Each workspace gets its own MCP instance with unique port and hostname
+- **Atlassian MCP**: Single instance providing access to Jira issues and Confluence pages
+
+**Agents.md Distribution:**
+When OpenCode containers are created with the `repos` parameter, the system automatically distributes `Agents.md` files to guide OpenCode agents:
+- **Automatic**: Created in each cloned repository and workspace root
+- **Smart Merging**: Appends to existing `Agents.md` files (preserves existing content)
+- **MCP Guidance**: Instructs agents on available MCP servers, usage patterns, and read-only constraints
+- **Idempotent**: Safe to run multiple times (prevents duplicate content)
+
+**Configuration:**
+**IMPORTANT**: MCP servers use the **SAME environment variables as the main application**. No duplicate variables needed!
+
+MCP servers automatically use:
+- `JIRA_SERVER_URL`, `JIRA_USERNAME`, `JIRA_API_TOKEN` (from main app configuration)
+- `CONFLUENCE_SERVER_URL`, `CONFLUENCE_USERNAME`, `CONFLUENCE_API_TOKEN` (from main app configuration)
+- `BITBUCKET_EMAIL`, `BITBUCKET_API_TOKEN`, `BITBUCKET_WORKSPACES` (from main app configuration)
+
+**Multi-Workspace Support:**
+If `BITBUCKET_WORKSPACES` contains multiple workspaces (comma-separated), the system automatically creates one Bitbucket MCP instance per workspace with unique ports and hostnames.
+
+The generated `opencode.json` always uses `bitbucket-{workspace}` format for all workspaces (single or multiple), ensuring consistent behavior and full access to all configured workspaces.
+
+For detailed MCP setup instructions, see [MCP Setup Guide](../technical/MCP_SETUP.md).
 
 ### Configuration
 
@@ -897,6 +941,8 @@ OPENCODE_TIMEOUT=20          # Job timeout in minutes (default: 20). Maximum exe
 OPENCODE_CLONE_TIMEOUT=300   # Git clone timeout in seconds (default: 300). Timeout for repository cloning operations.
 OPENCODE_SHALLOW_CLONE=true  # Use shallow clone with --depth 1 (default: true). Faster cloning, only latest commit.
 OPENCODE_MAX_RESULT_SIZE=10  # Maximum result file size in MB (default: 10). Prevents oversized result files.
+OPENCODE_DEBUG_LOGGING=false  # Enable conversation logging for debugging (default: false). Saves logs to logs/opencode/
+OPENCODE_LOG_DIR=logs/opencode  # Directory for conversation log files (default: logs/opencode)
 
 # Git Credentials (Required for Private Repositories, Optional for Public)
 # These credentials are used when cloning private repositories via HTTPS
@@ -916,10 +962,41 @@ GIT_PASSWORD=your-git-token     # Git password, personal access token, or app pa
 | `OPENCODE_CLONE_TIMEOUT` | No | `300` | Git clone timeout in seconds |
 | `OPENCODE_SHALLOW_CLONE` | No | `true` | Use shallow clone (--depth 1) |
 | `OPENCODE_MAX_RESULT_SIZE` | No | `10` | Maximum result file size in MB |
+| `OPENCODE_DEBUG_LOGGING` | No | `false` | Enable conversation logging for debugging |
+| `OPENCODE_LOG_DIR` | No | `logs/opencode` | Directory for conversation log files |
 | `GIT_USERNAME` | Yes* | - | Git username (required for private repos) |
 | `GIT_PASSWORD` | Yes* | - | Git password/token (required for private repos) |
 
 *Required only for private repositories. Optional for public repositories.
+
+### Debug Conversation Logging
+
+OpenCode includes an optional debug mode that captures full conversation logs for troubleshooting and analysis.
+
+#### Enabling Debug Logging
+
+Set `OPENCODE_DEBUG_LOGGING=true` in your `.env` file or `config.yaml`:
+
+```bash
+OPENCODE_DEBUG_LOGGING=true
+OPENCODE_LOG_DIR=logs/opencode  # Optional, defaults to logs/opencode
+```
+
+#### Log Files
+
+When enabled, debug logging creates two files per job in the log directory:
+
+- **`{job_id}.json`**: Structured JSON with complete conversation data, timestamps, and metadata
+- **`{job_id}.log`**: Human-readable text format with formatted timestamps and event log
+
+#### Use Cases
+
+- **Troubleshooting**: Understand why OpenCode generated unexpected results
+- **Prompt analysis**: Review how prompts are processed and responded to
+- **Error debugging**: Inspect full event sequences when jobs fail
+- **Performance review**: Analyze conversation flow and timing
+
+**Note**: Debug logging is disabled by default. Enable only when needed to avoid unnecessary I/O overhead.
 
 ### Supported Endpoints
 
@@ -1062,6 +1139,24 @@ When OpenCode is used, responses include additional metadata:
 
 5. **Cleanup**: Workspaces and containers are automatically cleaned up after job completion or failure
 
+### Debug Conversation Logging
+
+If you encounter issues with OpenCode, enable debug conversation logging to capture full conversation details:
+
+```bash
+OPENCODE_DEBUG_LOGGING=true
+```
+
+This will create detailed log files in `logs/opencode/` that include:
+- Full prompt text sent to OpenCode
+- Complete SSE event stream with timestamps
+- Error events and responses
+- Execution timing information
+
+Review the log files (`{job_id}.json` and `{job_id}.log`) to understand what OpenCode received and how it responded.
+
+**Note**: Debug logging is disabled by default. Enable only when needed to avoid unnecessary I/O overhead.
+
 ### Troubleshooting
 
 | Issue | Solution |
@@ -1075,6 +1170,8 @@ When OpenCode is used, responses include additional metadata:
 | "OpenCode requires OPENCODE_LLM_PROVIDER" | Set `OPENCODE_LLM_PROVIDER` in config (OpenCode does NOT use main `LLM_PROVIDER`) |
 | "OpenCode requires OPENCODE_*_MODEL" | Set OpenCode-specific model (e.g., `OPENCODE_ANTHROPIC_MODEL`, not `ANTHROPIC_MODEL`) |
 | "Authentication error (401)" | Verify OpenCode-specific API key is valid and correctly set (check `OPENCODE_*_API_KEY` variables) |
+| "OpenCode containers can't reach MCP servers" | Verify MCP servers are running: `python main.py mcp status`; check network: `docker network inspect augment-mcp-network` |
+| "MCP servers fail to start" | Check environment variables (use `JIRA_SERVER_URL`, `CONFLUENCE_SERVER_URL`, `BITBUCKET_EMAIL` - same as main app); verify API tokens; check container logs: `docker compose -f docker-compose.mcp.yml logs`; verify `BITBUCKET_WORKSPACES` is set correctly |
 
 ---
 

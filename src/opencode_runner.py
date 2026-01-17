@@ -77,7 +77,10 @@ class OpenCodeRunner:
         job_timeout_minutes: int = 20,
         max_result_size_mb: int = 10,
         result_file: str = "result.json",
-        llm_config: Optional[Dict[str, Any]] = None
+        llm_config: Optional[Dict[str, Any]] = None,
+        mcp_network_name: Optional[str] = None,
+        debug_conversation_logging: bool = False,
+        conversation_log_dir: Optional[str] = None
     ):
         """
         Initialize the OpenCode runner.
@@ -88,17 +91,26 @@ class OpenCodeRunner:
             max_result_size_mb: Maximum result file size
             result_file: Name of the result file to read
             llm_config: LLM configuration dict with API keys and settings
+            mcp_network_name: Docker network name to connect containers to (for MCP server access)
+            debug_conversation_logging: Enable conversation logging for debugging
+            conversation_log_dir: Directory for conversation log files (default: logs/opencode)
         """
         self.docker_image = docker_image
         self.job_timeout_seconds = job_timeout_minutes * 60
         self.max_result_size_bytes = max_result_size_mb * 1024 * 1024
         self.result_file = result_file
         self.llm_config = llm_config or {}
+        self.mcp_network_name = mcp_network_name
+        self.debug_conversation_logging = debug_conversation_logging
+        self.conversation_log_dir = conversation_log_dir or 'logs/opencode'
         
         self._docker_client: Optional[docker.DockerClient] = None
         self._semaphore: Optional[asyncio.Semaphore] = None
         self._last_json_response: Optional[Dict[str, Any]] = None
         self._current_container: Any = None  # docker.models.containers.Container
+        self._conversation_logs: List[Dict[str, Any]] = []
+        self._conversation_start_time: Optional[float] = None
+        self._conversation_prompt: Optional[str] = None
     
     def set_llm_config(self, llm_config: Dict[str, Any]):
         """Set LLM configuration for container environment"""
@@ -354,7 +366,9 @@ class OpenCodeRunner:
         workspace_path: Path,
         prompt: str,
         job_type: str,
-        cancellation_event: Optional[asyncio.Event] = None
+        cancellation_event: Optional[asyncio.Event] = None,
+        repos: Optional[List[Dict[str, Any]]] = None,
+        mcp_config: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Execute an OpenCode job.
@@ -383,11 +397,11 @@ class OpenCodeRunner:
         if self._semaphore:
             async with self._semaphore:
                 return await self._execute_internal(
-                    job_id, workspace_path, prompt, job_type, cancellation_event
+                    job_id, workspace_path, prompt, job_type, cancellation_event, repos, mcp_config
                 )
         else:
             return await self._execute_internal(
-                job_id, workspace_path, prompt, job_type, cancellation_event
+                job_id, workspace_path, prompt, job_type, cancellation_event, repos, mcp_config
             )
     
     async def _execute_internal(
@@ -396,7 +410,9 @@ class OpenCodeRunner:
         workspace_path: Path,
         prompt: str,
         job_type: str,
-        cancellation_event: Optional[asyncio.Event] = None
+        cancellation_event: Optional[asyncio.Event] = None,
+        repos: Optional[List[Dict[str, Any]]] = None,
+        mcp_config: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """Internal execution logic"""
         container = None
@@ -409,7 +425,7 @@ class OpenCodeRunner:
                 raise asyncio.CancelledError("Job cancelled before container spawn")
             
             # Spawn container
-            container, port = await self._spawn_container(job_id, workspace_path)
+            container, port = await self._spawn_container(job_id, workspace_path, repos, mcp_config)
             container_id = container.id
             self._current_container = container  # Store for diagnostics
             
@@ -467,10 +483,303 @@ class OpenCodeRunner:
             # Clear container reference
             self._current_container = None
     
+    def _check_mcp_network(self) -> bool:
+        """
+        Check if the MCP network exists.
+        
+        Returns:
+            True if network exists, False otherwise
+        """
+        if not self.mcp_network_name:
+            return False
+        
+        try:
+            networks = self.docker_client.networks.list(names=[self.mcp_network_name])
+            return len(networks) > 0
+        except Exception as e:
+            logger.warning(f"[OpenCode] Failed to check MCP network {self.mcp_network_name}: {e}")
+            return False
+    
+    def _extract_workspace_from_url(self, url: str) -> Optional[str]:
+        """
+        Extract workspace name from Bitbucket repository URL.
+        
+        Supports formats:
+        - https://bitbucket.org/{workspace}/{repo}.git
+        - git@bitbucket.org:{workspace}/{repo}.git
+        - https://{workspace}@bitbucket.org/{workspace}/{repo}.git
+        
+        Args:
+            url: Repository URL
+            
+        Returns:
+            Workspace name or None if not a Bitbucket URL or cannot be extracted
+        """
+        if not url or 'bitbucket' not in url.lower():
+            return None
+        
+        try:
+            # Remove .git suffix
+            url = url.rstrip('.git')
+            
+            # Handle git@ format: git@bitbucket.org:workspace/repo
+            if url.startswith('git@'):
+                parts = url.split(':')
+                if len(parts) >= 2:
+                    path_parts = parts[1].split('/')
+                    if len(path_parts) >= 2:
+                        return path_parts[0]
+            
+            # Handle https:// format: https://bitbucket.org/workspace/repo
+            # or https://workspace@bitbucket.org/workspace/repo
+            if '://' in url:
+                # Remove protocol and any auth
+                url_part = url.split('://', 1)[1]
+                # Remove username@ if present
+                if '@' in url_part:
+                    url_part = url_part.split('@', 1)[1]
+                # Split by / and get workspace (second part after domain)
+                parts = url_part.split('/')
+                # Find bitbucket.org and get next part
+                for i, part in enumerate(parts):
+                    if 'bitbucket' in part.lower() and i + 1 < len(parts):
+                        return parts[i + 1]
+            
+            return None
+        except Exception as e:
+            logger.warning(f"Could not extract workspace from URL {url}: {e}")
+            return None
+    
+    def _sanitize_workspace_for_docker(self, workspace: str) -> str:
+        """
+        Sanitize workspace name for use in Docker service/container names.
+        
+        This matches the sanitization used in generate-mcp-compose.py to ensure
+        hostnames in opencode.json match the actual Docker service names.
+        
+        Docker naming rules:
+        - Must start with a letter or number
+        - Can contain letters, numbers, underscores, and hyphens
+        - Cannot contain special characters that break YAML or Docker
+        
+        Args:
+            workspace: Workspace name to validate
+            
+        Returns:
+            Sanitized workspace name safe for Docker
+        """
+        if not workspace:
+            return "workspace"
+        
+        # Remove any characters that could break Docker naming or YAML
+        # Allow: alphanumeric, hyphens, underscores
+        sanitized = re.sub(r'[^a-zA-Z0-9_-]', '-', workspace)
+        
+        # Ensure it starts with alphanumeric (Docker requirement)
+        if sanitized and not sanitized[0].isalnum():
+            sanitized = 'w' + sanitized
+        
+        # Remove consecutive hyphens/underscores
+        sanitized = re.sub(r'[-_]{2,}', '-', sanitized)
+        
+        # Remove leading/trailing hyphens/underscores
+        sanitized = sanitized.strip('-_')
+        
+        # If empty after sanitization, use a default
+        if not sanitized:
+            sanitized = 'workspace'
+        
+        return sanitized
+    
+    def _sanitize_workspace_for_json_key(self, workspace: Optional[str]) -> str:
+        """
+        Sanitize workspace name for use as JSON key.
+        
+        For Docker hostname matching, we use the same sanitization as Docker service names.
+        This ensures hostnames in opencode.json match the actual Docker service names.
+        
+        Args:
+            workspace: Workspace name (may be None or empty)
+            
+        Returns:
+            Sanitized workspace name safe for JSON keys and Docker hostnames
+        """
+        if not workspace:
+            return "default"
+        
+        # Strip whitespace first
+        workspace = workspace.strip()
+        
+        # If empty after stripping, use default
+        if not workspace:
+            return "default"
+        
+        # Use Docker sanitization to ensure hostnames match service names
+        return self._sanitize_workspace_for_docker(workspace)
+    
+    def _generate_opencode_json(
+        self,
+        repos: Optional[List[Dict[str, Any]]] = None,
+        mcp_config: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Generate opencode.json configuration based on repos and MCP configuration.
+        
+        Args:
+            repos: List of repo specs with 'url' and optional 'branch'
+            mcp_config: MCP configuration from config.yaml
+            
+        Returns:
+            opencode.json configuration dict
+        """
+        if not mcp_config:
+            mcp_config = {}
+        
+        # Extract unique workspaces from repos
+        workspaces = set()
+        if repos:
+            for repo in repos:
+                url = repo.get('url', '')
+                if url:
+                    workspace = self._extract_workspace_from_url(url)
+                    if workspace:
+                        workspaces.add(workspace)
+        
+        # Get configured workspaces from config
+        configured_workspaces = []
+        try:
+            from .config import Config
+            config = Config()
+            configured_workspaces = config.get_bitbucket_workspaces()
+        except Exception:
+            pass
+        
+        # Build Bitbucket MCP URLs
+        bitbucket_mcp_urls = []
+        bitbucket_mcp_config = mcp_config.get('bitbucket', {})
+        
+        if workspaces and configured_workspaces:
+            # For each workspace found in repos, find corresponding MCP instance
+            # Note: We need to match using original workspace names, but sanitize for hostnames
+            # to match Docker service names created by generate-mcp-compose.py
+            base_port = bitbucket_mcp_config.get('port', 7001)
+            for workspace in sorted(workspaces):
+                if workspace in configured_workspaces:
+                    index = configured_workspaces.index(workspace)
+                    port = base_port + index
+                    # Sanitize workspace name for Docker hostname to match service names
+                    sanitized_workspace = self._sanitize_workspace_for_docker(workspace)
+                    hostname = f"bitbucket-mcp-{sanitized_workspace}"
+                    bitbucket_mcp_urls.append({
+                        "workspace": workspace,  # Keep original for JSON key sanitization
+                        "url": f"http://{hostname}:{port}/mcp",
+                        "enabled": True,
+                        "read_only": True
+                    })
+                else:
+                    # Workspace found in repos but not configured - log warning
+                    logger.warning(
+                        f"[OpenCode] Workspace '{workspace}' found in repo URLs but not in configured workspaces. "
+                        f"Configured workspaces: {configured_workspaces}. This workspace will not have MCP access."
+                    )
+        elif configured_workspaces:
+            # If no repos provided or workspaces not found, use first configured workspace
+            # (fallback behavior)
+            base_port = bitbucket_mcp_config.get('port', 7001)
+            workspace = configured_workspaces[0]
+            # Sanitize workspace name for Docker hostname to match service names
+            sanitized_workspace = self._sanitize_workspace_for_docker(workspace)
+            hostname = f"bitbucket-mcp-{sanitized_workspace}"
+            port = base_port
+            bitbucket_mcp_urls.append({
+                "workspace": workspace,  # Keep original for JSON key sanitization
+                "url": f"http://{hostname}:{port}/mcp",
+                "enabled": True,
+                "read_only": True
+            })
+        else:
+            # Fallback to default single Bitbucket MCP
+            bitbucket_mcp_url = bitbucket_mcp_config.get('url', 'http://bitbucket-mcp:7001/mcp')
+            # Try to extract workspace from URL if possible, otherwise use None (will be sanitized to "default")
+            fallback_workspace = None
+            if 'bitbucket-mcp-' in bitbucket_mcp_url:
+                # Extract workspace from hostname like "bitbucket-mcp-workspace1"
+                try:
+                    hostname_part = bitbucket_mcp_url.split('//')[1].split(':')[0] if '//' in bitbucket_mcp_url else bitbucket_mcp_url
+                    if 'bitbucket-mcp-' in hostname_part:
+                        fallback_workspace = hostname_part.split('bitbucket-mcp-')[1]
+                except Exception:
+                    pass
+            bitbucket_mcp_urls.append({
+                "url": bitbucket_mcp_url,
+                "workspace": fallback_workspace,  # Include workspace if we can extract it
+                "enabled": bitbucket_mcp_config.get('enabled', True),
+                "read_only": True
+            })
+        
+        # Build Atlassian MCP config
+        atlassian_mcp_config = mcp_config.get('atlassian', {})
+        # Calculate Atlassian MCP port based on number of configured Bitbucket MCP instances
+        # If 0 or 1 Bitbucket instances, use port 7002. Otherwise use base_port + count
+        base_port = bitbucket_mcp_config.get('port', 7001)
+        configured_count = len(configured_workspaces) if configured_workspaces else 0
+        if configured_count > 1:
+            atlassian_port = base_port + configured_count
+        else:
+            atlassian_port = 7002
+        atlassian_mcp_url = atlassian_mcp_config.get('url', f'http://atlassian-mcp:{atlassian_port}/mcp')
+        
+        # Build opencode.json structure
+        # OpenCode supports multiple MCP servers as separate keys in the mcp object
+        mcp_dict = {}
+        
+        # Add Bitbucket MCP instances (always use bitbucket-{workspace} format)
+        if bitbucket_mcp_urls:
+            workspaces_used = []
+            for mcp_url_config in bitbucket_mcp_urls:
+                workspace = mcp_url_config.get("workspace")
+                sanitized_workspace = self._sanitize_workspace_for_json_key(workspace)
+                mcp_dict[f"bitbucket-{sanitized_workspace}"] = {
+                    "url": mcp_url_config["url"],
+                    "enabled": mcp_url_config.get("enabled", True),
+                    "read_only": mcp_url_config.get("read_only", True)
+                }
+                workspaces_used.append(sanitized_workspace)
+            
+            if len(bitbucket_mcp_urls) == 1:
+                logger.debug(
+                    f"[OpenCode] Single Bitbucket MCP instance configured: "
+                    f"{workspaces_used[0]}"
+                )
+            else:
+                logger.info(
+                    f"[OpenCode] Multiple Bitbucket MCP instances enabled ({len(bitbucket_mcp_urls)}): "
+                    f"{', '.join(workspaces_used)}"
+                )
+        else:
+            # No Bitbucket MCP URLs configured
+            logger.warning("[OpenCode] No Bitbucket MCP instances configured")
+        
+        # Add Atlassian MCP
+        mcp_dict["atlassian"] = {
+            "enabled": atlassian_mcp_config.get('enabled', True),
+            "url": atlassian_mcp_url,
+            "read_only": True
+        }
+        
+        return {
+            "mcp": mcp_dict,
+            "policy": {
+                "max_calls_per_run": mcp_config.get('policy', {}).get('max_calls_per_run', 50)
+            }
+        }
+    
     async def _spawn_container(
         self,
         job_id: str,
-        workspace_path: Path
+        workspace_path: Path,
+        repos: Optional[List[Dict[str, Any]]] = None,
+        mcp_config: Optional[Dict[str, Any]] = None
     ) -> tuple:
         """
         Spawn an OpenCode container.
@@ -501,23 +810,74 @@ class OpenCodeRunner:
                         "Ensure the image is pulled before running jobs (call ensure_image_available() on startup)."
                     )
             
+            # Check MCP network if configured
+            network_config = None
+            if self.mcp_network_name:
+                if self._check_mcp_network():
+                    network_config = self.mcp_network_name
+                    logger.info(f"[OpenCode] Connecting container to MCP network: {self.mcp_network_name}")
+                else:
+                    logger.warning(
+                        f"[OpenCode] MCP network '{self.mcp_network_name}' not found. "
+                        "Container will not be able to access MCP servers. "
+                        "Start MCP services with: python main.py mcp start"
+                    )
+            
             # Build environment variables for container
             container_env = self._build_container_environment()
             
+            # Prepare volumes - workspace is always mounted
+            volumes = {
+                str(workspace_path): {"bind": "/workspace", "mode": "rw"}
+            }
+            
+            # Generate opencode.json dynamically based on repos and MCP config
+            opencode_json_content = self._generate_opencode_json(repos, mcp_config)
+            
+            # Create temporary opencode.json file in workspace
+            opencode_json_path = workspace_path / "opencode.json"
+            try:
+                with open(opencode_json_path, 'w') as f:
+                    json.dump(opencode_json_content, f, indent=2)
+            except (IOError, OSError) as e:
+                raise ContainerError(
+                    f"Failed to create opencode.json in workspace: {e}. "
+                    "Ensure workspace directory is writable."
+                )
+            
+            # Mount the generated opencode.json
+            volumes[str(opencode_json_path)] = {
+                "bind": "/app/opencode.json",
+                "mode": "ro"
+            }
+            logger.debug(f"[OpenCode] Generated and mounting opencode.json to /app/opencode.json")
+            # Log MCP config (all bitbucket instances use bitbucket-{workspace} format)
+            bitbucket_keys = [k for k in opencode_json_content['mcp'].keys() if k.startswith('bitbucket-')]
+            if bitbucket_keys:
+                bitbucket_info = f"{len(bitbucket_keys)} workspace(s): {', '.join(bitbucket_keys)}"
+            else:
+                bitbucket_info = "N/A"
+            atlassian_info = opencode_json_content['mcp'].get('atlassian', {}).get('url', 'N/A')
+            logger.debug(f"[OpenCode] MCP config: Bitbucket={bitbucket_info}, Atlassian={atlassian_info}")
+            
             # Create and start container
-            container = self.docker_client.containers.run(
-                self.docker_image,
-                name=container_name,
-                command=["serve", "--hostname", "0.0.0.0", "--port", "4096"],
-                volumes={
-                    str(workspace_path): {"bind": "/workspace", "mode": "rw"}
-                },
-                ports={"4096/tcp": None},  # Random host port
-                detach=True,
-                remove=False,  # We remove manually after getting result
-                working_dir="/workspace",
-                environment=container_env
-            )
+            container_kwargs = {
+                "image": self.docker_image,
+                "name": container_name,
+                "command": ["serve", "--hostname", "0.0.0.0", "--port", "4096"],
+                "volumes": volumes,
+                "ports": {"4096/tcp": None},  # Random host port
+                "detach": True,
+                "remove": False,  # We remove manually after getting result
+                "working_dir": "/workspace",
+                "environment": container_env
+            }
+            
+            # Add network if MCP network is configured and exists
+            if network_config:
+                container_kwargs["network"] = network_config
+            
+            container = self.docker_client.containers.run(**container_kwargs)
             
             # Get the mapped port
             container.reload()
@@ -602,10 +962,17 @@ class OpenCodeRunner:
         
         logger.debug(f"[OpenCode] Job {job_id}: Sending prompt ({len(prompt)} chars)")
         
+        # Initialize conversation logging if debug mode enabled
+        if self.debug_conversation_logging:
+            self._conversation_logs = []
+            self._conversation_start_time = time.time()
+            self._conversation_prompt = prompt
+        
         last_error = None
         backoff = SSE_INITIAL_BACKOFF
         
-        for attempt in range(SSE_MAX_RETRIES):
+        try:
+            for attempt in range(SSE_MAX_RETRIES):
             # Check cancellation before each attempt
             if cancellation_event and cancellation_event.is_set():
                 raise asyncio.CancelledError("Job cancelled during SSE streaming")
@@ -693,6 +1060,16 @@ class OpenCodeRunner:
                             
                             # Otherwise, assume it completed successfully
                             logger.info(f"[OpenCode] Job {job_id}: Received JSON response (non-streaming completion)")
+                            # For non-streaming responses, record the JSON response as an event
+                            if self.debug_conversation_logging:
+                                event_record = {
+                                    "timestamp": time.time(),
+                                    "event_type": "json_response",
+                                    "data": json.dumps(data),
+                                    "raw_event": data
+                                }
+                                self._conversation_logs.append(event_record)
+                                await self._save_conversation_logs(job_id)
                             return
                         except json.JSONDecodeError as e:
                             logger.warning(f"[OpenCode] Job {job_id}: Invalid JSON in response: {e}")
@@ -759,11 +1136,30 @@ class OpenCodeRunner:
         raise ContainerError(
             f"SSE streaming failed after {SSE_MAX_RETRIES} attempts: {last_error}"
         )
+        finally:
+            # Save conversation logs even on failure if debug mode enabled
+            if self.debug_conversation_logging:
+                await self._save_conversation_logs(job_id)
     
     def _process_sse_event_obj(self, event, job_id: str):
         """Process an SSE event object from httpx-sse"""
         event_type = event.event or "message"
         data = event.data or ""
+        timestamp = time.time()
+        
+        # Capture full event for debug logging if enabled
+        if self.debug_conversation_logging:
+            event_record = {
+                "timestamp": timestamp,
+                "event_type": event_type,
+                "data": data,
+                "raw_event": {
+                    "event": event.event,
+                    "data": event.data,
+                    "id": getattr(event, 'id', None),
+                }
+            }
+            self._conversation_logs.append(event_record)
         
         if event_type == "error":
             logger.error(f"[OpenCode] Job {job_id} SSE error: {data}")
@@ -798,6 +1194,81 @@ class OpenCodeRunner:
                 if len(data) > 100 else
                 f"[OpenCode] Job {job_id} SSE {event_type}: {data}"
             )
+    
+    async def _save_conversation_logs(self, job_id: str):
+        """
+        Save conversation logs to JSON and text files.
+        
+        Args:
+            job_id: Job identifier for file naming
+        """
+        if not self.debug_conversation_logging:
+            return
+        
+        if not self._conversation_start_time:
+            logger.warning(f"[OpenCode] Job {job_id}: Cannot save conversation logs - no start time recorded")
+            return
+        
+        end_time = time.time()
+        duration = end_time - self._conversation_start_time
+        
+        # Create log directory if it doesn't exist
+        log_dir = Path(self.conversation_log_dir)
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            logger.warning(f"[OpenCode] Job {job_id}: Failed to create log directory {log_dir}: {e}")
+            return
+        
+        # Prepare log data
+        start_time_str = datetime.fromtimestamp(self._conversation_start_time, tz=timezone.utc).isoformat()
+        end_time_str = datetime.fromtimestamp(end_time, tz=timezone.utc).isoformat()
+        
+        log_data = {
+            "job_id": job_id,
+            "start_time": start_time_str,
+            "end_time": end_time_str,
+            "duration_seconds": round(duration, 3),
+            "prompt": self._conversation_prompt or "",
+            "events": self._conversation_logs
+        }
+        
+        # Save JSON file
+        json_path = log_dir / f"{job_id}.json"
+        try:
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(log_data, f, indent=2, ensure_ascii=False)
+            logger.info(f"[OpenCode] Job {job_id}: Saved conversation log to {json_path}")
+        except Exception as e:
+            logger.error(f"[OpenCode] Job {job_id}: Failed to save JSON log file: {e}")
+        
+        # Save human-readable text file
+        text_path = log_dir / f"{job_id}.log"
+        try:
+            with open(text_path, 'w', encoding='utf-8') as f:
+                f.write(f"OpenCode Conversation Log - Job: {job_id}\n")
+                f.write(f"Started: {start_time_str}\n")
+                f.write(f"Ended: {end_time_str}\n")
+                f.write(f"Duration: {duration:.3f}s\n")
+                f.write(f"\n{'='*80}\n")
+                f.write("PROMPT\n")
+                f.write(f"{'='*80}\n")
+                f.write(f"{self._conversation_prompt or '(no prompt recorded)'}\n")
+                f.write(f"\n{'='*80}\n")
+                f.write("EVENTS\n")
+                f.write(f"{'='*80}\n")
+                
+                for event in self._conversation_logs:
+                    event_time = datetime.fromtimestamp(event['timestamp'], tz=timezone.utc)
+                    event_time_str = event_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                    event_type = event.get('event_type', 'unknown')
+                    event_data = event.get('data', '')
+                    
+                    f.write(f"[{event_time_str}] [{event_type}] {event_data}\n")
+            
+            logger.info(f"[OpenCode] Job {job_id}: Saved conversation log to {text_path}")
+        except Exception as e:
+            logger.error(f"[OpenCode] Job {job_id}: Failed to save text log file: {e}")
     
     async def _read_result(
         self,

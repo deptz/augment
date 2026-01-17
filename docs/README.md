@@ -25,6 +25,8 @@ Frontend implementation guides:
 ### [Technical Documentation](technical/)
 Technical deep-dives and implementation details:
 - [Technical Documentation](technical/TECHNICAL.md) - Technical implementation details including ticket linking, Confluence extraction, PRD/RFC integration
+- [MCP Setup Guide](technical/MCP_SETUP.md) - Complete guide for setting up MCP servers for OpenCode integration
+- [MCP Architecture](technical/MCP_ARCHITECTURE.md) - Visual architecture diagrams of MCP integration
 
 ## Quick Links
 
@@ -42,6 +44,8 @@ Technical deep-dives and implementation details:
 - [API Documentation](api/API_DOCUMENTATION.md) - Complete API reference
 - [Features Documentation](features/FEATURES.md) - All features explained
 - [Technical Documentation](technical/TECHNICAL.md) - Technical implementation details
+- [MCP Setup Guide](technical/MCP_SETUP.md) - MCP server setup for OpenCode integration
+- [MCP Architecture](technical/MCP_ARCHITECTURE.md) - Visual architecture diagrams
 - [Ticket Linking Strategy](technical/TECHNICAL.md#ticket-linking-strategy) - Understanding ticket relationships
 - [PRD Template](templates/sample-prd-template.md) - Structure your PRDs correctly
 - [RFC Template](templates/sample-rfc-template.md) - Structure your RFCs correctly

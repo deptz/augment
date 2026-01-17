@@ -105,11 +105,35 @@ class WorkspaceManager:
         return url
     
     def _get_repo_name(self, url: str) -> str:
-        """Extract repository name from URL"""
+        """
+        Extract repository name from URL with path sanitization.
+        
+        Args:
+            url: Repository URL
+            
+        Returns:
+            Sanitized repository name safe for filesystem use
+        """
         # Remove .git suffix if present
         url = url.rstrip('.git')
         # Get last path component
-        return url.split('/')[-1]
+        repo_name = url.split('/')[-1]
+        
+        # Sanitize to prevent path traversal and filesystem issues
+        # Remove any path components (/, \)
+        repo_name = repo_name.replace('/', '_').replace('\\', '_')
+        # Remove path traversal attempts
+        repo_name = repo_name.replace('..', '_')
+        # Remove null bytes
+        repo_name = repo_name.replace('\x00', '_')
+        # Remove leading/trailing dots and spaces (Windows filesystem issues)
+        repo_name = repo_name.strip('. ')
+        
+        # If empty after sanitization, use a default
+        if not repo_name:
+            repo_name = 'repository'
+        
+        return repo_name
     
     async def create_workspace(
         self,
@@ -150,6 +174,9 @@ class WorkspaceManager:
                 repo_path = workspace_path / repo_name
                 
                 await self._clone_repo(url, repo_path, branch)
+            
+            # Distribute Agents.md to all repos and workspace root
+            await self._distribute_agents_md(workspace_path, repos)
             
             return workspace_path
             
@@ -347,6 +374,283 @@ class WorkspaceManager:
                 repos.append(item.name)
         
         return repos
+    
+    def _load_opencode_agents_template(self) -> str:
+        """
+        Load the OpenCode-specific Agents.md template.
+        
+        Returns:
+            Template content as string
+            
+        Raises:
+            WorkspaceError: If template file cannot be read or is invalid
+        """
+        # Find template file relative to this module
+        # workspace_manager.py is in src/, template is in src/prompts/
+        template_path = Path(__file__).parent / "prompts" / "opencode_agents.md"
+        
+        if not template_path.exists():
+            raise WorkspaceError(
+                f"OpenCode Agents.md template not found at {template_path}. "
+                "Ensure src/prompts/opencode_agents.md exists."
+            )
+        
+        # Check if it's a file (not a directory)
+        if not template_path.is_file():
+            raise WorkspaceError(
+                f"OpenCode Agents.md template path exists but is not a file: {template_path}"
+            )
+        
+        # Check file size (max 1MB for template)
+        max_template_size = 1024 * 1024  # 1MB
+        try:
+            file_size = template_path.stat().st_size
+            if file_size > max_template_size:
+                raise WorkspaceError(
+                    f"OpenCode Agents.md template is too large ({file_size} bytes, max {max_template_size} bytes)"
+                )
+        except OSError as e:
+            raise WorkspaceError(f"Failed to check template file size: {e}")
+        
+        try:
+            with open(template_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Validate content is not empty
+            if not content or not content.strip():
+                raise WorkspaceError("OpenCode Agents.md template is empty")
+            
+            return content
+        except UnicodeDecodeError as e:
+            raise WorkspaceError(
+                f"OpenCode Agents.md template has invalid UTF-8 encoding: {e}"
+            )
+        except Exception as e:
+            raise WorkspaceError(f"Failed to read OpenCode Agents.md template: {e}")
+    
+    def _find_agents_md_file(self, directory: Path) -> Optional[Path]:
+        """
+        Find Agents.md file in a directory (case-insensitive).
+        
+        Args:
+            directory: Directory to search
+            
+        Returns:
+            Path to Agents.md file if found, None otherwise
+        """
+        if not directory.exists() or not directory.is_dir():
+            return None
+        
+        # Check for common variations
+        for filename in ['Agents.md', 'AGENTS.md', 'agents.md', 'Agents.MD', 'AGENTS.MD']:
+            file_path = directory / filename
+            if file_path.exists():
+                # Ensure it's a file, not a directory
+                if file_path.is_file():
+                    return file_path
+                else:
+                    # Log warning if it's a directory
+                    logger.warning(
+                        f"Found {filename} but it's a directory, not a file. Skipping."
+                    )
+        
+        return None
+    
+    def _write_agents_md(self, file_path: Path, content: str, append: bool = False):
+        """
+        Write or append content to Agents.md file with safety checks.
+        
+        Args:
+            file_path: Path to Agents.md file
+            content: Content to write/append
+            append: If True, append to existing file; if False, overwrite
+        """
+        # Maximum file size for existing files (10MB)
+        max_file_size = 10 * 1024 * 1024  # 10MB
+        
+        try:
+            # Check if target is a directory
+            if file_path.exists() and file_path.is_dir():
+                logger.warning(
+                    f"Cannot write Agents.md: {file_path} is a directory, not a file"
+                )
+                return
+            
+            if append and file_path.exists():
+                # Check file size before reading
+                try:
+                    file_size = file_path.stat().st_size
+                    if file_size > max_file_size:
+                        logger.warning(
+                            f"Existing Agents.md at {file_path} is too large "
+                            f"({file_size} bytes, max {max_file_size} bytes). Skipping append."
+                        )
+                        return
+                except OSError as e:
+                    logger.warning(f"Failed to check file size for {file_path}: {e}")
+                    return
+                
+                # Read existing content with encoding fallback
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        existing_content = f.read()
+                except UnicodeDecodeError:
+                    # Try with error handling
+                    try:
+                        with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                            existing_content = f.read()
+                        logger.warning(
+                            f"Existing Agents.md at {file_path} had encoding issues, "
+                            "replaced invalid characters"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to read existing Agents.md at {file_path}: {e}"
+                        )
+                        return
+                
+                # Check if content is already appended (idempotency)
+                # Look for the OpenCode MCP Integration header
+                if "## OpenCode MCP Integration" in existing_content:
+                    logger.debug(
+                        f"Agents.md at {file_path} already contains OpenCode content. Skipping."
+                    )
+                    return
+                
+                # Append with separator
+                separator = "\n\n---\n\n"
+                new_content = existing_content + separator + content
+            else:
+                new_content = content
+            
+            # Ensure parent directory exists
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Write file atomically (write to temp then rename)
+            temp_path = file_path.with_suffix('.md.tmp')
+            try:
+                with open(temp_path, 'w', encoding='utf-8') as f:
+                    f.write(new_content)
+                # Atomic rename
+                temp_path.replace(file_path)
+                logger.debug(f"Updated Agents.md at {file_path} (append={append})")
+            except Exception as e:
+                # Clean up temp file on error
+                if temp_path.exists():
+                    try:
+                        temp_path.unlink()
+                    except Exception:
+                        pass
+                raise
+            
+        except PermissionError as e:
+            logger.warning(
+                f"Permission denied writing Agents.md to {file_path}: {e}"
+            )
+        except OSError as e:
+            logger.warning(f"OS error writing Agents.md to {file_path}: {e}")
+        except Exception as e:
+            logger.warning(f"Failed to write Agents.md to {file_path}: {e}")
+            # Don't raise - this is non-critical
+    
+    async def _distribute_agents_md(
+        self,
+        workspace_path: Path,
+        repos: List[Dict[str, Any]]
+    ):
+        """
+        Distribute OpenCode-specific Agents.md to all cloned repositories and workspace root.
+        
+        For each repository:
+        - If Agents.md exists: Append OpenCode section with separator
+        - If Agents.md doesn't exist: Create new file with OpenCode content
+        
+        Also creates/updates Agents.md at workspace root level.
+        
+        Args:
+            workspace_path: Path to workspace directory
+            repos: List of repo specs that were cloned
+        """
+        # Handle empty repos list gracefully
+        if not repos:
+            logger.debug("No repositories to distribute Agents.md to")
+            # Still create at workspace root
+            try:
+                opencode_content = self._load_opencode_agents_template()
+                workspace_agents_md = workspace_path / "Agents.md"
+                existing_workspace_agents = self._find_agents_md_file(workspace_path)
+                
+                if existing_workspace_agents:
+                    logger.info("Found existing Agents.md at workspace root, appending OpenCode content")
+                    self._write_agents_md(existing_workspace_agents, opencode_content, append=True)
+                else:
+                    logger.info("Creating Agents.md at workspace root")
+                    self._write_agents_md(workspace_agents_md, opencode_content, append=False)
+            except Exception as e:
+                logger.warning(f"Failed to create Agents.md at workspace root: {e}")
+            return
+        
+        try:
+            # Load template
+            opencode_content = self._load_opencode_agents_template()
+            
+            # Validate workspace path
+            if not workspace_path.exists():
+                logger.warning(f"Workspace path does not exist: {workspace_path}")
+                return
+            
+            if not workspace_path.is_dir():
+                logger.warning(f"Workspace path is not a directory: {workspace_path}")
+                return
+            
+            # Distribute to each cloned repository
+            for repo_spec in repos:
+                url = repo_spec.get('url')
+                if not url:
+                    logger.debug("Skipping repo spec with no URL")
+                    continue
+                
+                repo_name = self._get_repo_name(url)
+                repo_path = workspace_path / repo_name
+                
+                if not repo_path.exists():
+                    logger.debug(f"Repo path does not exist, skipping: {repo_path}")
+                    continue
+                
+                if not repo_path.is_dir():
+                    logger.warning(f"Repo path is not a directory, skipping: {repo_path}")
+                    continue
+                
+                # Find existing Agents.md (case-insensitive)
+                agents_md_path = self._find_agents_md_file(repo_path)
+                
+                if agents_md_path:
+                    # File exists - append
+                    logger.info(f"Found existing Agents.md in {repo_name}, appending OpenCode content")
+                    self._write_agents_md(agents_md_path, opencode_content, append=True)
+                else:
+                    # File doesn't exist - create new
+                    agents_md_path = repo_path / "Agents.md"
+                    logger.info(f"Creating new Agents.md in {repo_name}")
+                    self._write_agents_md(agents_md_path, opencode_content, append=False)
+            
+            # Also create/update at workspace root
+            workspace_agents_md = workspace_path / "Agents.md"
+            existing_workspace_agents = self._find_agents_md_file(workspace_path)
+            
+            if existing_workspace_agents:
+                logger.info("Found existing Agents.md at workspace root, appending OpenCode content")
+                self._write_agents_md(existing_workspace_agents, opencode_content, append=True)
+            else:
+                logger.info("Creating Agents.md at workspace root")
+                self._write_agents_md(workspace_agents_md, opencode_content, append=False)
+            
+        except WorkspaceError as e:
+            # Template loading errors - log but don't fail
+            logger.warning(f"Failed to load OpenCode Agents.md template: {e}")
+        except Exception as e:
+            # Log error but don't fail workspace creation
+            logger.warning(f"Failed to distribute Agents.md to workspace: {e}")
 
 
 # Factory function for creating workspace manager from config

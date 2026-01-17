@@ -138,6 +138,8 @@ class Config:
             'shallow_clone': opencode_config.get('shallow_clone', True),
             'result_file': opencode_config.get('result_file', 'result.json'),
             'max_result_size_mb': int(opencode_config.get('max_result_size_mb', 10)),
+            'debug_conversation_logging': opencode_config.get('debug_conversation_logging', False),
+            'conversation_log_dir': opencode_config.get('conversation_log_dir', 'logs/opencode'),
         }
     
     def get_opencode_llm_config(self, provider: Optional[str] = None, model: Optional[str] = None) -> Dict[str, Any]:
@@ -281,6 +283,10 @@ class Config:
             'username': git_config.get('username') or os.getenv('GIT_USERNAME'),
             'password': git_config.get('password') or os.getenv('GIT_PASSWORD'),
         }
+    
+    def get_mcp_config(self) -> Dict[str, Any]:
+        """Get MCP server configuration"""
+        return self._config.get('mcp', {})
     
     def get_cors_origins(self) -> List[str]:
         """
