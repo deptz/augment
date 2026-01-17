@@ -43,7 +43,22 @@ class ArtifactStore:
     
     def _get_job_dir(self, job_id: str) -> Path:
         """Get directory for a specific job's artifacts"""
-        return self.base_dir / job_id
+        # Sanitize job_id to prevent path traversal
+        safe_job_id = job_id.replace('/', '_').replace('\\', '_').replace('..', '_')
+        safe_job_id = safe_job_id.replace('\x00', '_')
+        safe_job_id = safe_job_id.strip('. ')
+        if not safe_job_id:
+            raise ArtifactStoreError("Invalid job_id: empty after sanitization")
+        return self.base_dir / safe_job_id
+    
+    def _sanitize_artifact_type(self, artifact_type: str) -> str:
+        """Sanitize artifact type to prevent path traversal"""
+        safe_type = artifact_type.replace('/', '_').replace('\\', '_').replace('..', '_')
+        safe_type = safe_type.replace('\x00', '_')
+        safe_type = safe_type.strip('. ')
+        if not safe_type:
+            raise ArtifactStoreError("Invalid artifact_type: empty after sanitization")
+        return safe_type
     
     def store_artifact(
         self,
@@ -53,6 +68,9 @@ class ArtifactStore:
         metadata: Optional[Dict[str, Any]] = None,
         max_retries: int = 3
     ) -> str:
+        """Store an artifact with input sanitization"""
+        # Sanitize inputs
+        artifact_type = self._sanitize_artifact_type(artifact_type)
         """
         Store an artifact for a job with retry logic.
         
@@ -207,6 +225,8 @@ class ArtifactStore:
         Returns:
             Artifact data (dict, string, etc.) or None if not found
         """
+        # Sanitize inputs
+        artifact_type = self._sanitize_artifact_type(artifact_type)
         job_dir = self._get_job_dir(job_id)
         
         # Try JSON first
@@ -249,28 +269,151 @@ class ArtifactStore:
         
         return sorted(artifacts)
     
-    def get_artifact_metadata(self, job_id: str, artifact_type: str) -> Optional[Dict[str, Any]]:
+    def get_artifact_metadata(
+        self,
+        job_id: str,
+        artifact_type: str
+    ) -> Optional[Dict[str, Any]]:
         """
-        Get metadata for an artifact.
+        Get metadata for an artifact without loading the full artifact.
         
         Args:
             job_id: Job identifier
             artifact_type: Type of artifact
             
         Returns:
-            Metadata dict or None if not found
+            Metadata dictionary or None if artifact not found
         """
         job_dir = self._get_job_dir(job_id)
-        metadata_path = job_dir / f"{artifact_type}.metadata.json"
+        if not job_dir.exists():
+            return None
         
+        # Try to find the artifact file
+        json_path = job_dir / f"{artifact_type}.json"
+        txt_path = job_dir / f"{artifact_type}.txt"
+        
+        artifact_path = None
+        if json_path.exists():
+            artifact_path = json_path
+            content_type = "application/json"
+        elif txt_path.exists():
+            artifact_path = txt_path
+            content_type = "text/plain"
+        else:
+            return None
+        
+        # Get file stats
+        stat = artifact_path.stat()
+        size_bytes = stat.st_size
+        
+        # Get creation and modification times
+        created_at = datetime.fromtimestamp(stat.st_ctime, tz=timezone.utc)
+        updated_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+        
+        # Calculate checksum (simple hash)
+        import hashlib
+        try:
+            content = artifact_path.read_bytes()
+            checksum = hashlib.sha256(content).hexdigest()
+        except Exception:
+            checksum = None
+        
+        # Try to load stored metadata if exists
+        metadata_path = job_dir / f"{artifact_type}.metadata.json"
+        stored_metadata = {}
         if metadata_path.exists():
             try:
-                return json.loads(metadata_path.read_text(encoding='utf-8'))
-            except json.JSONDecodeError:
-                logger.warning(f"Failed to parse metadata for {artifact_type} in job {job_id}")
-                return None
+                stored_metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
+            except Exception:
+                pass
         
-        return None
+        # Build metadata response
+        metadata = {
+            "artifact_type": artifact_type,
+            "size_bytes": size_bytes,
+            "content_type": content_type,
+            "encoding": "utf-8",
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "checksum": checksum
+        }
+        
+        # Merge with stored metadata (allows custom fields)
+        metadata.update(stored_metadata)
+        
+        return metadata
+    
+    def get_artifact_metadata(self, job_id: str, artifact_type: str) -> Optional[Dict[str, Any]]:
+        """
+        Get metadata for an artifact without loading the full artifact.
+        
+        Args:
+            job_id: Job identifier
+            artifact_type: Type of artifact
+            
+        Returns:
+            Metadata dictionary or None if artifact not found
+        """
+        # Sanitize inputs
+        artifact_type = self._sanitize_artifact_type(artifact_type)
+        job_dir = self._get_job_dir(job_id)
+        if not job_dir.exists():
+            return None
+        
+        # Try to find the artifact file
+        json_path = job_dir / f"{artifact_type}.json"
+        txt_path = job_dir / f"{artifact_type}.txt"
+        
+        artifact_path = None
+        if json_path.exists():
+            artifact_path = json_path
+            content_type = "application/json"
+        elif txt_path.exists():
+            artifact_path = txt_path
+            content_type = "text/plain"
+        else:
+            return None
+        
+        # Get file stats
+        stat = artifact_path.stat()
+        size_bytes = stat.st_size
+        
+        # Get creation and modification times
+        created_at = datetime.fromtimestamp(stat.st_ctime, tz=timezone.utc)
+        updated_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+        
+        # Calculate checksum (simple hash)
+        import hashlib
+        try:
+            content = artifact_path.read_bytes()
+            checksum = hashlib.sha256(content).hexdigest()
+        except Exception:
+            checksum = None
+        
+        # Try to load stored metadata if exists
+        metadata_path = job_dir / f"{artifact_type}.metadata.json"
+        stored_metadata = {}
+        if metadata_path.exists():
+            try:
+                stored_metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
+            except Exception:
+                pass
+        
+        # Build metadata response
+        metadata = {
+            "artifact_type": artifact_type,
+            "size_bytes": size_bytes,
+            "content_type": content_type,
+            "encoding": "utf-8",
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "checksum": checksum
+        }
+        
+        # Merge with stored metadata (allows custom fields)
+        metadata.update(stored_metadata)
+        
+        return metadata
     
     def delete_job_artifacts(self, job_id: str) -> bool:
         """
