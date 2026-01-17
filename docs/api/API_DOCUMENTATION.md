@@ -932,6 +932,8 @@ OPENCODE_TIMEOUT=20          # Job timeout in minutes (default: 20). Maximum exe
 OPENCODE_CLONE_TIMEOUT=300   # Git clone timeout in seconds (default: 300). Timeout for repository cloning operations.
 OPENCODE_SHALLOW_CLONE=true  # Use shallow clone with --depth 1 (default: true). Faster cloning, only latest commit.
 OPENCODE_MAX_RESULT_SIZE=10  # Maximum result file size in MB (default: 10). Prevents oversized result files.
+OPENCODE_DEBUG_LOGGING=false  # Enable conversation logging for debugging (default: false). Saves logs to logs/opencode/
+OPENCODE_LOG_DIR=logs/opencode  # Directory for conversation log files (default: logs/opencode)
 
 # Git Credentials (Required for Private Repositories, Optional for Public)
 # These credentials are used when cloning private repositories via HTTPS
@@ -951,10 +953,41 @@ GIT_PASSWORD=your-git-token     # Git password, personal access token, or app pa
 | `OPENCODE_CLONE_TIMEOUT` | No | `300` | Git clone timeout in seconds |
 | `OPENCODE_SHALLOW_CLONE` | No | `true` | Use shallow clone (--depth 1) |
 | `OPENCODE_MAX_RESULT_SIZE` | No | `10` | Maximum result file size in MB |
+| `OPENCODE_DEBUG_LOGGING` | No | `false` | Enable conversation logging for debugging |
+| `OPENCODE_LOG_DIR` | No | `logs/opencode` | Directory for conversation log files |
 | `GIT_USERNAME` | Yes* | - | Git username (required for private repos) |
 | `GIT_PASSWORD` | Yes* | - | Git password/token (required for private repos) |
 
 *Required only for private repositories. Optional for public repositories.
+
+### Debug Conversation Logging
+
+OpenCode includes an optional debug mode that captures full conversation logs for troubleshooting and analysis.
+
+#### Enabling Debug Logging
+
+Set `OPENCODE_DEBUG_LOGGING=true` in your `.env` file or `config.yaml`:
+
+```bash
+OPENCODE_DEBUG_LOGGING=true
+OPENCODE_LOG_DIR=logs/opencode  # Optional, defaults to logs/opencode
+```
+
+#### Log Files
+
+When enabled, debug logging creates two files per job in the log directory:
+
+- **`{job_id}.json`**: Structured JSON with complete conversation data, timestamps, and metadata
+- **`{job_id}.log`**: Human-readable text format with formatted timestamps and event log
+
+#### Use Cases
+
+- **Troubleshooting**: Understand why OpenCode generated unexpected results
+- **Prompt analysis**: Review how prompts are processed and responded to
+- **Error debugging**: Inspect full event sequences when jobs fail
+- **Performance review**: Analyze conversation flow and timing
+
+**Note**: Debug logging is disabled by default. Enable only when needed to avoid unnecessary I/O overhead.
 
 ### Supported Endpoints
 
@@ -1096,6 +1129,24 @@ When OpenCode is used, responses include additional metadata:
 4. **Cancellation**: Jobs can be cancelled during execution; the system checks for cancellation at multiple points including during SSE streaming
 
 5. **Cleanup**: Workspaces and containers are automatically cleaned up after job completion or failure
+
+### Debug Conversation Logging
+
+If you encounter issues with OpenCode, enable debug conversation logging to capture full conversation details:
+
+```bash
+OPENCODE_DEBUG_LOGGING=true
+```
+
+This will create detailed log files in `logs/opencode/` that include:
+- Full prompt text sent to OpenCode
+- Complete SSE event stream with timestamps
+- Error events and responses
+- Execution timing information
+
+Review the log files (`{job_id}.json` and `{job_id}.log`) to understand what OpenCode received and how it responded.
+
+**Note**: Debug logging is disabled by default. Enable only when needed to avoid unnecessary I/O overhead.
 
 ### Troubleshooting
 

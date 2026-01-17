@@ -78,7 +78,9 @@ class OpenCodeRunner:
         max_result_size_mb: int = 10,
         result_file: str = "result.json",
         llm_config: Optional[Dict[str, Any]] = None,
-        mcp_network_name: Optional[str] = None
+        mcp_network_name: Optional[str] = None,
+        debug_conversation_logging: bool = False,
+        conversation_log_dir: Optional[str] = None
     ):
         """
         Initialize the OpenCode runner.
@@ -90,6 +92,8 @@ class OpenCodeRunner:
             result_file: Name of the result file to read
             llm_config: LLM configuration dict with API keys and settings
             mcp_network_name: Docker network name to connect containers to (for MCP server access)
+            debug_conversation_logging: Enable conversation logging for debugging
+            conversation_log_dir: Directory for conversation log files (default: logs/opencode)
         """
         self.docker_image = docker_image
         self.job_timeout_seconds = job_timeout_minutes * 60
@@ -97,11 +101,16 @@ class OpenCodeRunner:
         self.result_file = result_file
         self.llm_config = llm_config or {}
         self.mcp_network_name = mcp_network_name
+        self.debug_conversation_logging = debug_conversation_logging
+        self.conversation_log_dir = conversation_log_dir or 'logs/opencode'
         
         self._docker_client: Optional[docker.DockerClient] = None
         self._semaphore: Optional[asyncio.Semaphore] = None
         self._last_json_response: Optional[Dict[str, Any]] = None
         self._current_container: Any = None  # docker.models.containers.Container
+        self._conversation_logs: List[Dict[str, Any]] = []
+        self._conversation_start_time: Optional[float] = None
+        self._conversation_prompt: Optional[str] = None
     
     def set_llm_config(self, llm_config: Dict[str, Any]):
         """Set LLM configuration for container environment"""
@@ -953,10 +962,17 @@ class OpenCodeRunner:
         
         logger.debug(f"[OpenCode] Job {job_id}: Sending prompt ({len(prompt)} chars)")
         
+        # Initialize conversation logging if debug mode enabled
+        if self.debug_conversation_logging:
+            self._conversation_logs = []
+            self._conversation_start_time = time.time()
+            self._conversation_prompt = prompt
+        
         last_error = None
         backoff = SSE_INITIAL_BACKOFF
         
-        for attempt in range(SSE_MAX_RETRIES):
+        try:
+            for attempt in range(SSE_MAX_RETRIES):
             # Check cancellation before each attempt
             if cancellation_event and cancellation_event.is_set():
                 raise asyncio.CancelledError("Job cancelled during SSE streaming")
@@ -1044,6 +1060,16 @@ class OpenCodeRunner:
                             
                             # Otherwise, assume it completed successfully
                             logger.info(f"[OpenCode] Job {job_id}: Received JSON response (non-streaming completion)")
+                            # For non-streaming responses, record the JSON response as an event
+                            if self.debug_conversation_logging:
+                                event_record = {
+                                    "timestamp": time.time(),
+                                    "event_type": "json_response",
+                                    "data": json.dumps(data),
+                                    "raw_event": data
+                                }
+                                self._conversation_logs.append(event_record)
+                                await self._save_conversation_logs(job_id)
                             return
                         except json.JSONDecodeError as e:
                             logger.warning(f"[OpenCode] Job {job_id}: Invalid JSON in response: {e}")
@@ -1110,11 +1136,30 @@ class OpenCodeRunner:
         raise ContainerError(
             f"SSE streaming failed after {SSE_MAX_RETRIES} attempts: {last_error}"
         )
+        finally:
+            # Save conversation logs even on failure if debug mode enabled
+            if self.debug_conversation_logging:
+                await self._save_conversation_logs(job_id)
     
     def _process_sse_event_obj(self, event, job_id: str):
         """Process an SSE event object from httpx-sse"""
         event_type = event.event or "message"
         data = event.data or ""
+        timestamp = time.time()
+        
+        # Capture full event for debug logging if enabled
+        if self.debug_conversation_logging:
+            event_record = {
+                "timestamp": timestamp,
+                "event_type": event_type,
+                "data": data,
+                "raw_event": {
+                    "event": event.event,
+                    "data": event.data,
+                    "id": getattr(event, 'id', None),
+                }
+            }
+            self._conversation_logs.append(event_record)
         
         if event_type == "error":
             logger.error(f"[OpenCode] Job {job_id} SSE error: {data}")
@@ -1149,6 +1194,81 @@ class OpenCodeRunner:
                 if len(data) > 100 else
                 f"[OpenCode] Job {job_id} SSE {event_type}: {data}"
             )
+    
+    async def _save_conversation_logs(self, job_id: str):
+        """
+        Save conversation logs to JSON and text files.
+        
+        Args:
+            job_id: Job identifier for file naming
+        """
+        if not self.debug_conversation_logging:
+            return
+        
+        if not self._conversation_start_time:
+            logger.warning(f"[OpenCode] Job {job_id}: Cannot save conversation logs - no start time recorded")
+            return
+        
+        end_time = time.time()
+        duration = end_time - self._conversation_start_time
+        
+        # Create log directory if it doesn't exist
+        log_dir = Path(self.conversation_log_dir)
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            logger.warning(f"[OpenCode] Job {job_id}: Failed to create log directory {log_dir}: {e}")
+            return
+        
+        # Prepare log data
+        start_time_str = datetime.fromtimestamp(self._conversation_start_time, tz=timezone.utc).isoformat()
+        end_time_str = datetime.fromtimestamp(end_time, tz=timezone.utc).isoformat()
+        
+        log_data = {
+            "job_id": job_id,
+            "start_time": start_time_str,
+            "end_time": end_time_str,
+            "duration_seconds": round(duration, 3),
+            "prompt": self._conversation_prompt or "",
+            "events": self._conversation_logs
+        }
+        
+        # Save JSON file
+        json_path = log_dir / f"{job_id}.json"
+        try:
+            with open(json_path, 'w', encoding='utf-8') as f:
+                json.dump(log_data, f, indent=2, ensure_ascii=False)
+            logger.info(f"[OpenCode] Job {job_id}: Saved conversation log to {json_path}")
+        except Exception as e:
+            logger.error(f"[OpenCode] Job {job_id}: Failed to save JSON log file: {e}")
+        
+        # Save human-readable text file
+        text_path = log_dir / f"{job_id}.log"
+        try:
+            with open(text_path, 'w', encoding='utf-8') as f:
+                f.write(f"OpenCode Conversation Log - Job: {job_id}\n")
+                f.write(f"Started: {start_time_str}\n")
+                f.write(f"Ended: {end_time_str}\n")
+                f.write(f"Duration: {duration:.3f}s\n")
+                f.write(f"\n{'='*80}\n")
+                f.write("PROMPT\n")
+                f.write(f"{'='*80}\n")
+                f.write(f"{self._conversation_prompt or '(no prompt recorded)'}\n")
+                f.write(f"\n{'='*80}\n")
+                f.write("EVENTS\n")
+                f.write(f"{'='*80}\n")
+                
+                for event in self._conversation_logs:
+                    event_time = datetime.fromtimestamp(event['timestamp'], tz=timezone.utc)
+                    event_time_str = event_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                    event_type = event.get('event_type', 'unknown')
+                    event_data = event.get('data', '')
+                    
+                    f.write(f"[{event_time_str}] [{event_type}] {event_data}\n")
+            
+            logger.info(f"[OpenCode] Job {job_id}: Saved conversation log to {text_path}")
+        except Exception as e:
+            logger.error(f"[OpenCode] Job {job_id}: Failed to save text log file: {e}")
     
     async def _read_result(
         self,

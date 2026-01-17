@@ -153,7 +153,9 @@ async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update
                 max_result_size_mb=opencode_config.get('max_result_size_mb', 10),
                 result_file=opencode_config.get('result_file', 'result.json'),
                 llm_config=opencode_llm_config,
-                mcp_network_name=mcp_network_name
+                mcp_network_name=mcp_network_name,
+                debug_conversation_logging=opencode_config.get('debug_conversation_logging', False),
+                conversation_log_dir=opencode_config.get('conversation_log_dir', 'logs/opencode')
             )
             opencode_runner.set_concurrency_limit(opencode_config.get('max_concurrent', 2))
             
@@ -649,7 +651,9 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
                 max_result_size_mb=opencode_config.get('max_result_size_mb', 10),
                 result_file=opencode_config.get('result_file', 'result.json'),
                 llm_config=opencode_llm_config,
-                mcp_network_name=mcp_network_name
+                mcp_network_name=mcp_network_name,
+                debug_conversation_logging=opencode_config.get('debug_conversation_logging', False),
+                conversation_log_dir=opencode_config.get('conversation_log_dir', 'logs/opencode')
             )
             opencode_runner.set_concurrency_limit(opencode_config.get('max_concurrent', 2))
             
@@ -1537,7 +1541,9 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
                 max_result_size_mb=opencode_config.get('max_result_size_mb', 10),
                 result_file=opencode_config.get('result_file', 'result.json'),
                 llm_config=opencode_llm_config,
-                mcp_network_name=mcp_network_name
+                mcp_network_name=mcp_network_name,
+                debug_conversation_logging=opencode_config.get('debug_conversation_logging', False),
+                conversation_log_dir=opencode_config.get('conversation_log_dir', 'logs/opencode')
             )
             opencode_runner.set_concurrency_limit(opencode_config.get('max_concurrent', 2))
             

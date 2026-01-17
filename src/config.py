@@ -138,6 +138,8 @@ class Config:
             'shallow_clone': opencode_config.get('shallow_clone', True),
             'result_file': opencode_config.get('result_file', 'result.json'),
             'max_result_size_mb': int(opencode_config.get('max_result_size_mb', 10)),
+            'debug_conversation_logging': opencode_config.get('debug_conversation_logging', False),
+            'conversation_log_dir': opencode_config.get('conversation_log_dir', 'logs/opencode'),
         }
     
     def get_opencode_llm_config(self, provider: Optional[str] = None, model: Optional[str] = None) -> Dict[str, Any]:

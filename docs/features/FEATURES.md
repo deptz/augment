@@ -1027,6 +1027,107 @@ The generated `opencode.json` always uses `bitbucket-{workspace}` format for all
 
 For detailed MCP setup instructions, see [MCP Setup Guide](../technical/MCP_SETUP.md).
 
+### Debug Conversation Logging
+
+OpenCode includes an optional debug mode that captures and stores full conversation logs for troubleshooting and analysis.
+
+#### Overview
+
+When enabled, debug conversation logging:
+- **Captures full SSE events**: Records complete event data (not truncated) from OpenCode conversations
+- **Saves dual-format logs**: Creates both JSON (structured) and text (human-readable) files
+- **Preserves on errors**: Logs are saved even if jobs fail or are cancelled
+- **Zero performance impact when disabled**: Debug mode is off by default
+
+#### Configuration
+
+Enable debug conversation logging in your `.env` file:
+
+```bash
+# Enable debug conversation logging
+OPENCODE_DEBUG_LOGGING=true
+
+# Optional: Custom log directory (defaults to logs/opencode)
+OPENCODE_LOG_DIR=logs/opencode
+```
+
+Or in `config.yaml`:
+
+```yaml
+opencode:
+  debug_conversation_logging: true
+  conversation_log_dir: logs/opencode  # Optional, defaults to logs/opencode
+```
+
+#### Log Files
+
+When debug mode is enabled, two files are created for each OpenCode job:
+
+1. **`{job_id}.json`** - Structured JSON format with:
+   - Job metadata (job_id, start_time, end_time, duration)
+   - Full prompt text
+   - Complete event log with timestamps, event types, and data
+
+2. **`{job_id}.log`** - Human-readable text format with:
+   - Job summary (start time, end time, duration)
+   - Full prompt text
+   - Chronological event log with formatted timestamps
+
+**Example JSON structure:**
+```json
+{
+  "job_id": "abc123",
+  "start_time": "2024-01-01T12:00:00.000Z",
+  "end_time": "2024-01-01T12:05:30.123Z",
+  "duration_seconds": 330.123,
+  "prompt": "Generate task breakdown for...",
+  "events": [
+    {
+      "timestamp": 1704110400.123,
+      "event_type": "message",
+      "data": "Event data...",
+      "raw_event": {...}
+    }
+  ]
+}
+```
+
+**Example text format:**
+```
+OpenCode Conversation Log - Job: abc123
+Started: 2024-01-01T12:00:00.000Z
+Ended: 2024-01-01T12:05:30.123Z
+Duration: 330.123s
+
+================================================================================
+PROMPT
+================================================================================
+Generate task breakdown for...
+
+================================================================================
+EVENTS
+================================================================================
+[2024-01-01 12:00:00.123] [message] Event data...
+[2024-01-01 12:00:01.456] [done]
+```
+
+#### Use Cases
+
+Debug conversation logging is useful for:
+- **Troubleshooting**: Understanding why OpenCode generated unexpected results
+- **Prompt optimization**: Analyzing how prompts are processed and responded to
+- **Performance analysis**: Reviewing conversation flow and timing
+- **Debugging errors**: Inspecting full event sequences when jobs fail
+- **Audit trails**: Maintaining records of AI-generated content
+
+#### Important Notes
+
+- **Disabled by default**: Debug logging is off by default to avoid unnecessary I/O
+- **Error resilient**: Log failures don't impact job execution (warnings logged, job continues)
+- **Automatic directory creation**: Log directory is created automatically if it doesn't exist
+- **Per-job files**: Each job gets its own log files, identified by `job_id`
+- **Full event capture**: All SSE events are captured, including errors and completion events
+
 ### Technical Details
 
 #### Configuration Flow

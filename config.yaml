@@ -91,6 +91,8 @@ opencode:
   shallow_clone: ${OPENCODE_SHALLOW_CLONE:true}  # Use shallow clone (--depth 1)
   result_file: ${OPENCODE_RESULT_FILE:result.json}  # Result filename in workspace
   max_result_size_mb: ${OPENCODE_MAX_RESULT_SIZE:10}  # Max result file size in MB
+  debug_conversation_logging: ${OPENCODE_DEBUG_LOGGING:false}  # Enable conversation logging for debugging
+  conversation_log_dir: ${OPENCODE_LOG_DIR:logs/opencode}  # Directory for conversation log files
   
   # OpenCode-specific LLM Configuration (REQUIRED)
   # OpenCode ONLY uses OpenCode-specific configuration and does NOT fall back to main LLM config
