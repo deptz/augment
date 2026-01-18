@@ -78,6 +78,11 @@ TASK_BREAKDOWN_SCHEMA = {
                     "team": {
                         "type": "string",
                         "description": "Team responsible (backend, frontend, etc.)"
+                    },
+                    "test_cases": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Test cases for this task (optional, only if generate_test_cases is true)"
                     }
                 },
                 "additionalProperties": True
@@ -153,6 +158,11 @@ COVERAGE_CHECK_SCHEMA = {
                         "type": "string",
                         "enum": ["critical", "important", "minor"],
                         "description": "Severity of the gap"
+                    },
+                    "implementation_status": {
+                        "type": "string",
+                        "enum": ["missing", "partial", "mismatch"],
+                        "description": "Implementation status: missing (code doesn't exist), partial (incomplete), mismatch (doesn't match description)"
                     }
                 },
                 "additionalProperties": True

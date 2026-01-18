@@ -64,6 +64,15 @@ class CoverageGap(BaseModel):
     requirement: str = Field(..., description="The unmet requirement from story")
     severity: str = Field(..., description="Gap severity: critical, important, or minor")
     suggestion: str = Field(..., description="Suggestion for addressing the gap")
+    # OpenCode-specific fields (optional, preserved from OpenCode results)
+    affected_files: Optional[List[str]] = Field(
+        None,
+        description="Files that would need changes (from OpenCode analysis)"
+    )
+    implementation_status: Optional[str] = Field(
+        None,
+        description="Implementation status: missing, partial, mismatch (from OpenCode analysis)"
+    )
 
 
 class UpdateTaskSuggestion(BaseModel):
