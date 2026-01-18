@@ -12,7 +12,23 @@ class Config:
     """Configuration manager for the backfill tool"""
     
     def __init__(self, config_path: str = "config.yaml"):
-        load_dotenv()
+        # Load .env file (not .env.example - that's just a template)
+        env_loaded = load_dotenv()
+        if env_loaded:
+            logger.info(f"[Config] Loaded .env file from: {os.path.abspath('.env')}")
+        else:
+            logger.warning("[Config] No .env file found - using environment variables and defaults")
+        
+        # Log OpenCode-specific env vars for debugging (without exposing values)
+        opencode_provider = os.getenv('OPENCODE_LLM_PROVIDER')
+        opencode_model = os.getenv('OPENCODE_ANTHROPIC_MODEL')
+        if opencode_provider:
+            logger.info(f"[Config] OPENCODE_LLM_PROVIDER is set: {opencode_provider}")
+        if opencode_model:
+            logger.info(f"[Config] OPENCODE_ANTHROPIC_MODEL is set: {opencode_model}")
+        elif opencode_provider == 'claude':
+            logger.warning("[Config] OPENCODE_ANTHROPIC_MODEL is NOT set but provider is claude - this will cause an error")
+        
         self.config_path = config_path
         self._config = self._load_config()
     
@@ -149,9 +165,12 @@ class Config:
         ONLY uses OpenCode-specific LLM configuration. Does NOT fall back to main LLM config.
         This ensures OpenCode uses separate API keys from the main application.
         
+        IMPORTANT: For OpenCode, model is ALWAYS taken from environment variable (OPENCODE_*_MODEL),
+        NOT from API request parameters. This ensures consistency and prevents accidental overrides.
+        
         Args:
-            provider: Optional provider override (from API request)
-            model: Optional model override (from API request)
+            provider: Optional provider override (from API request) - only used if OPENCODE_LLM_PROVIDER not set
+            model: IGNORED for OpenCode - always uses OPENCODE_*_MODEL from environment
             
         Returns:
             LLM configuration dict for OpenCode
@@ -159,18 +178,38 @@ class Config:
         Raises:
             ValueError: If OpenCode-specific API key is missing for the provider
         """
+        # For OpenCode, always ignore model parameter from API - use environment variable only
+        if model:
+            logger.warning(
+                f"[OpenCode Config] Model parameter '{model}' from API request is IGNORED for OpenCode. "
+                f"OpenCode always uses OPENCODE_*_MODEL from environment variables for consistency."
+            )
+            model = None  # Ignore API override
         opencode_config = self.opencode
         opencode_llm_config = opencode_config.get('llm', {})
         
-        # Use provided provider or OpenCode-specific provider ONLY (no fallback to main LLM config)
-        provider = provider or opencode_llm_config.get('provider')
+        # Debug: Log the full OpenCode LLM config (without exposing API keys)
+        debug_config = {k: ('***' if 'key' in k.lower() or 'token' in k.lower() else v) for k, v in opencode_llm_config.items()}
+        logger.info(f"[OpenCode Config] Full OpenCode LLM config: {debug_config}")
         
-        if not provider:
-            raise ValueError(
-                "OpenCode requires a provider to be specified. "
-                "Set OPENCODE_LLM_PROVIDER in your .env file or pass provider parameter. "
-                "OpenCode does not use the main LLM provider configuration."
+        # OpenCode MUST use OPENCODE_LLM_PROVIDER from environment - NO fallback, NO API override
+        opencode_provider = opencode_llm_config.get('provider')
+        if provider:
+            logger.warning(
+                f"[OpenCode Config] Provider parameter '{provider}' from API request is IGNORED for OpenCode. "
+                f"OpenCode MUST use OPENCODE_LLM_PROVIDER from environment variables only."
             )
+        
+        if not opencode_provider or (isinstance(opencode_provider, str) and not opencode_provider.strip()):
+            env_provider = os.getenv('OPENCODE_LLM_PROVIDER')
+            logger.error(f"[OpenCode Config] OPENCODE_LLM_PROVIDER is not set or empty! Environment value: {repr(env_provider)}")
+            raise ValueError(
+                "OpenCode REQUIRES OPENCODE_LLM_PROVIDER to be set in your .env file. "
+                "OpenCode does NOT use the main LLM provider configuration and does NOT accept API overrides. "
+                f"Current environment value: {repr(env_provider)}"
+            )
+        
+        provider = opencode_provider  # Use ONLY from environment, never from API parameter
         
         # Validate provider
         if not self.validate_llm_provider(provider):
@@ -205,73 +244,101 @@ class Config:
             api_key_value = opencode_llm_config.get('openai_api_key')
             if not api_key_value or (isinstance(api_key_value, str) and not api_key_value.strip()):
                 raise ValueError(
-                    "OpenCode requires OPENCODE_OPENAI_API_KEY to be set in your .env file. "
-                    "OpenCode does not use the main LLM configuration."
+                    "OpenCode REQUIRES OPENCODE_OPENAI_API_KEY to be set in your .env file. "
+                    "NO fallback - OpenCode does NOT use the main LLM configuration. "
+                    "This environment variable MUST be set."
                 )
             config['api_key'] = api_key_value
             config['openai_api_key'] = api_key_value
             # Only use OpenCode-specific model, no fallback to main LLM config
+            # For OpenCode, model parameter is always ignored - use environment variable only
             default_model = opencode_llm_config.get('openai_model')
-            if not default_model:
+            if not default_model or (isinstance(default_model, str) and not default_model.strip()):
                 raise ValueError(
-                    "OpenCode requires OPENCODE_OPENAI_MODEL to be set in your .env file. "
-                    "OpenCode does not use the main LLM configuration."
+                    "OpenCode REQUIRES OPENCODE_OPENAI_MODEL to be set in your .env file. "
+                    "NO fallback - OpenCode does NOT use the main LLM configuration. "
+                    "This environment variable MUST be set."
                 )
-            config['model'] = model or default_model
+            config['model'] = default_model  # Always use from environment, never from API parameter
         elif provider == 'claude':
             api_key_value = opencode_llm_config.get('anthropic_api_key')
             if not api_key_value or (isinstance(api_key_value, str) and not api_key_value.strip()):
                 raise ValueError(
-                    "OpenCode requires OPENCODE_ANTHROPIC_API_KEY to be set in your .env file. "
-                    "OpenCode does not use the main LLM configuration."
+                    "OpenCode REQUIRES OPENCODE_ANTHROPIC_API_KEY to be set in your .env file. "
+                    "NO fallback - OpenCode does NOT use the main LLM configuration. "
+                    "This environment variable MUST be set."
                 )
             config['api_key'] = api_key_value
             config['anthropic_api_key'] = api_key_value
+            
+            # Debug: Check environment variable directly
+            env_model = os.getenv('OPENCODE_ANTHROPIC_MODEL')
+            logger.info(f"[OpenCode Config] Environment variable OPENCODE_ANTHROPIC_MODEL: {repr(env_model)}")
+            
             # Only use OpenCode-specific model, no fallback to main LLM config
             default_model = opencode_llm_config.get('anthropic_model')
-            if not default_model:
+            logger.info(f"[OpenCode Config] Raw config value from opencode.llm.anthropic_model: {repr(default_model)}")
+            logger.info(f"[OpenCode Config] Type of default_model: {type(default_model).__name__}")
+            
+            # Check if it's empty string or None
+            if not default_model or (isinstance(default_model, str) and not default_model.strip()):
+                logger.error(f"[OpenCode Config] OPENCODE_ANTHROPIC_MODEL is not set or empty! Environment value: {repr(env_model)}")
                 raise ValueError(
-                    "OpenCode requires OPENCODE_ANTHROPIC_MODEL to be set in your .env file. "
-                    "OpenCode does not use the main LLM configuration."
+                    "OpenCode REQUIRES OPENCODE_ANTHROPIC_MODEL to be set in your .env file. "
+                    "NO fallback - OpenCode does NOT use the main LLM configuration. "
+                    f"Current environment value: {repr(env_model)}. "
+                    "This environment variable MUST be set (e.g., OPENCODE_ANTHROPIC_MODEL=claude-haiku-4-5)."
                 )
-            config['model'] = model or default_model
+            
+            # For OpenCode, model parameter is always ignored - use environment variable only
+            final_model = default_model  # Always use from environment, never from API parameter
+            config['model'] = final_model
+            # Also set provider-specific key for compatibility
+            config['anthropic_model'] = final_model
+            logger.info(f"[OpenCode Config] Final Anthropic model configured: {final_model} (from OPENCODE_ANTHROPIC_MODEL env var, stored in both 'model' and 'anthropic_model' keys)")
         elif provider == 'gemini':
             api_key_value = opencode_llm_config.get('google_api_key')
             if not api_key_value or (isinstance(api_key_value, str) and not api_key_value.strip()):
                 raise ValueError(
-                    "OpenCode requires OPENCODE_GOOGLE_API_KEY to be set in your .env file. "
-                    "OpenCode does not use the main LLM configuration."
+                    "OpenCode REQUIRES OPENCODE_GOOGLE_API_KEY to be set in your .env file. "
+                    "NO fallback - OpenCode does NOT use the main LLM configuration. "
+                    "This environment variable MUST be set."
                 )
             config['api_key'] = api_key_value
             config['google_api_key'] = api_key_value
             # Only use OpenCode-specific model, no fallback to main LLM config
+            # For OpenCode, model parameter is always ignored - use environment variable only
             default_model = opencode_llm_config.get('google_model')
-            if not default_model:
+            if not default_model or (isinstance(default_model, str) and not default_model.strip()):
                 raise ValueError(
-                    "OpenCode requires OPENCODE_GOOGLE_MODEL to be set in your .env file. "
-                    "OpenCode does not use the main LLM configuration."
+                    "OpenCode REQUIRES OPENCODE_GOOGLE_MODEL to be set in your .env file. "
+                    "NO fallback - OpenCode does NOT use the main LLM configuration. "
+                    "This environment variable MUST be set."
                 )
-            config['model'] = model or default_model
+            config['model'] = default_model  # Always use from environment, never from API parameter
         elif provider == 'kimi':
             api_key_value = opencode_llm_config.get('moonshot_api_key')
             if not api_key_value or (isinstance(api_key_value, str) and not api_key_value.strip()):
                 raise ValueError(
-                    "OpenCode requires OPENCODE_MOONSHOT_API_KEY to be set in your .env file. "
-                    "OpenCode does not use the main LLM configuration."
+                    "OpenCode REQUIRES OPENCODE_MOONSHOT_API_KEY to be set in your .env file. "
+                    "NO fallback - OpenCode does NOT use the main LLM configuration. "
+                    "This environment variable MUST be set."
                 )
             config['api_key'] = api_key_value
             config['moonshot_api_key'] = api_key_value
             # Only use OpenCode-specific model, no fallback to main LLM config
+            # For OpenCode, model parameter is always ignored - use environment variable only
             default_model = opencode_llm_config.get('moonshot_model')
-            if not default_model:
+            if not default_model or (isinstance(default_model, str) and not default_model.strip()):
                 raise ValueError(
-                    "OpenCode requires OPENCODE_MOONSHOT_MODEL to be set in your .env file. "
-                    "OpenCode does not use the main LLM configuration."
+                    "OpenCode REQUIRES OPENCODE_MOONSHOT_MODEL to be set in your .env file. "
+                    "NO fallback - OpenCode does NOT use the main LLM configuration. "
+                    "This environment variable MUST be set."
                 )
-            config['model'] = model or default_model
+            config['model'] = default_model  # Always use from environment, never from API parameter
         
-        # Validate model if specified
-        if model and not self.validate_llm_model(provider, config['model']):
+        # Validate model from environment (model parameter is ignored for OpenCode)
+        if not self.validate_llm_model(provider, config['model']):
             raise ValueError(f"Unsupported model '{config['model']}' for provider '{provider}'. Supported models: {self.get_supported_models()[provider]}")
         
         return config
@@ -329,6 +396,7 @@ class Config:
                 'claude-haiku-4-5', 'claude-sonnet-4-5', 'claude-opus-4-1-20250805', 'claude-opus-4-1', 'claude-opus-4-20250514', 'claude-opus-4-0', 
                 'claude-sonnet-4-20250514', 'claude-sonnet-4-0', 'claude-3-7-sonnet-20250219', 'claude-3-7-sonnet-latest',
                 'claude-3-5-sonnet-20241022', 'claude-3-5-sonnet-latest', 'claude-3-5-haiku-20241022', 'claude-3-5-haiku-latest'
+                # Note: Date-suffixed variants (e.g., claude-haiku-4-5-20251001) are also supported via flexible validation
             ],
             'gemini': [
                 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite',
@@ -351,7 +419,28 @@ class Config:
     def validate_llm_model(self, provider: str, model: str) -> bool:
         """Validate if the model is supported for the given provider"""
         supported_models = self.get_supported_models()
-        return provider in supported_models and model in supported_models[provider]
+        if provider not in supported_models:
+            return False
+        
+        # Check exact match first
+        if model in supported_models[provider]:
+            return True
+        
+        # For Claude models, allow date-suffixed variants (e.g., claude-haiku-4-5-20251001)
+        # This is needed for OpenCode which supports date-suffixed model names
+        if provider == 'claude':
+            import re
+            # Remove date suffix (8 digits at the end: YYYYMMDD) to get base model
+            # Examples: 
+            #   - claude-haiku-4-5-20251001 -> claude-haiku-4-5
+            #   - claude-sonnet-4-5-20250929 -> claude-sonnet-4-5
+            #   - claude-3-5-haiku-20241022 -> claude-3-5-haiku (already in list)
+            base_model = re.sub(r'-\d{8}$', '', model)
+            # Check if base model (without date) is in supported list
+            if base_model in supported_models[provider]:
+                return True
+        
+        return False
     
     def get_llm_config(self, provider: Optional[str] = None, model: Optional[str] = None) -> Dict[str, Any]:
         """Get configuration for the specified or default LLM provider"""
