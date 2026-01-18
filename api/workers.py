@@ -6,11 +6,32 @@ from arq import cron
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 import logging
-from .dependencies import get_jira_client, get_llm_client, get_generator, jobs, get_config, unregister_ticket_job, get_active_job_for_ticket, register_ticket_job
+from .dependencies import get_jira_client, get_llm_client, get_generator, jobs, get_config, unregister_ticket_job, get_active_job_for_ticket, register_ticket_job, get_bitbucket_client
 from .models.generation import TicketResponse, JobStatus
 from .utils import create_custom_llm_client, extract_story_details_with_tests, extract_task_details_with_tests
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_description_text(description_field, jira_client) -> str:
+    """Extract description text handling both string and ADF formats"""
+    if not description_field:
+        return ''
+    
+    # If it's already a string, return it
+    if isinstance(description_field, str):
+        return description_field
+    
+    # If it's an ADF dictionary, extract text from it
+    if isinstance(description_field, dict):
+        try:
+            return jira_client._extract_text_from_adf(description_field)
+        except Exception as e:
+            logger.warning(f"Error extracting text from ADF: {e}")
+            return str(description_field)[:500]  # Fallback: truncate dict representation
+    
+    # Fallback to string conversion
+    return str(description_field)
 
 
 class WorkerSettings:
@@ -49,6 +70,46 @@ def _get_or_create_job(job_id: str, job_type: str, initial_message: str) -> JobS
         )
         jobs[job_id] = job
     return job
+
+
+def _format_opencode_error(error: Exception, context: str = "") -> str:
+    """
+    Format OpenCode errors in a user-friendly way.
+    
+    Args:
+        error: The exception that occurred
+        context: Additional context (e.g., ticket_key, story_key)
+        
+    Returns:
+        User-friendly error message
+    """
+    error_str = str(error)
+    error_type = type(error).__name__
+    
+    # Map technical errors to user-friendly messages
+    if "Docker" in error_type or "docker" in error_str.lower():
+        if "not available" in error_str.lower() or "not found" in error_str.lower():
+            return f"Docker is not available. Please ensure Docker is installed and running. {context}"
+        elif "timeout" in error_str.lower():
+            return f"Docker operation timed out. The analysis may have taken too long. {context}"
+        else:
+            return f"Docker error: {error_str}. {context}"
+    
+    elif "timeout" in error_str.lower():
+        return f"Analysis timed out. The operation took longer than expected. {context}"
+    
+    elif "workspace" in error_str.lower() or "clone" in error_str.lower():
+        return f"Failed to set up workspace or clone repositories: {error_str}. {context}"
+    
+    elif "validation" in error_str.lower() or "schema" in error_str.lower():
+        return f"Result validation failed: {error_str}. The OpenCode analysis may have produced invalid output. {context}"
+    
+    else:
+        # Generic error with context
+        if context:
+            return f"OpenCode analysis failed: {error_str}. {context}"
+        else:
+            return f"OpenCode analysis failed: {error_str}"
 
 
 async def check_cancellation(job_id: str, job: JobStatus) -> bool:
@@ -93,6 +154,9 @@ async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update
     generator = get_generator()
     jira_client = get_jira_client()
     config = get_config()
+    
+    # Initialize ticket_response to None - will be set in success/error paths
+    ticket_response = None
     
     try:
         job = _get_or_create_job(job_id, "single", f"Processing ticket {ticket_key}..." + (" (with OpenCode)" if repos else ""))
@@ -141,7 +205,14 @@ async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update
             
             # Get LLM config for OpenCode - ONLY uses OpenCode-specific config, NO fallback to main LLM config
             # This will raise ValueError if OpenCode-specific config is missing
+            logger.info(f"[Worker] Getting OpenCode LLM config - provider override: {llm_provider}, model override: {llm_model}")
             opencode_llm_config = config.get_opencode_llm_config(llm_provider, llm_model)
+            logger.info(f"[Worker] OpenCode LLM config received - provider: {opencode_llm_config.get('provider')}, model: {opencode_llm_config.get('model')}, anthropic_model: {opencode_llm_config.get('anthropic_model')}")
+            
+            # Verify debug logging configuration
+            debug_logging_enabled = opencode_config.get('debug_conversation_logging', False)
+            log_dir = opencode_config.get('conversation_log_dir', 'logs/opencode')
+            logger.info(f"[Worker] OpenCode debug conversation logging: {debug_logging_enabled}, log directory: {log_dir}")
             
             # Get MCP network name if MCP is configured
             mcp_config = config.get_mcp_config()
@@ -154,10 +225,22 @@ async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update
                 result_file=opencode_config.get('result_file', 'result.json'),
                 llm_config=opencode_llm_config,
                 mcp_network_name=mcp_network_name,
-                debug_conversation_logging=opencode_config.get('debug_conversation_logging', False),
-                conversation_log_dir=opencode_config.get('conversation_log_dir', 'logs/opencode')
+                debug_conversation_logging=debug_logging_enabled,  # Use verified value
+                conversation_log_dir=log_dir  # Use verified value
             )
+            
+            # Log confirmation that event logging is configured
+            if debug_logging_enabled:
+                logger.info(f"[Worker] ✅ OpenCode event logging ENABLED for job {job_id}. All SSE events and container logs will be written to: {log_dir}/{job_id}.log and {log_dir}/{job_id}.json")
+            else:
+                logger.info(f"[Worker] ⚠️  OpenCode event logging DISABLED for job {job_id}. Enable with OPENCODE_DEBUG_LOGGING=true to see SSE events and container logs.")
             opencode_runner.set_concurrency_limit(opencode_config.get('max_concurrent', 2))
+            
+            # Final verification: Log that OpenCodeRunner is ready with event logging
+            if debug_logging_enabled:
+                logger.info(f"[Worker] ✅ OpenCodeRunner initialized for job {job_id} with event logging ENABLED. All SSE events will be logged.")
+            else:
+                logger.debug(f"[Worker] OpenCodeRunner initialized for job {job_id} with event logging disabled.")
             
             workspace_path = None
             try:
@@ -175,6 +258,40 @@ async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update
                     unregister_ticket_job(ticket_key)
                     return
                 
+                # Fetch PR/commit data for code changes section
+                pull_requests = []
+                commits = []
+                bitbucket_client = get_bitbucket_client()
+                if bitbucket_client:
+                    try:
+                        job.progress = {"message": f"Fetching pull requests and commits for {ticket_key}..."}
+                        pull_requests = bitbucket_client.find_pull_requests_for_ticket(ticket_key, include_diff=True)
+                        commits = bitbucket_client.find_commits_for_ticket(ticket_key, include_diff=True)
+                        logger.info(f"[SINGLE_TICKET] Found {len(pull_requests)} PRs and {len(commits)} commits for {ticket_key}")
+                    except Exception as e:
+                        logger.warning(f"[SINGLE_TICKET] Failed to fetch PR/commit data for {ticket_key}: {e}")
+                        # Continue without PR/commit data - will use implementation plan instead
+                
+                # Fetch PRD/RFC URLs from epic (not full content - OpenCode will fetch via MCP)
+                prd_url = None
+                rfc_url = None
+                if ticket_data.get('fields', {}).get('parent') and generator.planning_service:
+                    try:
+                        parent = ticket_data.get('fields', {}).get('parent')
+                        epic_key = parent.get('key') if parent else None
+                        if epic_key:
+                            epic_issue = jira_client.get_ticket(epic_key)
+                            if epic_issue:
+                                # Get PRD/RFC URLs only (not full content)
+                                prd_url = generator.planning_service._get_custom_field_value(epic_issue, 'PRD')
+                                rfc_url = generator.planning_service._get_custom_field_value(epic_issue, 'RFC')
+                                if prd_url:
+                                    logger.info(f"[SINGLE_TICKET] Found PRD URL: {prd_url}")
+                                if rfc_url:
+                                    logger.info(f"[SINGLE_TICKET] Found RFC URL: {rfc_url}")
+                    except Exception as e:
+                        logger.warning(f"[SINGLE_TICKET] Failed to fetch PRD/RFC URLs from epic: {e}")
+                
                 # Build prompt
                 repo_names = workspace_manager.list_repos_in_workspace(job_id)
                 prompt = ticket_description_prompt(
@@ -185,7 +302,11 @@ async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update
                         'parent_summary': parent_name
                     },
                     repos=repo_names,
-                    additional_context=additional_context
+                    additional_context=additional_context,
+                    pull_requests=pull_requests,
+                    commits=commits,
+                    prd_url=prd_url,
+                    rfc_url=rfc_url
                 )
                 
                 # Execute OpenCode
@@ -250,11 +371,12 @@ async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update
                 job.failed_tickets = 0
                 
             except (OpenCodeError, DockerUnavailableError) as e:
-                logger.error(f"OpenCode error for job {job_id}: {e}")
+                logger.error(f"OpenCode error for job {job_id} (ticket {ticket_key}): {e}", exc_info=True)
+                user_friendly_error = _format_opencode_error(e, f"Ticket: {ticket_key}")
                 job.status = "failed"
                 job.completed_at = datetime.now()
-                job.error = str(e)
-                job.progress = {"message": f"OpenCode failed: {str(e)}"}
+                job.error = user_friendly_error
+                job.progress = {"message": user_friendly_error}
                 job.failed_tickets = 1
                 # Create error response
                 ticket_response = TicketResponse(
@@ -264,7 +386,7 @@ async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update
                     parent_name=parent_name,
                     generated_description=None,
                     success=False,
-                    error=str(e),
+                    error=user_friendly_error,
                     skipped_reason=None,
                     updated_in_jira=False,
                     llm_provider="opencode",
@@ -329,6 +451,9 @@ async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update
         logger.info(f"Job {job_id} completed: ticket {ticket_key} processed" + (" (with OpenCode)" if repos else ""))
         
         # Return results so ARQ stores them in Redis for persistence
+        # ticket_response should be set by this point, but check for safety
+        if ticket_response is None:
+            raise RuntimeError("ticket_response was not set - this should not happen")
         return ticket_response.dict()
         
     except Exception as e:
@@ -639,7 +764,14 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
             
             # Get LLM config for OpenCode - ONLY uses OpenCode-specific config, NO fallback to main LLM config
             # This will raise ValueError if OpenCode-specific config is missing
+            logger.info(f"[Worker] Getting OpenCode LLM config - provider override: {llm_provider}, model override: {llm_model}")
             opencode_llm_config = config.get_opencode_llm_config(llm_provider, llm_model)
+            logger.info(f"[Worker] OpenCode LLM config received - provider: {opencode_llm_config.get('provider')}, model: {opencode_llm_config.get('model')}, anthropic_model: {opencode_llm_config.get('anthropic_model')}")
+            
+            # Verify debug logging configuration
+            debug_logging_enabled = opencode_config.get('debug_conversation_logging', False)
+            log_dir = opencode_config.get('conversation_log_dir', 'logs/opencode')
+            logger.info(f"[Worker] OpenCode debug conversation logging: {debug_logging_enabled}, log directory: {log_dir}")
             
             # Get MCP network name if MCP is configured
             mcp_config = config.get_mcp_config()
@@ -652,10 +784,22 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
                 result_file=opencode_config.get('result_file', 'result.json'),
                 llm_config=opencode_llm_config,
                 mcp_network_name=mcp_network_name,
-                debug_conversation_logging=opencode_config.get('debug_conversation_logging', False),
-                conversation_log_dir=opencode_config.get('conversation_log_dir', 'logs/opencode')
+                debug_conversation_logging=debug_logging_enabled,  # Use verified value
+                conversation_log_dir=log_dir  # Use verified value
             )
+            
+            # Log confirmation that event logging is configured
+            if debug_logging_enabled:
+                logger.info(f"[Worker] ✅ OpenCode event logging ENABLED for job {job_id}. All SSE events and container logs will be written to: {log_dir}/{job_id}.log and {log_dir}/{job_id}.json")
+            else:
+                logger.info(f"[Worker] ⚠️  OpenCode event logging DISABLED for job {job_id}. Enable with OPENCODE_DEBUG_LOGGING=true to see SSE events and container logs.")
             opencode_runner.set_concurrency_limit(opencode_config.get('max_concurrent', 2))
+            
+            # Final verification: Log that OpenCodeRunner is ready with event logging
+            if debug_logging_enabled:
+                logger.info(f"[Worker] ✅ OpenCodeRunner initialized for job {job_id} with event logging ENABLED. All SSE events will be logged.")
+            else:
+                logger.debug(f"[Worker] OpenCodeRunner initialized for job {job_id} with event logging disabled.")
             
             workspace_path = None
             try:
@@ -678,6 +822,23 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
                 all_tasks = []
                 all_warnings = []
                 repo_names = workspace_manager.list_repos_in_workspace(job_id)
+                
+                # Fetch PRD/RFC URLs from epic (not full content - OpenCode will fetch via MCP)
+                prd_url = None
+                rfc_url = None
+                if epic_key and generator.planning_service:
+                    try:
+                        epic_issue = jira_client.get_ticket(epic_key)
+                        if epic_issue:
+                            # Get PRD/RFC URLs only (not full content)
+                            prd_url = generator.planning_service._get_custom_field_value(epic_issue, 'PRD')
+                            rfc_url = generator.planning_service._get_custom_field_value(epic_issue, 'RFC')
+                            if prd_url:
+                                logger.info(f"[TASK_BREAKDOWN] Found PRD URL: {prd_url}")
+                            if rfc_url:
+                                logger.info(f"[TASK_BREAKDOWN] Found RFC URL: {rfc_url}")
+                    except Exception as e:
+                        logger.warning(f"[TASK_BREAKDOWN] Failed to fetch PRD/RFC URLs from epic {epic_key}: {e}")
                 
                 # Collect all story data
                 stories_data = []
@@ -711,7 +872,11 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
                         story_data=story_info,
                         repos=repo_names,
                         additional_context=additional_context,
-                        max_tasks=config.get_max_tasks_per_story()
+                        max_tasks=config.get_max_tasks_per_story(),
+                        max_task_cycle_days=max_task_cycle_days,
+                        generate_test_cases=generate_test_cases,
+                        prd_url=prd_url,
+                        rfc_url=rfc_url
                     )
                     
                     # Execute OpenCode with unique execution ID (use index to avoid name conflicts)
@@ -735,16 +900,52 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
                 # Convert OpenCode results to TaskDetail format
                 from .models.planning import TaskDetail
                 
+                def convert_effort_to_days(effort: Optional[str]) -> Optional[float]:
+                    """Convert estimated_effort string to estimated_days float"""
+                    if not effort:
+                        return None
+                    effort_lower = effort.lower()
+                    # Map: small=1, medium=2, large=3 days
+                    if effort_lower == 'small':
+                        return 1.0
+                    elif effort_lower == 'medium':
+                        return 2.0
+                    elif effort_lower == 'large':
+                        return 3.0
+                    return None
+                
                 task_details = []
                 for task in all_tasks:
+                    # Extract test cases if available
+                    test_cases_list = []
+                    if generate_test_cases:
+                        # OpenCode may return test_cases as list or string
+                        test_cases_raw = task.get('test_cases', [])
+                        if isinstance(test_cases_raw, str):
+                            # If it's a string, try to parse as JSON or split by newlines
+                            try:
+                                import json
+                                test_cases_list = json.loads(test_cases_raw)
+                                # Ensure result is a list
+                                if not isinstance(test_cases_list, list):
+                                    test_cases_list = [test_cases_list] if test_cases_list else []
+                            except (json.JSONDecodeError, ValueError, TypeError):
+                                # Fallback: split by newlines if it's a simple string
+                                test_cases_list = [tc.strip() for tc in test_cases_raw.split('\n') if tc.strip()]
+                        elif isinstance(test_cases_raw, list):
+                            test_cases_list = test_cases_raw
+                    
+                    # Convert estimated_effort to estimated_days
+                    estimated_days = convert_effort_to_days(task.get('estimated_effort'))
+                    
                     task_details.append(TaskDetail(
                         task_id=None,
                         summary=task.get('summary', ''),
                         description=task.get('description', ''),
                         team=task.get('team', 'Backend'),
                         depends_on_tasks=task.get('dependencies', []),
-                        estimated_days=None,
-                        test_cases=[],
+                        estimated_days=estimated_days,
+                        test_cases=test_cases_list,
                         jira_key=None
                     ))
                 
@@ -775,11 +976,12 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
                 job.successful_tickets = len(task_details)
                 
             except (OpenCodeError, DockerUnavailableError) as e:
-                logger.error(f"OpenCode error for job {job_id}: {e}")
+                logger.error(f"OpenCode error for job {job_id} (epic {epic_key}, {len(story_keys)} stories): {e}", exc_info=True)
+                user_friendly_error = _format_opencode_error(e, f"Epic: {epic_key}, Stories: {', '.join(story_keys[:3])}{'...' if len(story_keys) > 3 else ''}")
                 job.status = "failed"
                 job.completed_at = datetime.now()
-                job.error = str(e)
-                job.progress = {"message": f"OpenCode failed: {str(e)}"}
+                job.error = user_friendly_error
+                job.progress = {"message": user_friendly_error}
                 
             finally:
                 # Always cleanup workspace
@@ -1496,6 +1698,9 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
         raise ValueError(f"Invalid story key format: {story_key}")
     story_key = normalized_story_key
     
+    # Initialize coverage_response to None - will be set in success paths
+    coverage_response = None
+    
     try:
         job = _get_or_create_job(job_id, "story_coverage", f"Analyzing coverage for story {story_key}..." + (" (with OpenCode)" if repos else ""))
         job.story_key = story_key
@@ -1529,7 +1734,14 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
             
             # Get LLM config for OpenCode - ONLY uses OpenCode-specific config, NO fallback to main LLM config
             # This will raise ValueError if OpenCode-specific config is missing
+            logger.info(f"[Worker] Getting OpenCode LLM config - provider override: {llm_provider}, model override: {llm_model}")
             opencode_llm_config = config.get_opencode_llm_config(llm_provider, llm_model)
+            logger.info(f"[Worker] OpenCode LLM config received - provider: {opencode_llm_config.get('provider')}, model: {opencode_llm_config.get('model')}, anthropic_model: {opencode_llm_config.get('anthropic_model')}")
+            
+            # Verify debug logging configuration
+            debug_logging_enabled = opencode_config.get('debug_conversation_logging', False)
+            log_dir = opencode_config.get('conversation_log_dir', 'logs/opencode')
+            logger.info(f"[Worker] OpenCode debug conversation logging: {debug_logging_enabled}, log directory: {log_dir}")
             
             # Get MCP network name if MCP is configured
             mcp_config = config.get_mcp_config()
@@ -1542,10 +1754,22 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
                 result_file=opencode_config.get('result_file', 'result.json'),
                 llm_config=opencode_llm_config,
                 mcp_network_name=mcp_network_name,
-                debug_conversation_logging=opencode_config.get('debug_conversation_logging', False),
-                conversation_log_dir=opencode_config.get('conversation_log_dir', 'logs/opencode')
+                debug_conversation_logging=debug_logging_enabled,  # Use verified value
+                conversation_log_dir=log_dir  # Use verified value
             )
+            
+            # Log confirmation that event logging is configured
+            if debug_logging_enabled:
+                logger.info(f"[Worker] ✅ OpenCode event logging ENABLED for job {job_id}. All SSE events and container logs will be written to: {log_dir}/{job_id}.log and {log_dir}/{job_id}.json")
+            else:
+                logger.info(f"[Worker] ⚠️  OpenCode event logging DISABLED for job {job_id}. Enable with OPENCODE_DEBUG_LOGGING=true to see SSE events and container logs.")
             opencode_runner.set_concurrency_limit(opencode_config.get('max_concurrent', 2))
+            
+            # Final verification: Log that OpenCodeRunner is ready with event logging
+            if debug_logging_enabled:
+                logger.info(f"[Worker] ✅ OpenCodeRunner initialized for job {job_id} with event logging ENABLED. All SSE events will be logged.")
+            else:
+                logger.debug(f"[Worker] OpenCodeRunner initialized for job {job_id} with event logging disabled.")
             
             workspace_path = None
             try:
@@ -1570,6 +1794,29 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
                 
                 story_fields = story_data.get('fields', {})
                 
+                # Get generator for planning_service access (needed for PRD/RFC URL extraction)
+                generator = get_generator()
+                
+                # Fetch PRD/RFC URLs from epic (not full content - OpenCode will fetch via MCP)
+                prd_url = None
+                rfc_url = None
+                parent = story_fields.get('parent')
+                if parent and generator.planning_service:
+                    try:
+                        epic_key = parent.get('key') if parent else None
+                        if epic_key:
+                            epic_issue = jira_client.get_ticket(epic_key)
+                            if epic_issue:
+                                # Get PRD/RFC URLs only (not full content)
+                                prd_url = generator.planning_service._get_custom_field_value(epic_issue, 'PRD')
+                                rfc_url = generator.planning_service._get_custom_field_value(epic_issue, 'RFC')
+                                if prd_url:
+                                    logger.info(f"[COVERAGE] Found PRD URL: {prd_url}")
+                                if rfc_url:
+                                    logger.info(f"[COVERAGE] Found RFC URL: {rfc_url}")
+                    except Exception as e:
+                        logger.warning(f"[COVERAGE] Failed to fetch PRD/RFC URLs from epic: {e}")
+                
                 # Get existing tasks from multiple sources
                 tasks = []
                 seen_task_keys = set()
@@ -1582,11 +1829,29 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
                             task_data = jira_client.get_ticket(task_key)
                             if task_data:
                                 task_fields = task_data.get('fields', {})
-                                tasks.append({
+                                # #region agent log
+                                import json
+                                desc_raw = task_fields.get('description', '')
+                                desc_type = type(desc_raw).__name__
+                                desc_preview = str(desc_raw)[:200] if desc_raw else 'None'
+                                with open('/Users/pujitriwibowo/Documents/works/augment/.cursor/debug.log', 'a') as f:
+                                    f.write(json.dumps({"sessionId": "debug-session", "runId": "pre-fix", "hypothesisId": "A", "location": "api/workers.py:1757", "message": "Extracting task description from subtask", "data": {"task_key": task_key, "description_type": desc_type, "description_preview": desc_preview}, "timestamp": int(__import__('time').time() * 1000)}) + '\n')
+                                # #endregion
+                                description_text = _extract_description_text(desc_raw, jira_client)
+                                # #region agent log
+                                with open('/Users/pujitriwibowo/Documents/works/augment/.cursor/debug.log', 'a') as f:
+                                    f.write(json.dumps({"sessionId": "debug-session", "runId": "pre-fix", "hypothesisId": "A", "location": "api/workers.py:1757", "message": "Converted description to text", "data": {"task_key": task_key, "converted_type": type(description_text).__name__, "converted_length": len(description_text), "converted_preview": description_text[:200]}, "timestamp": int(__import__('time').time() * 1000)}) + '\n')
+                                # #endregion
+                                task_info = {
                                     'key': task_key,
                                     'summary': task_fields.get('summary', ''),
-                                    'description': task_fields.get('description', '')
-                                })
+                                    'description': description_text
+                                }
+                                # Extract test cases if requested
+                                if include_test_cases:
+                                    test_cases = jira_client.extract_test_cases(task_data)
+                                    task_info['test_cases'] = test_cases
+                                tasks.append(task_info)
                                 seen_task_keys.add(task_key)
                 
                 # 2. Get linked issues (Work item split, Relates to, etc.)
@@ -1603,11 +1868,29 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
                                 task_data = jira_client.get_ticket(linked_key)
                                 if task_data:
                                     task_fields = task_data.get('fields', {})
-                                    tasks.append({
+                                    # #region agent log
+                                    import json
+                                    desc_raw = task_fields.get('description', '')
+                                    desc_type = type(desc_raw).__name__
+                                    desc_preview = str(desc_raw)[:200] if desc_raw else 'None'
+                                    with open('/Users/pujitriwibowo/Documents/works/augment/.cursor/debug.log', 'a') as f:
+                                        f.write(json.dumps({"sessionId": "debug-session", "runId": "pre-fix", "hypothesisId": "B", "location": "api/workers.py:1783", "message": "Extracting task description from linked issue", "data": {"task_key": linked_key, "description_type": desc_type, "description_preview": desc_preview}, "timestamp": int(__import__('time').time() * 1000)}) + '\n')
+                                    # #endregion
+                                    description_text = _extract_description_text(desc_raw, jira_client)
+                                    # #region agent log
+                                    with open('/Users/pujitriwibowo/Documents/works/augment/.cursor/debug.log', 'a') as f:
+                                        f.write(json.dumps({"sessionId": "debug-session", "runId": "pre-fix", "hypothesisId": "B", "location": "api/workers.py:1783", "message": "Converted description to text", "data": {"task_key": linked_key, "converted_type": type(description_text).__name__, "converted_length": len(description_text), "converted_preview": description_text[:200]}, "timestamp": int(__import__('time').time() * 1000)}) + '\n')
+                                    # #endregion
+                                    task_info = {
                                         'key': linked_key,
                                         'summary': task_fields.get('summary', ''),
-                                        'description': task_fields.get('description', '')
-                                    })
+                                        'description': description_text
+                                    }
+                                    # Extract test cases if requested
+                                    if include_test_cases:
+                                        test_cases = jira_client.extract_test_cases(task_data)
+                                        task_info['test_cases'] = test_cases
+                                    tasks.append(task_info)
                                     seen_task_keys.add(linked_key)
                 
                 logger.info(f"[COVERAGE] Found {len(tasks)} tasks for story {story_key}")
@@ -1622,7 +1905,10 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
                     },
                     tasks=tasks,
                     repos=repo_names,
-                    additional_context=additional_context
+                    additional_context=additional_context,
+                    include_test_cases=include_test_cases,
+                    prd_url=prd_url,
+                    rfc_url=rfc_url
                 )
                 
                 # Execute OpenCode
@@ -1643,6 +1929,26 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
                 )
                 
                 # Convert tasks to TaskSummaryModel
+                # #region agent log
+                import json
+                import time
+                for idx, t in enumerate(tasks):
+                    desc_val = t.get('description', '')
+                    desc_type = type(desc_val).__name__
+                    try:
+                        with open('/Users/pujitriwibowo/Documents/works/augment/.cursor/debug.log', 'a') as f:
+                            f.write(json.dumps({"sessionId": "debug-session", "runId": "pre-fix", "hypothesisId": "C", "location": "api/workers.py:1883", "message": "Before TaskSummaryModel creation", "data": {"task_index": idx, "task_key": t.get('key'), "description_type": desc_type, "description_is_string": isinstance(desc_val, str), "description_length": len(str(desc_val)), "description_preview": str(desc_val)[:100]}, "timestamp": int(time.time() * 1000)}) + '\n')
+                    except Exception as log_err:
+                        logger.warning(f"Failed to write debug log: {log_err}")
+                # #endregion
+                
+                # Double-check all descriptions are strings before creating models
+                for t in tasks:
+                    if not isinstance(t.get('description', ''), str):
+                        logger.error(f"Task {t.get('key')} description is not a string: {type(t.get('description'))}")
+                        # Force conversion as last resort
+                        t['description'] = _extract_description_text(t.get('description', ''), jira_client)
+                
                 task_models = [
                     TaskSummaryModel(
                         task_key=t['key'],
@@ -1652,13 +1958,23 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
                     ) for t in tasks
                 ]
                 
-                # Convert OpenCode gaps to CoverageGap models
+                # #region agent log
+                try:
+                    with open('/Users/pujitriwibowo/Documents/works/augment/.cursor/debug.log', 'a') as f:
+                        f.write(json.dumps({"sessionId": "debug-session", "runId": "pre-fix", "hypothesisId": "C", "location": "api/workers.py:1900", "message": "TaskSummaryModel creation completed", "data": {"task_count": len(task_models)}, "timestamp": int(time.time() * 1000)}) + '\n')
+                except Exception as log_err:
+                    logger.warning(f"Failed to write debug log: {log_err}")
+                # #endregion
+                
+                # Convert OpenCode gaps to CoverageGap models (preserve OpenCode-specific fields)
                 gap_models = []
                 for gap in opencode_result.get('gaps', []):
                     gap_models.append(CoverageGap(
                         requirement=gap.get('requirement', ''),
                         severity=gap.get('severity', 'minor'),
-                        suggestion=gap.get('missing_tasks', gap.get('suggestion', ''))
+                        suggestion=gap.get('missing_tasks', gap.get('suggestion', '')),
+                        affected_files=gap.get('affected_files'),  # Preserve OpenCode-specific field
+                        implementation_status=gap.get('implementation_status')  # Preserve OpenCode-specific field
                     ))
                 
                 # Convert OpenCode suggestions for updates
@@ -1689,10 +2005,14 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
                     coverage_pct = opencode_result.get('coverage_percentage', 0)
                     overall_assessment = f"OpenCode coverage analysis completed. Coverage: {coverage_pct}%"
                 
+                # Convert story description from ADF if needed
+                story_description_raw = story_fields.get('description', '')
+                story_description_text = _extract_description_text(story_description_raw, jira_client)
+                
                 coverage_response = StoryCoverageResponse(
                     success=True,
                     story_key=story_key,
-                    story_description=story_fields.get('description', ''),
+                    story_description=story_description_text,
                     tasks=task_models,
                     coverage_percentage=opencode_result.get('coverage_percentage', 0),
                     gaps=gap_models,
@@ -1713,11 +2033,13 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
                 job.successful_tickets = 1
                 
             except (OpenCodeError, DockerUnavailableError) as e:
-                logger.error(f"OpenCode error for job {job_id}: {e}")
+                logger.error(f"OpenCode error for job {job_id} (story {story_key}): {e}", exc_info=True)
+                user_friendly_error = _format_opencode_error(e, f"Story: {story_key}")
                 job.status = "failed"
                 job.completed_at = datetime.now()
-                job.error = str(e)
-                job.progress = {"message": f"OpenCode failed: {str(e)}"}
+                job.error = user_friendly_error
+                job.progress = {"message": user_friendly_error}
+                # coverage_response remains None - will be handled in outer exception handler
                 
             finally:
                 # Always cleanup workspace
@@ -1737,7 +2059,7 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
             job.progress = {"message": "Initializing analyzer..."}
             
             # Get confluence client and planning service for PRD/RFC fetching
-            from .dependencies import get_confluence_client, get_generator
+            from .dependencies import get_confluence_client
             confluence_client = get_confluence_client()
             generator = get_generator()
             planning_service = generator.planning_service if generator else None
@@ -1794,6 +2116,9 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
         logger.info(f"Job {job_id} completed: analyzed coverage for story {story_key}" + (" (with OpenCode)" if repos else ""))
         
         # Return results so ARQ stores them in Redis for persistence
+        # coverage_response should be set by this point, but check for safety
+        if coverage_response is None:
+            raise RuntimeError("coverage_response was not set - this should not happen")
         return coverage_response.dict()
         
     except Exception as e:
