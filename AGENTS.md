@@ -129,6 +129,9 @@ Uses UUID-based `task_id` for stable dependency resolution. Dependencies referen
 - Epic > Task (siblings, not parent-child)
 - Story-Task relationships via "Work item split" links
 
+### Epic optional when story is provided
+When `story_keys` (or `story_key`) is provided, `epic_key`/`parent_key` is optional and is auto-derived from each story's parent in JIRA for task generation, bulk create, and comprehensive test endpoints.
+
 ### Prompts
 Centralized in `src/prompts/` with modular templates (generation.py, planning.py, system.py, test_generation.py).
 
