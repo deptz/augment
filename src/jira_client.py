@@ -1280,13 +1280,34 @@ class JiraClient:
         
         return results
     
+    def get_epic_key_from_story(self, story_key: str) -> Optional[str]:
+        """
+        Get the parent epic key for a story ticket.
+        Fetches the story and returns fields.parent.key (epic key) if present.
+
+        Args:
+            story_key: JIRA story key (e.g. STORY-123). Caller should normalize URLs to key first.
+
+        Returns:
+            Epic key (e.g. EPIC-100) or None if story not found or has no parent.
+        """
+        if not story_key or not str(story_key).strip():
+            return None
+        ticket = self.get_ticket(story_key.strip())
+        if not ticket:
+            return None
+        parent = (ticket.get("fields") or {}).get("parent")
+        if not parent or not parent.get("key"):
+            return None
+        return parent.get("key")
+
     def get_project_key_from_epic(self, epic_key: str) -> Optional[str]:
         """
         Extract project key from epic key
-        
+
         Args:
             epic_key: Epic key like "PROJ-123"
-            
+
         Returns:
             Project key like "PROJ" or None
         """
