@@ -1378,10 +1378,33 @@ async def process_bulk_task_creation_worker(ctx, job_id: str, tasks_data: List[D
         if confluence_client:
             confluence_server_url = confluence_client.server_url
         
-        # Get project key from first task's parent epic
-        project_key = jira_client.get_project_key_from_epic(tasks_data[0]["parent_key"])
+        # Resolve missing parent_key (epic) from story_key via JIRA
+        from .utils import normalize_ticket_key
+        from .constants import MSG_COULD_NOT_DERIVE_EPIC
+        story_key_to_epic = {}
+        for task_dict in tasks_data:
+            parent_key = task_dict.get("parent_key")
+            if (not parent_key or not str(parent_key).strip()) and task_dict.get("story_key"):
+                sk = normalize_ticket_key(task_dict["story_key"]) or task_dict["story_key"].strip()
+                if sk and sk not in story_key_to_epic:
+                    raw_epic = jira_client.get_epic_key_from_story(sk)
+                    story_key_to_epic[sk] = normalize_ticket_key(raw_epic) if raw_epic else None
+                    if story_key_to_epic[sk]:
+                        logger.info(f"Derived epic {story_key_to_epic[sk]} from story {sk}")
+        for task_dict in tasks_data:
+            if not task_dict.get("parent_key") and task_dict.get("story_key"):
+                sk = normalize_ticket_key(task_dict["story_key"]) or task_dict["story_key"].strip()
+                task_dict["parent_key"] = story_key_to_epic.get(sk)
+        
+        epic_for_project = next(
+            (t.get("parent_key") for t in tasks_data if t.get("parent_key")),
+            None
+        )
+        if not epic_for_project:
+            raise RuntimeError(MSG_COULD_NOT_DERIVE_EPIC)
+        project_key = jira_client.get_project_key_from_epic(epic_for_project)
         if not project_key:
-            raise RuntimeError(f"Could not determine project key from epic {tasks_data[0]['parent_key']}")
+            raise RuntimeError(f"Could not determine project key from epic {epic_for_project}")
         
         # Build issue data for all tasks
         from src.planning_models import TaskPlan, CycleTimeEstimate, TaskScope
@@ -1394,6 +1417,7 @@ async def process_bulk_task_creation_worker(ctx, job_id: str, tasks_data: List[D
         
         for i, task_dict in enumerate(tasks_data):
             task_item = type('TaskItem', (), task_dict)()  # Simple object from dict
+            resolved_epic = task_dict.get("parent_key")
             
             # Create cycle time estimate if mandays provided
             cycle_time_estimate = None
@@ -1419,7 +1443,7 @@ async def process_bulk_task_creation_worker(ctx, job_id: str, tasks_data: List[D
                 expected_outcomes=["Task completed successfully"],
                 test_cases=[],
                 cycle_time_estimate=cycle_time_estimate,
-                epic_key=task_dict["parent_key"]
+                epic_key=resolved_epic
             )
             
             # Build issue data
@@ -1435,10 +1459,10 @@ async def process_bulk_task_creation_worker(ctx, job_id: str, tasks_data: List[D
             }
             
             # Add parent epic
-            if task_dict["parent_key"]:
-                epic_type = jira_client.get_ticket_type(task_dict["parent_key"])
+            if resolved_epic:
+                epic_type = jira_client.get_ticket_type(resolved_epic)
                 if epic_type and 'epic' in epic_type.lower():
-                    issue_data["fields"]["parent"] = {"key": task_dict["parent_key"]}
+                    issue_data["fields"]["parent"] = {"key": resolved_epic}
             
             # Add mandays if available
             if cycle_time_estimate and jira_client.mandays_custom_field:

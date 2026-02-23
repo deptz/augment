@@ -81,9 +81,9 @@ class UpdateTicketResponse(BaseModel):
 
 class CreateTicketRequest(BaseModel):
     """Request to create a new JIRA Task ticket"""
-    parent_key: str = Field(
-        ...,
-        description="Parent epic ticket key",
+    parent_key: Optional[str] = Field(
+        None,
+        description="Parent epic ticket key. If omitted, derived from story_key via JIRA.",
         example="PROJ-100"
     )
     summary: str = Field(
@@ -307,9 +307,9 @@ class BulkCreateTaskItem(BaseModel):
         description="Internal task ID (UUID) for dependency resolution within the batch. Used to resolve references in 'blocks' field.",
         example="b948a26f-5407-4eb6-9378-01a39115fab2"
     )
-    parent_key: str = Field(
-        ...,
-        description="Parent epic ticket key",
+    parent_key: Optional[str] = Field(
+        None,
+        description="Parent epic ticket key. If omitted, derived from story_key via JIRA before creating tickets.",
         example="EPIC-100"
     )
     summary: str = Field(
