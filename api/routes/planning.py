@@ -274,31 +274,20 @@ async def generate_tasks_for_stories(request: TaskGenerationRequest, current_use
         
         if not epic_key:
             logger.info("No epic_key provided, deriving from story tickets...")
-            
-            # Fetch the first story to get its parent epic
-            first_story_data = jira_client.get_ticket(story_keys[0])
-            if not first_story_data:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Story ticket {story_keys[0]} not found in JIRA"
-                )
-            
-            # Extract parent epic from story
-            parent = first_story_data.get('fields', {}).get('parent')
-            if parent and parent.get('key'):
-                # Normalize parent key (should be just a key, but normalize to be safe)
-                epic_key = normalize_ticket_key(parent['key'])
-                if not epic_key:
+            from ..constants import MSG_STORY_HAS_NO_PARENT_EPIC
+            first_story_key = story_keys[0]
+            raw_epic = jira_client.get_epic_key_from_story(first_story_key)
+            if not raw_epic:
+                if not jira_client.get_ticket(first_story_key):
                     raise HTTPException(
-                        status_code=400,
-                        detail=f"Invalid parent epic key format: {parent['key']}"
+                        status_code=404,
+                        detail=f"Story ticket {first_story_key} not found in JIRA"
                     )
-                logger.info(f"Derived epic_key from story {story_keys[0]}: {epic_key}")
-            else:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Story {story_keys[0]} has no parent epic. Please provide epic_key explicitly."
-                )
+                raise HTTPException(status_code=400, detail=MSG_STORY_HAS_NO_PARENT_EPIC)
+            epic_key = normalize_ticket_key(raw_epic)
+            if not epic_key:
+                raise HTTPException(status_code=400, detail="Invalid parent epic key format from story")
+            logger.info(f"Derived epic {epic_key} from story {first_story_key}")
         
         # Validate and normalize repos if provided
         repos_normalized = None
