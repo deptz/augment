@@ -5,6 +5,7 @@ Service for running tests, lint, and build commands to verify changes
 import logging
 import subprocess
 import asyncio
+import warnings
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 
@@ -32,13 +33,18 @@ class Verifier:
     ):
         """
         Initialize verifier.
-        
+
         Args:
             test_command: Command to run tests (e.g., "pytest")
             lint_command: Command to run linter (e.g., "ruff check")
             build_command: Command to run build (e.g., "npm run build")
             timeout_seconds: Timeout for each command
         """
+        warnings.warn(
+            "Verifier is deprecated; use SandboxVerifier for code-aware flows.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.test_command = test_command
         self.lint_command = lint_command
         self.build_command = build_command

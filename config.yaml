@@ -178,8 +178,10 @@ opensandbox:
     max_age_minutes: 30
 
 # Feature flags (Phase 4)
+# sandbox_runtime: "docker" for local/OpenSandbox Docker runtime; "kubernetes" when OpenSandbox
+# server uses K8s runtime. No application code changes—only this config (or SANDBOX_RUNTIME env).
 features:
-  use_sandbox: ${USE_SANDBOX:false}
+  use_sandbox: ${USE_SANDBOX:true}
   sandbox_runtime: ${SANDBOX_RUNTIME:docker}
 
 # Git Credentials Configuration (Optional)

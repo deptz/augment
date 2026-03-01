@@ -9,6 +9,7 @@ import logging
 import time
 import re
 import hashlib
+import warnings
 from pathlib import Path
 from typing import Optional, Dict, Any, List, AsyncIterator
 from datetime import datetime, timezone, timedelta
@@ -96,6 +97,12 @@ class OpenCodeRunner:
             debug_conversation_logging: Enable conversation logging for debugging
             conversation_log_dir: Directory for conversation log files (default: logs/opencode)
         """
+        warnings.warn(
+            "OpenCodeRunner is deprecated; code-aware flows use OpenSandbox (SandboxCodeRunner). "
+            "This path is only for backward compatibility when OpenSandbox is disabled.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.docker_image = docker_image
         self.job_timeout_seconds = job_timeout_minutes * 60
         self.max_result_size_bytes = max_result_size_mb * 1024 * 1024

@@ -5,6 +5,7 @@ Service for applying code changes to workspace with git transaction safety
 import logging
 import subprocess
 import asyncio
+import warnings
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from contextlib import contextmanager
@@ -37,10 +38,15 @@ class CodeApplier:
     def __init__(self, workspace_path: Path):
         """
         Initialize code applier.
-        
+
         Args:
             workspace_path: Path to workspace with git repos
         """
+        warnings.warn(
+            "CodeApplier is deprecated; code-aware flows use the sandbox pipeline.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.workspace_path = workspace_path
     
     @contextmanager

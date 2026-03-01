@@ -4,6 +4,7 @@ Service for creating branches, pushing changes, and creating draft PRs
 """
 import logging
 import subprocess
+import warnings
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -38,11 +39,16 @@ class DraftPRCreator:
     ):
         """
         Initialize draft PR creator.
-        
+
         Args:
             workspace_path: Path to workspace with git repos
             bitbucket_client: Bitbucket client for API calls
         """
+        warnings.warn(
+            "DraftPRCreator is deprecated; code-aware flows use the sandbox pipeline.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.workspace_path = workspace_path
         self.bitbucket_client = bitbucket_client
     

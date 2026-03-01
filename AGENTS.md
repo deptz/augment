@@ -107,8 +107,11 @@ Uses ARQ (async Redis queue). All generation endpoints support `async_mode=true`
 - `sandbox_verifier.py` - Run test/lint/build inside sandbox (parallel)
 - `sandbox_pipeline.py` - Single-sandbox APPLY→PR for Draft PR
 - Enabled via **`OPENSANDBOX_ENABLED=true`** and `config.yaml` `opensandbox.enabled`
+- **`features.use_sandbox`** (`USE_SANDBOX`) defaults to **true** when OpenSandbox is enabled; set to false to use the host pipeline for draft PR.
 - When enabled, worker startup runs `is_available()` and `cleanup_orphaned_sandboxes()`
 - API returns 503 with a clear message if `repos` are provided but OpenSandbox is not enabled
+
+**WorkspaceManager when sandbox is disabled:** WorkspaceManager is still used for: (1) plan revision workspace lookup when the Draft PR pipeline revises a plan; (2) `run_worker` orphan workspace cleanup when `OPENCODE_ENABLED` is set. When all code-aware flows use OpenSandbox (repos provided), no host workspace is created for those flows. If sandbox is disabled and the user passes repos, the request is rejected (503). See [docs/MIGRATION_OPENSANDBOX.md](docs/MIGRATION_OPENSANDBOX.md).
 
 ### MCP Server Integration
 Model Context Protocol servers provide read-only access to external data sources for OpenCode containers:
