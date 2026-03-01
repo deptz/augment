@@ -194,3 +194,67 @@ async def retrieve_job_status(job_id: str) -> Optional[dict]:
         logger.warning(f"Failed to retrieve job status for {job_id}: {e}")
         return None
 
+
+# Sandbox ID tracking (job_id -> sandbox_id for cross-process visibility)
+JOB_SANDBOX_KEY_PREFIX = "job:sandbox:"
+JOB_SANDBOX_TTL = 86400 * 2  # 2 days - sandbox mapping expires after job completes
+
+
+async def set_sandbox_id(job_id: str, sandbox_id: str) -> bool:
+    """
+    Store sandbox_id in Redis for a job (when a sandbox is created for APPLY→PR).
+    Allows API routes to pause/resume/status the sandbox by job_id.
+
+    Args:
+        job_id: The job identifier
+        sandbox_id: The OpenSandbox sandbox ID
+
+    Returns:
+        True if the value was set successfully
+    """
+    try:
+        pool = await get_redis_pool()
+        key = f"{JOB_SANDBOX_KEY_PREFIX}{job_id}"
+        await pool.set(key, sandbox_id, ex=JOB_SANDBOX_TTL)
+        logger.debug(f"Stored sandbox_id for job {job_id}")
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to set sandbox_id for job {job_id}: {e}")
+        return False
+
+
+async def get_sandbox_id(job_id: str) -> Optional[str]:
+    """
+    Retrieve sandbox_id from Redis for a job.
+
+    Args:
+        job_id: The job identifier
+
+    Returns:
+        The sandbox ID string, or None if not found
+    """
+    try:
+        pool = await get_redis_pool()
+        key = f"{JOB_SANDBOX_KEY_PREFIX}{job_id}"
+        value = await pool.get(key)
+        return value.decode("utf-8") if isinstance(value, bytes) else value
+    except Exception as e:
+        logger.warning(f"Failed to get sandbox_id for job {job_id}: {e}")
+        return None
+
+
+async def clear_sandbox_id(job_id: str) -> None:
+    """
+    Clear sandbox_id from Redis when the sandbox is released/destroyed.
+
+    Args:
+        job_id: The job identifier
+    """
+    try:
+        pool = await get_redis_pool()
+        key = f"{JOB_SANDBOX_KEY_PREFIX}{job_id}"
+        await pool.delete(key)
+        logger.debug(f"Cleared sandbox_id for job {job_id}")
+    except Exception as e:
+        logger.warning(f"Failed to clear sandbox_id for job {job_id}: {e}")
+

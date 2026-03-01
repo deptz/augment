@@ -204,4 +204,6 @@ class JobStatus(BaseModel):
     workspace_fingerprint: Optional[Dict[str, Any]] = Field(None, description="Workspace fingerprint (for draft_pr jobs)")
     artifacts: Optional[Dict[str, Any]] = Field(None, description="Artifact references (for draft_pr jobs)")
     mode: Optional[str] = Field(None, description="Pipeline mode: 'normal' or 'yolo' (for draft_pr jobs)")
+    sandbox_id: Optional[str] = Field(None, description="OpenSandbox id when job is running in sandbox (from Redis)")
+    sandbox_status: Optional[Dict[str, Any]] = Field(None, description="OpenSandbox status when sandbox_id is set")
 

@@ -9,6 +9,17 @@ from datetime import datetime
 from src.draft_pr_models import FeedbackType
 
 
+class SandboxOptions(BaseModel):
+    """
+    Optional sandbox configuration for draft PR jobs.
+    Reserved for future use: the API may not yet pass these to the pipeline.
+    """
+    pause_on_failure: Optional[bool] = Field(None, description="If true, pause sandbox on failure for debugging")
+    resource: Optional[Dict[str, Any]] = Field(None, description="Resource limits (e.g. cpu, memory)")
+    language: Optional[str] = Field(None, description="Primary language / runtime (e.g. python, node)")
+    setup_commands: Optional[List[str]] = Field(None, description="Optional setup commands to run in sandbox")
+
+
 class CreateDraftPRRequest(BaseModel):
     """Request to create a new draft PR job"""
     story_key: str = Field(..., description="JIRA story key")
@@ -16,6 +27,7 @@ class CreateDraftPRRequest(BaseModel):
     scope: Optional[Dict[str, Any]] = Field(None, description="Optional scope constraints")
     additional_context: Optional[str] = Field(None, description="Additional context")
     mode: str = Field(default="normal", description="Pipeline mode: 'normal' or 'yolo'")
+    sandbox_options: Optional[SandboxOptions] = Field(None, description="Optional sandbox settings (for future use)")
     
     @validator('mode')
     def validate_mode(cls, v):

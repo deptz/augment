@@ -2,7 +2,8 @@
 Shared Dependencies
 Global clients and configuration shared across all routes
 """
-from typing import Optional
+from datetime import timedelta
+from typing import Optional, Any
 from src.config import Config
 from src.jira_client import JiraClient
 from src.bitbucket_client import BitbucketClient
@@ -20,6 +21,7 @@ confluence_client: Optional[ConfluenceClient] = None
 llm_client: Optional[LLMClient] = None
 generator: Optional[DescriptionGenerator] = None
 config: Optional[Config] = None
+_sandbox_client: Optional[Any] = None
 
 # In-memory storage for job tracking
 jobs: dict = {}
@@ -75,6 +77,69 @@ def get_config() -> Config:
     if config is None:
         raise RuntimeError("Config not initialized - ensure startup event completed")
     return config
+
+
+def get_sandbox_client() -> Optional[Any]:
+    """Get OpenSandbox client singleton when opensandbox is enabled; None otherwise."""
+    global _sandbox_client
+    if config is None:
+        return None
+    sb = config.get_sandbox_config()
+    if not sb.get("enabled"):
+        return None
+    if _sandbox_client is None:
+        try:
+            from src.sandbox_client import SandboxClient
+            _sandbox_client = SandboxClient(
+                domain=sb["domain"],
+                api_key=sb.get("api_key") or "",
+                protocol=sb.get("protocol", "http"),
+                max_concurrent=sb.get("max_concurrent", 5),
+                request_timeout=timedelta(seconds=sb.get("request_timeout_seconds", 30)),
+            )
+        except Exception as e:
+            logger.warning("OpenSandbox client not available: %s", e)
+            return None
+    return _sandbox_client
+
+
+_sandbox_code_runner: Optional[Any] = None
+
+
+def get_sandbox_code_runner() -> Optional[Any]:
+    """Get SandboxCodeRunner when OpenSandbox is enabled; None otherwise. Used for all code-aware flows (no host Docker)."""
+    global _sandbox_code_runner
+    if config is None:
+        return None
+    sb = config.get_sandbox_config()
+    if not sb.get("enabled"):
+        return None
+    if _sandbox_code_runner is None:
+        try:
+            from src.sandbox_code_runner import SandboxCodeRunner
+            from src.sandbox_client import network_policy_from_config
+            client = get_sandbox_client()
+            if not client:
+                return None
+            opencode_config = config.get_opencode_config()
+            llm_cfg = getattr(config, "get_opencode_llm_config", lambda: config.get_llm_config())()
+            network_policy = network_policy_from_config(sb.get("network_policy"))
+            _sandbox_code_runner = SandboxCodeRunner(
+                sandbox_client=client,
+                image=sb.get("image", "opensandbox/code-interpreter:v1.0.1"),
+                timeout_minutes=sb.get("timeout_minutes", 20),
+                apply_timeout_minutes=sb.get("apply_timeout_minutes", 45),
+                max_result_size_bytes=opencode_config.get("max_result_size_mb", 10) * 1024 * 1024,
+                result_file=opencode_config.get("result_file", "result.json"),
+                llm_config=llm_cfg,
+                git_username=sb.get("git_username"),
+                git_password=sb.get("git_password"),
+                network_policy=network_policy,
+            )
+        except Exception as e:
+            logger.warning("SandboxCodeRunner not available: %s", e)
+            return None
+    return _sandbox_code_runner
 
 
 def get_active_job_for_ticket(ticket_key: str) -> Optional[str]:
