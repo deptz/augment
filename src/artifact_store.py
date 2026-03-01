@@ -16,7 +16,7 @@ ARTIFACT_BASE_DIR = Path("/tmp/augment/artifacts")
 
 
 class ArtifactStoreError(Exception):
-    """Exception raised for artifact store errors"""
+    """Raised when artifact store operations fail (e.g. directory creation, write, size limit)."""
     pass
 
 

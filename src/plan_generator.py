@@ -51,7 +51,59 @@ class PlanGenerator:
         self.llm_client = llm_client
         self.opencode_runner = opencode_runner
         self.workspace_manager = workspace_manager
-    
+
+    def build_plan_prompt(
+        self,
+        story_key: str,
+        story_summary: str,
+        story_description: Optional[str] = None,
+        scope: Optional[Dict[str, Any]] = None,
+        repos: Optional[List[Dict[str, Any]]] = None,
+        additional_context: Optional[str] = None
+    ) -> str:
+        """
+        Build the plan generation prompt without executing. Used when plan generation
+        runs in a sandbox (SandboxCodeRunner) instead of host OpenCode.
+        """
+        return DraftPRPlanningPrompts.get_plan_generation_prompt(
+            story_key=story_key,
+            story_summary=story_summary,
+            story_description=story_description,
+            scope=scope,
+            repos=repos,
+            additional_context=additional_context
+        )
+
+    def post_process_plan(
+        self,
+        plan_dict: Dict[str, Any],
+        repos: List[Dict[str, Any]],
+        generated_by: str = "opencode"
+    ) -> "PlanVersion":
+        """
+        Validate and post-process a raw plan dict (e.g. from OpenCode/sandbox result):
+        validation, cross-repo impacts, missing requirements, then build PlanVersion.
+        """
+        try:
+            validate_plan_spec(plan_dict)
+        except Exception as e:
+            raise PlanValidationError(f"Plan validation failed: {e}")
+        plan_spec = PlanSpec(**plan_dict)
+        plan_hash = calculate_plan_hash(plan_dict)
+        cross_repo_impacts = self._detect_cross_repo_impacts(plan_dict, repos)
+        if cross_repo_impacts:
+            plan_spec.cross_repo_impacts = cross_repo_impacts
+        unknowns = self._detect_missing_requirements(plan_dict)
+        if unknowns:
+            plan_spec.unknowns.extend(unknowns)
+        return PlanVersion(
+            version=1,
+            plan_spec=plan_spec,
+            plan_hash=plan_hash,
+            previous_version_hash=None,
+            generated_by=generated_by
+        )
+
     async def generate_plan(
         self,
         job_id: str,

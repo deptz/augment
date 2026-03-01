@@ -123,7 +123,32 @@ async def main():
                     
             except Exception as e:
                 logger.warning(f"Error during orphan cleanup: {e}")
-        
+
+        # OpenSandbox: health check and orphan cleanup when enabled
+        sandbox_config = config.get_sandbox_config() if hasattr(config, 'get_sandbox_config') else {}
+        if sandbox_config.get('enabled'):
+            try:
+                from datetime import timedelta
+                from src.sandbox_client import SandboxClient
+                sb_client = SandboxClient(
+                    domain=sandbox_config['domain'],
+                    api_key=sandbox_config.get('api_key') or '',
+                    protocol=sandbox_config.get('protocol', 'http'),
+                    max_concurrent=sandbox_config.get('max_concurrent', 5),
+                    request_timeout=timedelta(seconds=sandbox_config.get('request_timeout_seconds', 30)),
+                )
+                if await sb_client.is_available():
+                    cleaned = await sb_client.cleanup_orphaned_sandboxes(
+                        max_age_minutes=sandbox_config.get('cleanup_max_age_minutes', 30)
+                    )
+                    if cleaned > 0:
+                        logger.info("OpenSandbox: cleaned %s orphaned sandbox(es)", cleaned)
+                else:
+                    logger.warning("OpenSandbox server not available; sandbox jobs may fail")
+                await sb_client.close()
+            except Exception as e:
+                logger.warning("OpenSandbox startup check failed: %s", e)
+
         # Create worker with all worker functions
         worker = Worker(
             functions=[

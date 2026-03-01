@@ -35,16 +35,15 @@ from ..models.draft_pr import (
     JobAnalyticsRequest
 )
 from ..models.generation import JobStatus, PipelineStage
-from ..dependencies import get_config, get_jira_client, jobs
+from ..dependencies import get_config, get_jira_client, get_sandbox_client, jobs
 from ..auth import get_current_user
-from ..job_queue import get_redis_pool
+from ..job_queue import get_redis_pool, get_sandbox_id
 from src.draft_pr_models import PlanFeedback, FeedbackType, Approval
 from src.draft_pr_pipeline import DraftPRPipeline, PipelineStage as PipelineStageEnum
 from src.plan_generator import PlanGenerator
 from src.plan_comparator import PlanComparator
 from src.workspace_manager import WorkspaceManager
 from src.artifact_store import ArtifactStore, get_artifact_store
-from src.opencode_runner import OpenCodeRunner
 from src.llm_client import LLMClient
 from src.bitbucket_client import BitbucketClient
 from src.template_store import get_template_store
@@ -100,27 +99,11 @@ def _validate_template_id(template_id: str) -> str:
 
 
 def _get_draft_pr_pipeline() -> DraftPRPipeline:
-    """Get or create draft PR pipeline instance"""
+    """Get or create draft PR pipeline instance. Draft PR uses OpenSandbox only (no host Docker/OpenCode)."""
     config = get_config()
     
     # Initialize services
     artifact_store = get_artifact_store()
-    
-    # Get OpenCode runner if available
-    opencode_runner = None
-    try:
-        opencode_config = config.get_opencode_config()
-        if opencode_config.get('enabled'):
-            opencode_runner = OpenCodeRunner(
-                docker_image=opencode_config.get('docker_image'),
-                job_timeout_minutes=opencode_config.get('job_timeout_minutes', 20),
-                max_result_size_mb=opencode_config.get('max_result_size_mb', 10),
-                result_file=opencode_config.get('result_file', 'result.json'),
-                llm_config=config.get_llm_config() if hasattr(config, 'get_llm_config') else config._config.get('llm', {})
-            )
-            opencode_runner.set_concurrency_limit(opencode_config.get('max_concurrent', 2))
-    except Exception as e:
-        logger.warning(f"OpenCode runner not available: {e}")
     
     # Get LLM client
     llm_client = None
@@ -130,7 +113,7 @@ def _get_draft_pr_pipeline() -> DraftPRPipeline:
     except Exception as e:
         logger.warning(f"LLM client not available: {e}")
     
-    # Get workspace manager
+    # Get workspace manager (used for revise-plan workspace lookup when applicable)
     git_creds = config.get_git_credentials()
     opencode_config = config.get_opencode_config()
     workspace_manager = WorkspaceManager(
@@ -154,10 +137,56 @@ def _get_draft_pr_pipeline() -> DraftPRPipeline:
     except Exception as e:
         logger.warning(f"Bitbucket client not available: {e}")
     
-    # Get plan generator
+    # OpenSandbox: build sandbox pipeline and runner when enabled (Draft PR uses sandbox only, no host Docker)
+    sandbox_pipeline = None
+    sandbox_runner = None
+    sandbox_config = config.get_sandbox_config()
+    if sandbox_config.get('enabled'):
+        try:
+            from ..dependencies import get_sandbox_client
+            from src.sandbox_code_runner import SandboxCodeRunner
+            from src.sandbox_verifier import SandboxVerifier
+            from src.sandbox_pipeline import SandboxPipelineRunner
+            from src.sandbox_client import network_policy_from_config
+            sb_client = get_sandbox_client()
+            if sb_client:
+                llm_cfg = getattr(config, 'get_opencode_llm_config', lambda: config.get_llm_config())()
+                network_policy = network_policy_from_config(sandbox_config.get('network_policy'))
+                sandbox_runner = SandboxCodeRunner(
+                    sandbox_client=sb_client,
+                    image=sandbox_config.get('image', 'opensandbox/code-interpreter:v1.0.1'),
+                    timeout_minutes=sandbox_config.get('timeout_minutes', 20),
+                    apply_timeout_minutes=sandbox_config.get('apply_timeout_minutes', 45),
+                    max_result_size_bytes=opencode_config.get('max_result_size_mb', 10) * 1024 * 1024,
+                    result_file=opencode_config.get('result_file', 'result.json'),
+                    llm_config=llm_cfg,
+                    git_username=sandbox_config.get('git_username'),
+                    git_password=sandbox_config.get('git_password'),
+                    network_policy=network_policy,
+                )
+                draft_pr_cfg = config._config.get('draft_pr', {})
+                verification_config = draft_pr_cfg.get('verification', {})
+                sandbox_verifier = SandboxVerifier(
+                    test_command=verification_config.get('test_command'),
+                    lint_command=verification_config.get('lint_command'),
+                    build_command=verification_config.get('build_command'),
+                    language=verification_config.get('language', 'python'),
+                )
+                apply_timeout_seconds = sandbox_config.get('apply_timeout_minutes', 45) * 60
+                sandbox_pipeline = SandboxPipelineRunner(
+                    sandbox_runner=sandbox_runner,
+                    sandbox_verifier=sandbox_verifier,
+                    bitbucket_client=bitbucket_client,
+                    artifact_store=artifact_store,
+                    timeout_seconds=apply_timeout_seconds,
+                )
+        except Exception as e:
+            logger.warning("OpenSandbox pipeline not available for Draft PR: %s", e)
+    
+    # Get plan generator (Draft PR uses sandbox or LLM only; no host OpenCode)
     plan_generator = PlanGenerator(
         llm_client=llm_client,
-        opencode_runner=opencode_runner,
+        opencode_runner=None,
         workspace_manager=workspace_manager
     )
     
@@ -170,7 +199,8 @@ def _get_draft_pr_pipeline() -> DraftPRPipeline:
         plan_generator=plan_generator,
         workspace_manager=workspace_manager,
         artifact_store=artifact_store,
-        opencode_runner=opencode_runner,
+        sandbox_pipeline=sandbox_pipeline,
+        sandbox_runner=sandbox_runner,
         llm_client=llm_client,
         bitbucket_client=bitbucket_client,
         yolo_policy=yolo_policy,
@@ -258,18 +288,33 @@ async def create_draft_pr(
 @router.get("/draft-pr/jobs/{job_id}",
           tags=["Draft PR"],
           summary="Get draft PR job status",
-          description="Get the status and current stage of a draft PR job.")
+          description="Get the status and current stage of a draft PR job. Includes sandbox_id and sandbox_status when the job is using OpenSandbox.")
 async def get_draft_pr_job(
     job_id: str,
     current_user: str = Depends(get_current_user)
 ):
-    """Get draft PR job status"""
+    """Get draft PR job status, including sandbox_id and sandbox_status from Redis/OpenSandbox when applicable."""
     job_id = _validate_job_id(job_id)
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail="Job not found")
-    
+
     job = jobs[job_id]
-    return job
+    out = job.dict() if hasattr(job, "dict") else dict(job)
+    sandbox_id = await get_sandbox_id(job_id)
+    out["sandbox_id"] = sandbox_id
+    if sandbox_id:
+        try:
+            client = get_sandbox_client()
+            if client:
+                status = await client.get_sandbox_status(sandbox_id)
+                out["sandbox_status"] = status
+            else:
+                out["sandbox_status"] = None
+        except Exception:
+            out["sandbox_status"] = None
+    else:
+        out["sandbox_status"] = None
+    return out
 
 
 @router.get("/draft-pr/jobs/{job_id}/plan",
@@ -483,9 +528,9 @@ async def revise_plan(
     pipeline = _get_draft_pr_pipeline()
     workspace_path = pipeline.workspace_manager.get_workspace_path(job_id)
     
-    # Check if workspace exists - if not and OpenCode is needed, we can't revise
+    # Revise uses LLM only (Draft PR no longer uses host OpenCode)
     workspace_exists = workspace_path.exists()
-    use_opencode = bool(pipeline.opencode_runner)
+    use_opencode = False
     
     if use_opencode and not workspace_exists:
         # Workspace was deleted but OpenCode is required - try to recreate it
@@ -872,12 +917,23 @@ async def approve_plan(
         
         # Start cancellation monitor
         monitor_task = asyncio.create_task(monitor_cancellation())
-        
+
+        # Callbacks to store/clear sandbox_id in Redis for sandbox pause/resume/status API
+        from ..job_queue import set_sandbox_id, clear_sandbox_id
+
+        async def on_sandbox_created(jid: str, sandbox_id: str):
+            await set_sandbox_id(jid, sandbox_id)
+
+        async def on_sandbox_released(jid: str):
+            await clear_sandbox_id(jid)
+
         try:
             results = await pipeline.continue_pipeline_after_approval(
                 job_id=job_id,
                 approved_plan_hash=request.plan_hash,
-                cancellation_event=cancellation_event
+                cancellation_event=cancellation_event,
+                on_sandbox_created=on_sandbox_created,
+                on_sandbox_released=on_sandbox_released,
             )
         finally:
             # Cancel monitor task
