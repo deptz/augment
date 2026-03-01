@@ -1,0 +1,52 @@
+# Minimal Augment ARQ worker Deployment for Kubernetes.
+# Use with OpenSandbox server running with Kubernetes runtime.
+# See docs/deployment/KUBERNETES.md for full instructions.
+#
+# Replace <AUGMENT_IMAGE> with your image (e.g. pujitriwibowo/augment:0.1.0).
+# Set REDIS_HOST and OPENSANDBOX_DOMAIN to your cluster services.
+# Add JIRA, LLM, Bitbucket, etc. via Secret/ConfigMap (see docs).
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: augment-worker
+  namespace: default
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: augment-worker
+  template:
+    metadata:
+      labels:
+        app: augment-worker
+    spec:
+      containers:
+        - name: worker
+          image: <AUGMENT_IMAGE>
+          imagePullPolicy: IfNotPresent
+          command: ["python", "run_worker.py"]
+          env:
+            - name: PYTHONPATH
+              value: "/app"
+            - name: REDIS_HOST
+              value: "redis-master"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: OPENSANDBOX_ENABLED
+              value: "true"
+            - name: OPENSANDBOX_DOMAIN
+              value: "opensandbox.default.svc.cluster.local:8080"
+            - name: OPENSANDBOX_PROTOCOL
+              value: "http"
+            - name: SANDBOX_RUNTIME
+              value: "kubernetes"
+            - name: USE_SANDBOX
+              value: "true"
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1Gi"
