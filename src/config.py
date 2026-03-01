@@ -350,7 +350,50 @@ class Config:
             'username': git_config.get('username') or os.getenv('GIT_USERNAME'),
             'password': git_config.get('password') or os.getenv('GIT_PASSWORD'),
         }
-    
+
+    @property
+    def opensandbox(self) -> Dict[str, Any]:
+        """OpenSandbox configuration (sandbox runtime for draft PR pipeline)."""
+        return self._config.get('opensandbox', {})
+
+    def get_sandbox_config(self) -> Dict[str, Any]:
+        """Get OpenSandbox configuration with defaults. Only valid when opensandbox.enabled is True."""
+        sb = self.opensandbox
+        server = sb.get('server', {})
+        defaults = sb.get('defaults', {})
+        # network_policy: raw dict (default_action + egress list) or None; caller converts to SDK type
+        np_raw = sb.get('network_policy')
+        network_policy = np_raw if isinstance(np_raw, dict) and (np_raw.get('egress') or np_raw.get('default_action')) else None
+        return {
+            'enabled': sb.get('enabled', False),
+            'domain': server.get('domain', 'localhost:8080'),
+            'api_key': server.get('api_key', ''),
+            'protocol': server.get('protocol', 'http'),
+            'max_concurrent': int(server.get('max_concurrent', 5)),
+            'request_timeout_seconds': int(server.get('request_timeout_seconds', 30)),
+            'image': defaults.get('image', 'opensandbox/code-interpreter:v1.0.1'),
+            'entrypoint': defaults.get('entrypoint', ['/opt/opensandbox/code-interpreter.sh']),
+            'timeout_minutes': int(defaults.get('timeout_minutes', 20)),
+            'apply_timeout_minutes': int(defaults.get('apply_timeout_minutes', 45)),
+            'resource': defaults.get('resource', {'cpu': '2', 'memory': '4Gi'}),
+            'git_username': sb.get('git', {}).get('username') or os.getenv('GIT_USERNAME'),
+            'git_password': sb.get('git', {}).get('password') or os.getenv('GIT_PASSWORD'),
+            'cleanup_max_age_minutes': int(sb.get('cleanup', {}).get('max_age_minutes', 30)),
+            'languages': sb.get('languages') if isinstance(sb.get('languages'), dict) else {},
+            'network_policy': network_policy,
+        }
+
+    def get_features_config(self) -> Dict[str, Any]:
+        """Get feature flags (use_sandbox, sandbox_runtime). Uses features section with env var interpolation."""
+        features = self._config.get('features', {})
+        use_sandbox = features.get('use_sandbox', False)
+        if isinstance(use_sandbox, str):
+            use_sandbox = use_sandbox.strip().lower() in ('true', '1', 'yes')
+        return {
+            'use_sandbox': bool(use_sandbox),
+            'sandbox_runtime': str(features.get('sandbox_runtime', 'docker')).strip().lower() or 'docker',
+        }
+
     def get_mcp_config(self) -> Dict[str, Any]:
         """Get MCP server configuration"""
         return self._config.get('mcp', {})

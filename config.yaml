@@ -115,6 +115,73 @@ opencode:
     moonshot_api_key: ${OPENCODE_MOONSHOT_API_KEY:}  # REQUIRED if provider=kimi
     moonshot_model: ${OPENCODE_MOONSHOT_MODEL:}  # REQUIRED if provider=kimi
 
+# OpenSandbox Configuration (Optional)
+# When enabled, draft PR pipeline uses OpenSandbox for plan/apply/verify instead of host Docker
+opensandbox:
+  enabled: ${OPENSANDBOX_ENABLED:false}
+  server:
+    domain: ${OPENSANDBOX_DOMAIN:localhost:8080}
+    api_key: ${OPENSANDBOX_API_KEY:}
+    protocol: ${OPENSANDBOX_PROTOCOL:http}
+    max_concurrent: ${OPENSANDBOX_MAX_CONCURRENT:5}
+    request_timeout_seconds: 30
+  defaults:
+    image: ${OPENSANDBOX_IMAGE:opensandbox/code-interpreter:v1.0.1}
+    entrypoint: ["/opt/opensandbox/code-interpreter.sh"]
+    timeout_minutes: 20
+    apply_timeout_minutes: 45
+    resource:
+      cpu: "2"
+      memory: "4Gi"
+  languages:
+    python:
+      version: "3.11"
+      test_command: ${DRAFT_PR_TEST_COMMAND:pytest}
+      lint_command: ${DRAFT_PR_LINT_COMMAND:ruff check}
+      setup_commands:
+        - "pip install -r requirements.txt 2>/dev/null || true"
+        - "pip install pytest ruff 2>/dev/null || true"
+    java:
+      version: "17"
+      test_command: "mvn test"
+      lint_command: "mvn checkstyle:check"
+    node:
+      version: "20"
+      test_command: "npm test"
+      lint_command: "npm run lint"
+    go:
+      version: "1.24"
+      test_command: "go test ./..."
+      lint_command: "gofmt -l ."
+  network_policy:
+    default_action: "deny"
+    egress:
+      - { action: "allow", target: "pypi.org" }
+      - { action: "allow", target: "files.pythonhosted.org" }
+      - { action: "allow", target: "registry.npmjs.org" }
+      - { action: "allow", target: "proxy.golang.org" }
+      - { action: "allow", target: "api.openai.com" }
+      - { action: "allow", target: "api.anthropic.com" }
+      - { action: "allow", target: "generativelanguage.googleapis.com" }
+      - { action: "allow", target: "api.moonshot.cn" }
+      - { action: "allow", target: "bitbucket.org" }
+      - { action: "allow", target: "*.bitbucket.org" }
+      - { action: "allow", target: "github.com" }
+      - { action: "allow", target: "*.github.com" }
+  git:
+    username: ${GIT_USERNAME:}
+    password: ${GIT_PASSWORD:}
+    user_name: "Augment Bot"
+    user_email: "augment@automated.local"
+  cleanup:
+    enabled: true
+    max_age_minutes: 30
+
+# Feature flags (Phase 4)
+features:
+  use_sandbox: ${USE_SANDBOX:false}
+  sandbox_runtime: ${SANDBOX_RUNTIME:docker}
+
 # Git Credentials Configuration (Optional)
 # Used for cloning private repositories when using OpenCode
 git:
