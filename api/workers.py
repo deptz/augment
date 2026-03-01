@@ -144,11 +144,11 @@ async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update
                                      llm_model: Optional[str] = None, llm_provider: Optional[str] = None,
                                      additional_context: Optional[str] = None,
                                      repos: Optional[List[Dict[str, Any]]] = None):
-    """ARQ worker function for processing a single ticket
-    
+    """ARQ worker function for processing a single ticket.
+
     Args:
-        repos: If provided, uses OpenCode for code-aware generation instead of direct LLM.
-               List of dicts with 'url' and optional 'branch' keys.
+        repos: If provided, uses OpenCode in OpenSandbox for code-aware generation (no host Docker).
+               List of dicts with 'url' and optional 'branch' keys. Requires OPENSANDBOX_ENABLED.
     """
     _initialize_services_if_needed()
     generator = get_generator()
@@ -184,81 +184,32 @@ async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update
         parent = ticket_data.get('fields', {}).get('parent')
         parent_name = parent.get('fields', {}).get('summary') if parent else None
         
-        # Branch: OpenCode path (when repos provided) vs Direct LLM path
+        # Branch: Sandbox (OpenCode in sandbox) when repos provided vs Direct LLM path
         if repos:
-            # OpenCode path - no direct LLM call
-            job.progress = {"message": f"Setting up OpenCode workspace for {ticket_key}..."}
-            
-            from src.workspace_manager import WorkspaceManager
-            from src.opencode_runner import OpenCodeRunner, OpenCodeError, DockerUnavailableError
+            # Code-aware path: run OpenCode in OpenSandbox (no host Docker)
+            from .dependencies import get_sandbox_code_runner
             from src.prompts.opencode import ticket_description_prompt
-            
-            opencode_config = config.get_opencode_config()
-            git_creds = config.get_git_credentials()
-            
-            workspace_manager = WorkspaceManager(
-                git_username=git_creds.get('username'),
-                git_password=git_creds.get('password'),
-                clone_timeout_seconds=opencode_config.get('clone_timeout_seconds', 300),
-                shallow_clone=opencode_config.get('shallow_clone', True)
-            )
-            
-            # Get LLM config for OpenCode - ONLY uses OpenCode-specific config, NO fallback to main LLM config
-            # This will raise ValueError if OpenCode-specific config is missing
-            logger.info(f"[Worker] Getting OpenCode LLM config - provider override: {llm_provider}, model override: {llm_model}")
-            opencode_llm_config = config.get_opencode_llm_config(llm_provider, llm_model)
-            logger.info(f"[Worker] OpenCode LLM config received - provider: {opencode_llm_config.get('provider')}, model: {opencode_llm_config.get('model')}, anthropic_model: {opencode_llm_config.get('anthropic_model')}")
-            
-            # Verify debug logging configuration
-            debug_logging_enabled = opencode_config.get('debug_conversation_logging', False)
-            log_dir = opencode_config.get('conversation_log_dir', 'logs/opencode')
-            logger.info(f"[Worker] OpenCode debug conversation logging: {debug_logging_enabled}, log directory: {log_dir}")
-            
-            # Get MCP network name if MCP is configured
-            mcp_config = config.get_mcp_config()
-            mcp_network_name = mcp_config.get('network_name') if mcp_config else None
-            
-            opencode_runner = OpenCodeRunner(
-                docker_image=opencode_config.get('docker_image'),
-                job_timeout_minutes=opencode_config.get('job_timeout_minutes', 20),
-                max_result_size_mb=opencode_config.get('max_result_size_mb', 10),
-                result_file=opencode_config.get('result_file', 'result.json'),
-                llm_config=opencode_llm_config,
-                mcp_network_name=mcp_network_name,
-                debug_conversation_logging=debug_logging_enabled,  # Use verified value
-                conversation_log_dir=log_dir  # Use verified value
-            )
-            
-            # Log confirmation that event logging is configured
-            if debug_logging_enabled:
-                logger.info(f"[Worker] ✅ OpenCode event logging ENABLED for job {job_id}. All SSE events and container logs will be written to: {log_dir}/{job_id}.log and {log_dir}/{job_id}.json")
-            else:
-                logger.info(f"[Worker] ⚠️  OpenCode event logging DISABLED for job {job_id}. Enable with OPENCODE_DEBUG_LOGGING=true to see SSE events and container logs.")
-            opencode_runner.set_concurrency_limit(opencode_config.get('max_concurrent', 2))
-            
-            # Final verification: Log that OpenCodeRunner is ready with event logging
-            if debug_logging_enabled:
-                logger.info(f"[Worker] ✅ OpenCodeRunner initialized for job {job_id} with event logging ENABLED. All SSE events will be logged.")
-            else:
-                logger.debug(f"[Worker] OpenCodeRunner initialized for job {job_id} with event logging disabled.")
-            
-            workspace_path = None
+            from src.sandbox_client import SandboxClientError
+
+            sandbox_runner = get_sandbox_code_runner()
+            if not sandbox_runner:
+                job.status = "failed"
+                job.completed_at = datetime.now()
+                job.error = "OpenSandbox is required when repos are provided. Enable OPENSANDBOX_ENABLED and ensure the worker has sandbox configured."
+                job.progress = {"message": job.error}
+                job.failed_tickets = 1
+                unregister_ticket_job(ticket_key)
+                return
+
+            repo_url = repos[0].get("url", repos[0]) if isinstance(repos[0], dict) else repos[0]
+            branch = repos[0].get("branch") if isinstance(repos[0], dict) else None
+            repo_names = [r.get("url", r) if isinstance(r, dict) else r for r in repos]
+
             try:
-                # Check if Docker is available
-                if not opencode_runner.is_docker_available():
-                    raise DockerUnavailableError("Docker is not available")
-                
-                # Create workspace and clone repos
-                job.progress = {"message": f"Cloning {len(repos)} repositories..."}
-                workspace_path = await workspace_manager.create_workspace(job_id, repos)
-                
-                # Check cancellation after clone
                 if await check_cancellation(job_id, job):
-                    await workspace_manager.cleanup_workspace(job_id)
                     unregister_ticket_job(ticket_key)
                     return
-                
-                # Fetch PR/commit data for code changes section
+
                 pull_requests = []
                 commits = []
                 bitbucket_client = get_bitbucket_client()
@@ -270,9 +221,7 @@ async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update
                         logger.info(f"[SINGLE_TICKET] Found {len(pull_requests)} PRs and {len(commits)} commits for {ticket_key}")
                     except Exception as e:
                         logger.warning(f"[SINGLE_TICKET] Failed to fetch PR/commit data for {ticket_key}: {e}")
-                        # Continue without PR/commit data - will use implementation plan instead
-                
-                # Fetch PRD/RFC URLs from epic (not full content - OpenCode will fetch via MCP)
+
                 prd_url = None
                 rfc_url = None
                 if ticket_data.get('fields', {}).get('parent') and generator.planning_service:
@@ -282,7 +231,6 @@ async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update
                         if epic_key:
                             epic_issue = jira_client.get_ticket(epic_key)
                             if epic_issue:
-                                # Get PRD/RFC URLs only (not full content)
                                 prd_url = generator.planning_service._get_custom_field_value(epic_issue, 'PRD')
                                 rfc_url = generator.planning_service._get_custom_field_value(epic_issue, 'RFC')
                                 if prd_url:
@@ -291,9 +239,7 @@ async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update
                                     logger.info(f"[SINGLE_TICKET] Found RFC URL: {rfc_url}")
                     except Exception as e:
                         logger.warning(f"[SINGLE_TICKET] Failed to fetch PRD/RFC URLs from epic: {e}")
-                
-                # Build prompt
-                repo_names = workspace_manager.list_repos_in_workspace(job_id)
+
                 prompt = ticket_description_prompt(
                     ticket_data={
                         'key': ticket_key,
@@ -308,23 +254,20 @@ async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update
                     prd_url=prd_url,
                     rfc_url=rfc_url
                 )
-                
-                # Execute OpenCode
-                job.progress = {"message": f"Running OpenCode analysis..."}
-                opencode_result = await opencode_runner.execute(
+
+                job.progress = {"message": f"Running OpenCode in sandbox..."}
+                opencode_result = await sandbox_runner.execute_generic(
                     job_id=job_id,
-                    workspace_path=workspace_path,
+                    repo_url=repo_url,
+                    branch=branch,
                     prompt=prompt,
                     job_type="ticket_description",
-                    repos=repos,
-                    mcp_config=mcp_config
+                    cancellation_event=None,
                 )
-                
-                # Extract result
+
                 generated_description = opencode_result.get('description', '')
                 impacted_files = opencode_result.get('impacted_files', [])
-                
-                # Build response
+
                 ticket_response = TicketResponse(
                     ticket_key=ticket_key,
                     summary=summary,
@@ -334,15 +277,14 @@ async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update
                     success=True,
                     error=None,
                     skipped_reason=None,
-                    updated_in_jira=False,  # OpenCode doesn't update JIRA directly yet
+                    updated_in_jira=False,
                     llm_provider="opencode",
                     llm_model="opencode",
                     system_prompt=None,
                     user_prompt=prompt,
                     additional_context=additional_context
                 )
-                
-                # Optionally update JIRA if requested
+
                 if update_jira and generated_description:
                     try:
                         jira_client.update_ticket_description(
@@ -353,10 +295,9 @@ async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update
                         ticket_response.updated_in_jira = True
                     except Exception as e:
                         logger.warning(f"Failed to update JIRA for {ticket_key}: {e}")
-                
+
                 job.status = "completed"
                 job.completed_at = datetime.now()
-                # Store impacted_files in job results metadata
                 results_dict = ticket_response.dict()
                 results_dict['opencode_metadata'] = {
                     'impacted_files': impacted_files,
@@ -366,19 +307,18 @@ async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update
                 }
                 job.results = results_dict
                 job.additional_context = additional_context
-                job.progress = {"message": f"Completed with OpenCode: found {len(impacted_files)} impacted files"}
+                job.progress = {"message": f"Completed with OpenCode (sandbox): found {len(impacted_files)} impacted files"}
                 job.successful_tickets = 1
                 job.failed_tickets = 0
-                
-            except (OpenCodeError, DockerUnavailableError) as e:
-                logger.error(f"OpenCode error for job {job_id} (ticket {ticket_key}): {e}", exc_info=True)
-                user_friendly_error = _format_opencode_error(e, f"Ticket: {ticket_key}")
+
+            except SandboxClientError as e:
+                logger.error(f"Sandbox error for job {job_id} (ticket {ticket_key}): {e}", exc_info=True)
+                user_friendly_error = str(e) or "OpenSandbox execution failed"
                 job.status = "failed"
                 job.completed_at = datetime.now()
                 job.error = user_friendly_error
                 job.progress = {"message": user_friendly_error}
                 job.failed_tickets = 1
-                # Create error response
                 ticket_response = TicketResponse(
                     ticket_key=ticket_key,
                     summary=summary,
@@ -395,12 +335,9 @@ async def process_single_ticket_worker(ctx, job_id: str, ticket_key: str, update
                     user_prompt=None,
                     additional_context=additional_context
                 )
-                
             finally:
-                # Always cleanup workspace
-                if workspace_path:
-                    await workspace_manager.cleanup_workspace(job_id)
-        
+                pass  # No workspace to cleanup when using sandbox
+
         else:
             # Direct LLM path (original behavior)
             result = generator.process_ticket(
@@ -718,12 +655,12 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
                                         llm_provider: Optional[str] = None, additional_context: Optional[str] = None,
                                         generate_test_cases: bool = False,
                                         repos: Optional[List[Dict[str, Any]]] = None):
-    """ARQ worker function for generating tasks for stories
-    
+    """ARQ worker function for generating tasks for stories.
+
     Args:
-        story_keys: List of story keys to generate tasks for
+        story_keys: List of story keys to generate tasks for.
         epic_key: Optional parent epic key. If not provided, will be derived from story tickets.
-        repos: If provided, uses OpenCode for code-aware task generation instead of direct LLM.
+        repos: If provided, uses OpenCode in OpenSandbox for code-aware task generation (no host Docker). Requires OPENSANDBOX_ENABLED.
     """
     _initialize_services_if_needed()
     generator = get_generator()
@@ -743,94 +680,40 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
                 unregister_ticket_job(story_key)
             return
         
-        # Branch: OpenCode path (when repos provided) vs Direct LLM path
+        # Branch: Sandbox (OpenCode in sandbox) when repos provided vs Direct LLM path
         if repos:
-            # OpenCode path - no direct LLM call
-            job.progress = {"message": f"Setting up OpenCode workspace for task generation..."}
-            
-            from src.workspace_manager import WorkspaceManager
-            from src.opencode_runner import OpenCodeRunner, OpenCodeError, DockerUnavailableError
+            from .dependencies import get_sandbox_code_runner
             from src.prompts.opencode import task_breakdown_prompt
-            
-            opencode_config = config.get_opencode_config()
-            git_creds = config.get_git_credentials()
-            
-            workspace_manager = WorkspaceManager(
-                git_username=git_creds.get('username'),
-                git_password=git_creds.get('password'),
-                clone_timeout_seconds=opencode_config.get('clone_timeout_seconds', 300),
-                shallow_clone=opencode_config.get('shallow_clone', True)
-            )
-            
-            # Get LLM config for OpenCode - ONLY uses OpenCode-specific config, NO fallback to main LLM config
-            # This will raise ValueError if OpenCode-specific config is missing
-            logger.info(f"[Worker] Getting OpenCode LLM config - provider override: {llm_provider}, model override: {llm_model}")
-            opencode_llm_config = config.get_opencode_llm_config(llm_provider, llm_model)
-            logger.info(f"[Worker] OpenCode LLM config received - provider: {opencode_llm_config.get('provider')}, model: {opencode_llm_config.get('model')}, anthropic_model: {opencode_llm_config.get('anthropic_model')}")
-            
-            # Verify debug logging configuration
-            debug_logging_enabled = opencode_config.get('debug_conversation_logging', False)
-            log_dir = opencode_config.get('conversation_log_dir', 'logs/opencode')
-            logger.info(f"[Worker] OpenCode debug conversation logging: {debug_logging_enabled}, log directory: {log_dir}")
-            
-            # Get MCP network name if MCP is configured
-            mcp_config = config.get_mcp_config()
-            mcp_network_name = mcp_config.get('network_name') if mcp_config else None
-            
-            opencode_runner = OpenCodeRunner(
-                docker_image=opencode_config.get('docker_image'),
-                job_timeout_minutes=opencode_config.get('job_timeout_minutes', 20),
-                max_result_size_mb=opencode_config.get('max_result_size_mb', 10),
-                result_file=opencode_config.get('result_file', 'result.json'),
-                llm_config=opencode_llm_config,
-                mcp_network_name=mcp_network_name,
-                debug_conversation_logging=debug_logging_enabled,  # Use verified value
-                conversation_log_dir=log_dir  # Use verified value
-            )
-            
-            # Log confirmation that event logging is configured
-            if debug_logging_enabled:
-                logger.info(f"[Worker] ✅ OpenCode event logging ENABLED for job {job_id}. All SSE events and container logs will be written to: {log_dir}/{job_id}.log and {log_dir}/{job_id}.json")
-            else:
-                logger.info(f"[Worker] ⚠️  OpenCode event logging DISABLED for job {job_id}. Enable with OPENCODE_DEBUG_LOGGING=true to see SSE events and container logs.")
-            opencode_runner.set_concurrency_limit(opencode_config.get('max_concurrent', 2))
-            
-            # Final verification: Log that OpenCodeRunner is ready with event logging
-            if debug_logging_enabled:
-                logger.info(f"[Worker] ✅ OpenCodeRunner initialized for job {job_id} with event logging ENABLED. All SSE events will be logged.")
-            else:
-                logger.debug(f"[Worker] OpenCodeRunner initialized for job {job_id} with event logging disabled.")
-            
-            workspace_path = None
+            from src.sandbox_client import SandboxClientError
+
+            sandbox_runner = get_sandbox_code_runner()
+            if not sandbox_runner:
+                job.status = "failed"
+                job.completed_at = datetime.now()
+                job.error = "OpenSandbox is required when repos are provided. Enable OPENSANDBOX_ENABLED and ensure the worker has sandbox configured."
+                job.progress = {"message": job.error}
+                for story_key in story_keys:
+                    unregister_ticket_job(story_key)
+                return
+
+            repo_url = repos[0].get("url", repos[0]) if isinstance(repos[0], dict) else repos[0]
+            branch = repos[0].get("branch") if isinstance(repos[0], dict) else None
+            repo_names = [r.get("url", r) if isinstance(r, dict) else r for r in repos]
+
             try:
-                # Check if Docker is available
-                if not opencode_runner.is_docker_available():
-                    raise DockerUnavailableError("Docker is not available")
-                
-                # Create workspace and clone repos
-                job.progress = {"message": f"Cloning {len(repos)} repositories..."}
-                workspace_path = await workspace_manager.create_workspace(job_id, repos)
-                
-                # Check cancellation after clone
                 if await check_cancellation(job_id, job):
-                    await workspace_manager.cleanup_workspace(job_id)
                     for story_key in story_keys:
                         unregister_ticket_job(story_key)
                     return
-                
-                # Gather story data for all stories first
+
                 all_tasks = []
                 all_warnings = []
-                repo_names = workspace_manager.list_repos_in_workspace(job_id)
-                
-                # Fetch PRD/RFC URLs from epic (not full content - OpenCode will fetch via MCP)
                 prd_url = None
                 rfc_url = None
                 if epic_key and generator.planning_service:
                     try:
                         epic_issue = jira_client.get_ticket(epic_key)
                         if epic_issue:
-                            # Get PRD/RFC URLs only (not full content)
                             prd_url = generator.planning_service._get_custom_field_value(epic_issue, 'PRD')
                             rfc_url = generator.planning_service._get_custom_field_value(epic_issue, 'RFC')
                             if prd_url:
@@ -839,15 +722,13 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
                                 logger.info(f"[TASK_BREAKDOWN] Found RFC URL: {rfc_url}")
                     except Exception as e:
                         logger.warning(f"[TASK_BREAKDOWN] Failed to fetch PRD/RFC URLs from epic {epic_key}: {e}")
-                
-                # Collect all story data
+
                 stories_data = []
                 for story_key in story_keys:
                     story_data = jira_client.get_ticket(story_key)
                     if not story_data:
                         logger.warning(f"Story {story_key} not found, skipping")
                         continue
-                    
                     story_fields = story_data.get('fields', {})
                     stories_data.append({
                         'key': story_key,
@@ -855,19 +736,14 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
                         'description': story_fields.get('description', ''),
                         'acceptance_criteria': []
                     })
-                
-                # Process stories serially to avoid container conflicts
+
                 for idx, story_info in enumerate(stories_data):
                     story_key = story_info['key']
-                    
-                    # Check cancellation between stories
                     if await check_cancellation(job_id, job):
-                        await workspace_manager.cleanup_workspace(job_id)
                         for sk in story_keys:
                             unregister_ticket_job(sk)
                         return
-                    
-                    # Build prompt for this story
+
                     prompt = task_breakdown_prompt(
                         story_data=story_info,
                         repos=repo_names,
@@ -878,34 +754,29 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
                         prd_url=prd_url,
                         rfc_url=rfc_url
                     )
-                    
-                    # Execute OpenCode with unique execution ID (use index to avoid name conflicts)
-                    job.progress = {"message": f"Running OpenCode for story {story_key} ({idx + 1}/{len(stories_data)})..."}
-                    opencode_result = await opencode_runner.execute(
-                        job_id=f"{job_id}-s{idx}",  # Use simple index suffix
-                        workspace_path=workspace_path,
+
+                    job.progress = {"message": f"Running OpenCode in sandbox for story {story_key} ({idx + 1}/{len(stories_data)})..."}
+                    opencode_result = await sandbox_runner.execute_generic(
+                        job_id=f"{job_id}-s{idx}",
+                        repo_url=repo_url,
+                        branch=branch,
                         prompt=prompt,
                         job_type="task_breakdown",
-                        repos=repos,
-                        mcp_config=mcp_config
+                        cancellation_event=None,
                     )
-                    
-                    # Extract tasks from result
+
                     tasks = opencode_result.get('tasks', [])
                     for task in tasks:
                         task['story_key'] = story_key
                     all_tasks.extend(tasks)
                     all_warnings.extend(opencode_result.get('warnings', []))
-                
-                # Convert OpenCode results to TaskDetail format
+
                 from .models.planning import TaskDetail
-                
+
                 def convert_effort_to_days(effort: Optional[str]) -> Optional[float]:
-                    """Convert estimated_effort string to estimated_days float"""
                     if not effort:
                         return None
                     effort_lower = effort.lower()
-                    # Map: small=1, medium=2, large=3 days
                     if effort_lower == 'small':
                         return 1.0
                     elif effort_lower == 'medium':
@@ -913,31 +784,23 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
                     elif effort_lower == 'large':
                         return 3.0
                     return None
-                
+
                 task_details = []
                 for task in all_tasks:
-                    # Extract test cases if available
                     test_cases_list = []
                     if generate_test_cases:
-                        # OpenCode may return test_cases as list or string
                         test_cases_raw = task.get('test_cases', [])
                         if isinstance(test_cases_raw, str):
-                            # If it's a string, try to parse as JSON or split by newlines
                             try:
                                 import json
                                 test_cases_list = json.loads(test_cases_raw)
-                                # Ensure result is a list
                                 if not isinstance(test_cases_list, list):
                                     test_cases_list = [test_cases_list] if test_cases_list else []
                             except (json.JSONDecodeError, ValueError, TypeError):
-                                # Fallback: split by newlines if it's a simple string
                                 test_cases_list = [tc.strip() for tc in test_cases_raw.split('\n') if tc.strip()]
                         elif isinstance(test_cases_raw, list):
                             test_cases_list = test_cases_raw
-                    
-                    # Convert estimated_effort to estimated_days
                     estimated_days = convert_effort_to_days(task.get('estimated_effort'))
-                    
                     task_details.append(TaskDetail(
                         task_id=None,
                         summary=task.get('summary', ''),
@@ -948,8 +811,7 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
                         test_cases=test_cases_list,
                         jira_key=None
                     ))
-                
-                # Build response
+
                 job.status = "completed"
                 job.completed_at = datetime.now()
                 job.results = {
@@ -968,26 +830,23 @@ async def process_task_generation_worker(ctx, job_id: str, story_keys: List[str]
                     "warnings": all_warnings,
                     "execution_time_seconds": 0,
                     "system_prompt": None,
-                    "user_prompt": None,  # Multiple prompts were used
+                    "user_prompt": None,
                     "additional_context": additional_context
                 }
                 job.additional_context = additional_context
-                job.progress = {"message": f"Generated {len(task_details)} tasks with OpenCode"}
+                job.progress = {"message": f"Generated {len(task_details)} tasks with OpenCode (sandbox)"}
                 job.successful_tickets = len(task_details)
-                
-            except (OpenCodeError, DockerUnavailableError) as e:
-                logger.error(f"OpenCode error for job {job_id} (epic {epic_key}, {len(story_keys)} stories): {e}", exc_info=True)
-                user_friendly_error = _format_opencode_error(e, f"Epic: {epic_key}, Stories: {', '.join(story_keys[:3])}{'...' if len(story_keys) > 3 else ''}")
+
+            except SandboxClientError as e:
+                logger.error(f"Sandbox error for job {job_id} (epic {epic_key}, {len(story_keys)} stories): {e}", exc_info=True)
+                user_friendly_error = str(e) or "OpenSandbox execution failed"
                 job.status = "failed"
                 job.completed_at = datetime.now()
                 job.error = user_friendly_error
                 job.progress = {"message": user_friendly_error}
-                
             finally:
-                # Always cleanup workspace
-                if workspace_path:
-                    await workspace_manager.cleanup_workspace(job_id)
-        
+                pass
+
         else:
             # Direct LLM path (original behavior)
             if not generator.planning_service:
@@ -1737,91 +1596,40 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
         if not jira_client:
             raise RuntimeError("JIRA client not initialized")
         
-        # Branch: OpenCode path (when repos provided) vs Direct LLM path
+        # Branch: Sandbox (OpenCode in sandbox) when repos provided vs Direct LLM path
         if repos:
-            # OpenCode path - no direct LLM call
-            job.progress = {"message": f"Setting up OpenCode workspace for coverage analysis..."}
-            
-            from src.workspace_manager import WorkspaceManager
-            from src.opencode_runner import OpenCodeRunner, OpenCodeError, DockerUnavailableError
+            from .dependencies import get_sandbox_code_runner
             from src.prompts.opencode import coverage_check_prompt
-            
-            opencode_config = config.get_opencode_config()
-            git_creds = config.get_git_credentials()
-            
-            workspace_manager = WorkspaceManager(
-                git_username=git_creds.get('username'),
-                git_password=git_creds.get('password'),
-                clone_timeout_seconds=opencode_config.get('clone_timeout_seconds', 300),
-                shallow_clone=opencode_config.get('shallow_clone', True)
+            from src.sandbox_client import SandboxClientError
+            from .models.story_analysis import (
+                StoryCoverageResponse, TaskSummaryModel, CoverageGap,
+                UpdateTaskSuggestion, NewTaskSuggestion
             )
-            
-            # Get LLM config for OpenCode - ONLY uses OpenCode-specific config, NO fallback to main LLM config
-            # This will raise ValueError if OpenCode-specific config is missing
-            logger.info(f"[Worker] Getting OpenCode LLM config - provider override: {llm_provider}, model override: {llm_model}")
-            opencode_llm_config = config.get_opencode_llm_config(llm_provider, llm_model)
-            logger.info(f"[Worker] OpenCode LLM config received - provider: {opencode_llm_config.get('provider')}, model: {opencode_llm_config.get('model')}, anthropic_model: {opencode_llm_config.get('anthropic_model')}")
-            
-            # Verify debug logging configuration
-            debug_logging_enabled = opencode_config.get('debug_conversation_logging', False)
-            log_dir = opencode_config.get('conversation_log_dir', 'logs/opencode')
-            logger.info(f"[Worker] OpenCode debug conversation logging: {debug_logging_enabled}, log directory: {log_dir}")
-            
-            # Get MCP network name if MCP is configured
-            mcp_config = config.get_mcp_config()
-            mcp_network_name = mcp_config.get('network_name') if mcp_config else None
-            
-            opencode_runner = OpenCodeRunner(
-                docker_image=opencode_config.get('docker_image'),
-                job_timeout_minutes=opencode_config.get('job_timeout_minutes', 20),
-                max_result_size_mb=opencode_config.get('max_result_size_mb', 10),
-                result_file=opencode_config.get('result_file', 'result.json'),
-                llm_config=opencode_llm_config,
-                mcp_network_name=mcp_network_name,
-                debug_conversation_logging=debug_logging_enabled,  # Use verified value
-                conversation_log_dir=log_dir  # Use verified value
-            )
-            
-            # Log confirmation that event logging is configured
-            if debug_logging_enabled:
-                logger.info(f"[Worker] ✅ OpenCode event logging ENABLED for job {job_id}. All SSE events and container logs will be written to: {log_dir}/{job_id}.log and {log_dir}/{job_id}.json")
-            else:
-                logger.info(f"[Worker] ⚠️  OpenCode event logging DISABLED for job {job_id}. Enable with OPENCODE_DEBUG_LOGGING=true to see SSE events and container logs.")
-            opencode_runner.set_concurrency_limit(opencode_config.get('max_concurrent', 2))
-            
-            # Final verification: Log that OpenCodeRunner is ready with event logging
-            if debug_logging_enabled:
-                logger.info(f"[Worker] ✅ OpenCodeRunner initialized for job {job_id} with event logging ENABLED. All SSE events will be logged.")
-            else:
-                logger.debug(f"[Worker] OpenCodeRunner initialized for job {job_id} with event logging disabled.")
-            
-            workspace_path = None
+
+            sandbox_runner = get_sandbox_code_runner()
+            if not sandbox_runner:
+                job.status = "failed"
+                job.completed_at = datetime.now()
+                job.error = "OpenSandbox is required when repos are provided. Enable OPENSANDBOX_ENABLED and ensure the worker has sandbox configured."
+                job.progress = {"message": job.error}
+                unregister_ticket_job(story_key)
+                return
+
+            repo_url = repos[0].get("url", repos[0]) if isinstance(repos[0], dict) else repos[0]
+            branch = repos[0].get("branch") if isinstance(repos[0], dict) else None
+            repo_names = [r.get("url", r) if isinstance(r, dict) else r for r in repos]
+
             try:
-                # Check if Docker is available
-                if not opencode_runner.is_docker_available():
-                    raise DockerUnavailableError("Docker is not available")
-                
-                # Create workspace and clone repos
-                job.progress = {"message": f"Cloning {len(repos)} repositories..."}
-                workspace_path = await workspace_manager.create_workspace(job_id, repos)
-                
-                # Check cancellation after clone
                 if await check_cancellation(job_id, job):
-                    await workspace_manager.cleanup_workspace(job_id)
                     unregister_ticket_job(story_key)
                     return
-                
-                # Get story data
+
                 story_data = jira_client.get_ticket(story_key)
                 if not story_data:
                     raise RuntimeError(f"Story {story_key} not found")
-                
                 story_fields = story_data.get('fields', {})
-                
-                # Get generator for planning_service access (needed for PRD/RFC URL extraction)
                 generator = get_generator()
-                
-                # Fetch PRD/RFC URLs from epic (not full content - OpenCode will fetch via MCP)
+
                 prd_url = None
                 rfc_url = None
                 parent = story_fields.get('parent')
@@ -1831,7 +1639,6 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
                         if epic_key:
                             epic_issue = jira_client.get_ticket(epic_key)
                             if epic_issue:
-                                # Get PRD/RFC URLs only (not full content)
                                 prd_url = generator.planning_service._get_custom_field_value(epic_issue, 'PRD')
                                 rfc_url = generator.planning_service._get_custom_field_value(epic_issue, 'RFC')
                                 if prd_url:
@@ -1840,12 +1647,9 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
                                     logger.info(f"[COVERAGE] Found RFC URL: {rfc_url}")
                     except Exception as e:
                         logger.warning(f"[COVERAGE] Failed to fetch PRD/RFC URLs from epic: {e}")
-                
-                # Get existing tasks from multiple sources
+
                 tasks = []
                 seen_task_keys = set()
-                
-                # 1. Get subtasks (if any)
                 if story_fields.get('subtasks'):
                     for subtask in story_fields['subtasks']:
                         task_key = subtask.get('key')
@@ -1853,80 +1657,33 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
                             task_data = jira_client.get_ticket(task_key)
                             if task_data:
                                 task_fields = task_data.get('fields', {})
-                                # #region agent log
-                                import json
-                                desc_raw = task_fields.get('description', '')
-                                desc_type = type(desc_raw).__name__
-                                desc_preview = str(desc_raw)[:200] if desc_raw else 'None'
-                                with open('/Users/pujitriwibowo/Documents/works/augment/.cursor/debug.log', 'a') as f:
-                                    f.write(json.dumps({"sessionId": "debug-session", "runId": "pre-fix", "hypothesisId": "A", "location": "api/workers.py:1757", "message": "Extracting task description from subtask", "data": {"task_key": task_key, "description_type": desc_type, "description_preview": desc_preview}, "timestamp": int(__import__('time').time() * 1000)}) + '\n')
-                                # #endregion
-                                description_text = _extract_description_text(desc_raw, jira_client)
-                                # #region agent log
-                                with open('/Users/pujitriwibowo/Documents/works/augment/.cursor/debug.log', 'a') as f:
-                                    f.write(json.dumps({"sessionId": "debug-session", "runId": "pre-fix", "hypothesisId": "A", "location": "api/workers.py:1757", "message": "Converted description to text", "data": {"task_key": task_key, "converted_type": type(description_text).__name__, "converted_length": len(description_text), "converted_preview": description_text[:200]}, "timestamp": int(__import__('time').time() * 1000)}) + '\n')
-                                # #endregion
-                                task_info = {
-                                    'key': task_key,
-                                    'summary': task_fields.get('summary', ''),
-                                    'description': description_text
-                                }
-                                # Extract test cases if requested
+                                description_text = _extract_description_text(task_fields.get('description', ''), jira_client)
+                                task_info = {'key': task_key, 'summary': task_fields.get('summary', ''), 'description': description_text}
                                 if include_test_cases:
-                                    test_cases = jira_client.extract_test_cases(task_data)
-                                    task_info['test_cases'] = test_cases
+                                    task_info['test_cases'] = jira_client.extract_test_cases(task_data)
                                 tasks.append(task_info)
                                 seen_task_keys.add(task_key)
-                
-                # 2. Get linked issues (Work item split, Relates to, etc.)
                 if story_fields.get('issuelinks'):
                     for link in story_fields['issuelinks']:
-                        # Check both inward and outward linked issues
                         linked_issue = link.get('inwardIssue') or link.get('outwardIssue')
                         if linked_issue:
                             linked_key = linked_issue.get('key')
                             linked_type = linked_issue.get('fields', {}).get('issuetype', {}).get('name', '')
-                            
-                            # Only include Task/Sub-task types
                             if linked_key and linked_key not in seen_task_keys and linked_type in ['Task', 'Sub-task', 'Technical Task']:
                                 task_data = jira_client.get_ticket(linked_key)
                                 if task_data:
                                     task_fields = task_data.get('fields', {})
-                                    # #region agent log
-                                    import json
-                                    desc_raw = task_fields.get('description', '')
-                                    desc_type = type(desc_raw).__name__
-                                    desc_preview = str(desc_raw)[:200] if desc_raw else 'None'
-                                    with open('/Users/pujitriwibowo/Documents/works/augment/.cursor/debug.log', 'a') as f:
-                                        f.write(json.dumps({"sessionId": "debug-session", "runId": "pre-fix", "hypothesisId": "B", "location": "api/workers.py:1783", "message": "Extracting task description from linked issue", "data": {"task_key": linked_key, "description_type": desc_type, "description_preview": desc_preview}, "timestamp": int(__import__('time').time() * 1000)}) + '\n')
-                                    # #endregion
-                                    description_text = _extract_description_text(desc_raw, jira_client)
-                                    # #region agent log
-                                    with open('/Users/pujitriwibowo/Documents/works/augment/.cursor/debug.log', 'a') as f:
-                                        f.write(json.dumps({"sessionId": "debug-session", "runId": "pre-fix", "hypothesisId": "B", "location": "api/workers.py:1783", "message": "Converted description to text", "data": {"task_key": linked_key, "converted_type": type(description_text).__name__, "converted_length": len(description_text), "converted_preview": description_text[:200]}, "timestamp": int(__import__('time').time() * 1000)}) + '\n')
-                                    # #endregion
-                                    task_info = {
-                                        'key': linked_key,
-                                        'summary': task_fields.get('summary', ''),
-                                        'description': description_text
-                                    }
-                                    # Extract test cases if requested
+                                    description_text = _extract_description_text(task_fields.get('description', ''), jira_client)
+                                    task_info = {'key': linked_key, 'summary': task_fields.get('summary', ''), 'description': description_text}
                                     if include_test_cases:
-                                        test_cases = jira_client.extract_test_cases(task_data)
-                                        task_info['test_cases'] = test_cases
+                                        task_info['test_cases'] = jira_client.extract_test_cases(task_data)
                                     tasks.append(task_info)
                                     seen_task_keys.add(linked_key)
-                
+
                 logger.info(f"[COVERAGE] Found {len(tasks)} tasks for story {story_key}")
-                
-                # Build prompt
-                repo_names = workspace_manager.list_repos_in_workspace(job_id)
+
                 prompt = coverage_check_prompt(
-                    story_data={
-                        'key': story_key,
-                        'summary': story_fields.get('summary', ''),
-                        'description': story_fields.get('description', '')
-                    },
+                    story_data={'key': story_key, 'summary': story_fields.get('summary', ''), 'description': story_fields.get('description', '')},
                     tasks=tasks,
                     repos=repo_names,
                     additional_context=additional_context,
@@ -1934,105 +1691,28 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
                     prd_url=prd_url,
                     rfc_url=rfc_url
                 )
-                
-                # Execute OpenCode
-                job.progress = {"message": f"Running OpenCode coverage analysis..."}
-                opencode_result = await opencode_runner.execute(
+
+                job.progress = {"message": f"Running OpenCode in sandbox for coverage..."}
+                opencode_result = await sandbox_runner.execute_generic(
                     job_id=job_id,
-                    workspace_path=workspace_path,
+                    repo_url=repo_url,
+                    branch=branch,
                     prompt=prompt,
                     job_type="coverage_check",
-                    repos=repos,
-                    mcp_config=mcp_config
+                    cancellation_event=None,
                 )
-                
-                # Build response with proper model conversion
-                from .models.story_analysis import (
-                    StoryCoverageResponse, TaskSummaryModel, CoverageGap,
-                    UpdateTaskSuggestion, NewTaskSuggestion
-                )
-                
-                # Convert tasks to TaskSummaryModel
-                # #region agent log
-                import json
-                import time
-                for idx, t in enumerate(tasks):
-                    desc_val = t.get('description', '')
-                    desc_type = type(desc_val).__name__
-                    try:
-                        with open('/Users/pujitriwibowo/Documents/works/augment/.cursor/debug.log', 'a') as f:
-                            f.write(json.dumps({"sessionId": "debug-session", "runId": "pre-fix", "hypothesisId": "C", "location": "api/workers.py:1883", "message": "Before TaskSummaryModel creation", "data": {"task_index": idx, "task_key": t.get('key'), "description_type": desc_type, "description_is_string": isinstance(desc_val, str), "description_length": len(str(desc_val)), "description_preview": str(desc_val)[:100]}, "timestamp": int(time.time() * 1000)}) + '\n')
-                    except Exception as log_err:
-                        logger.warning(f"Failed to write debug log: {log_err}")
-                # #endregion
-                
-                # Double-check all descriptions are strings before creating models
+
                 for t in tasks:
                     if not isinstance(t.get('description', ''), str):
-                        logger.error(f"Task {t.get('key')} description is not a string: {type(t.get('description'))}")
-                        # Force conversion as last resort
                         t['description'] = _extract_description_text(t.get('description', ''), jira_client)
-                
-                task_models = [
-                    TaskSummaryModel(
-                        task_key=t['key'],
-                        summary=t['summary'],
-                        description=t['description'],
-                        test_cases=None
-                    ) for t in tasks
-                ]
-                
-                # #region agent log
-                try:
-                    with open('/Users/pujitriwibowo/Documents/works/augment/.cursor/debug.log', 'a') as f:
-                        f.write(json.dumps({"sessionId": "debug-session", "runId": "pre-fix", "hypothesisId": "C", "location": "api/workers.py:1900", "message": "TaskSummaryModel creation completed", "data": {"task_count": len(task_models)}, "timestamp": int(time.time() * 1000)}) + '\n')
-                except Exception as log_err:
-                    logger.warning(f"Failed to write debug log: {log_err}")
-                # #endregion
-                
-                # Convert OpenCode gaps to CoverageGap models (preserve OpenCode-specific fields)
-                gap_models = []
-                for gap in opencode_result.get('gaps', []):
-                    gap_models.append(CoverageGap(
-                        requirement=gap.get('requirement', ''),
-                        severity=gap.get('severity', 'minor'),
-                        suggestion=gap.get('missing_tasks', gap.get('suggestion', '')),
-                        affected_files=gap.get('affected_files'),  # Preserve OpenCode-specific field
-                        implementation_status=gap.get('implementation_status')  # Preserve OpenCode-specific field
-                    ))
-                
-                # Convert OpenCode suggestions for updates
-                update_suggestions = []
-                for sugg in opencode_result.get('suggestions_for_updates', []):
-                    update_suggestions.append(UpdateTaskSuggestion(
-                        task_key=sugg.get('task_key', ''),
-                        current_description=sugg.get('current_description', ''),
-                        suggested_description=sugg.get('suggested_description', ''),
-                        suggested_test_cases=sugg.get('suggested_test_cases'),
-                        ready_to_submit=sugg.get('ready_to_submit', {})
-                    ))
-                
-                # Convert OpenCode suggestions for new tasks
-                new_task_suggestions = []
-                for sugg in opencode_result.get('suggestions_for_new_tasks', []):
-                    new_task_suggestions.append(NewTaskSuggestion(
-                        summary=sugg.get('summary', ''),
-                        description=sugg.get('description', ''),
-                        test_cases=sugg.get('test_cases'),
-                        gap_addressed=sugg.get('gap_addressed', ''),
-                        ready_to_submit=sugg.get('ready_to_submit', {})
-                    ))
-                
-                # Provide default for overall_assessment if missing
-                overall_assessment = opencode_result.get('overall_assessment')
-                if not overall_assessment:
-                    coverage_pct = opencode_result.get('coverage_percentage', 0)
-                    overall_assessment = f"OpenCode coverage analysis completed. Coverage: {coverage_pct}%"
-                
-                # Convert story description from ADF if needed
-                story_description_raw = story_fields.get('description', '')
-                story_description_text = _extract_description_text(story_description_raw, jira_client)
-                
+                task_models = [TaskSummaryModel(task_key=t['key'], summary=t['summary'], description=t['description'], test_cases=None) for t in tasks]
+
+                gap_models = [CoverageGap(requirement=g.get('requirement', ''), severity=g.get('severity', 'minor'), suggestion=g.get('missing_tasks', g.get('suggestion', '')), affected_files=g.get('affected_files'), implementation_status=g.get('implementation_status')) for g in opencode_result.get('gaps', [])]
+                update_suggestions = [UpdateTaskSuggestion(task_key=s.get('task_key', ''), current_description=s.get('current_description', ''), suggested_description=s.get('suggested_description', ''), suggested_test_cases=s.get('suggested_test_cases'), ready_to_submit=s.get('ready_to_submit', {})) for s in opencode_result.get('suggestions_for_updates', [])]
+                new_task_suggestions = [NewTaskSuggestion(summary=s.get('summary', ''), description=s.get('description', ''), test_cases=s.get('test_cases'), gap_addressed=s.get('gap_addressed', ''), ready_to_submit=s.get('ready_to_submit', {})) for s in opencode_result.get('suggestions_for_new_tasks', [])]
+                overall_assessment = opencode_result.get('overall_assessment') or f"OpenCode coverage analysis completed. Coverage: {opencode_result.get('coverage_percentage', 0)}%"
+                story_description_text = _extract_description_text(story_fields.get('description', ''), jira_client)
+
                 coverage_response = StoryCoverageResponse(
                     success=True,
                     story_key=story_key,
@@ -2045,31 +1725,22 @@ async def process_story_coverage_worker(ctx, job_id: str, story_key: str, includ
                     suggestions_for_new_tasks=new_task_suggestions,
                     additional_context=additional_context
                 )
-                
                 job.status = "completed"
                 job.completed_at = datetime.now()
                 job.results = coverage_response.dict()
                 job.additional_context = additional_context
-                job.progress = {
-                    "message": f"OpenCode analysis completed: {opencode_result.get('coverage_percentage', 0)}% coverage",
-                    "coverage_percentage": opencode_result.get('coverage_percentage', 0)
-                }
+                job.progress = {"message": f"OpenCode (sandbox) analysis completed: {opencode_result.get('coverage_percentage', 0)}% coverage", "coverage_percentage": opencode_result.get('coverage_percentage', 0)}
                 job.successful_tickets = 1
-                
-            except (OpenCodeError, DockerUnavailableError) as e:
-                logger.error(f"OpenCode error for job {job_id} (story {story_key}): {e}", exc_info=True)
-                user_friendly_error = _format_opencode_error(e, f"Story: {story_key}")
+
+            except SandboxClientError as e:
+                logger.error(f"Sandbox error for job {job_id} (story {story_key}): {e}", exc_info=True)
                 job.status = "failed"
                 job.completed_at = datetime.now()
-                job.error = user_friendly_error
-                job.progress = {"message": user_friendly_error}
-                # coverage_response remains None - will be handled in outer exception handler
-                
+                job.error = str(e) or "OpenSandbox execution failed"
+                job.progress = {"message": job.error}
             finally:
-                # Always cleanup workspace
-                if workspace_path:
-                    await workspace_manager.cleanup_workspace(job_id)
-        
+                pass
+
         else:
             # Direct LLM path (original behavior)
             if not llm_client:
@@ -2643,10 +2314,11 @@ async def process_draft_pr_worker(
     ARQ worker function for processing draft PR orchestrator jobs.
     
     Executes the complete pipeline: PLAN → APPROVAL → APPLY → VERIFY → PACKAGE → DRAFT_PR
+    Always unregisters story_key in finally so retries are possible after completion or failure.
     """
     _initialize_services_if_needed()
     config = get_config()
-    
+
     try:
         job = _get_or_create_job(job_id, "draft_pr", f"Processing draft PR for {story_key}...")
         job.ticket_key = story_key
@@ -2662,30 +2334,17 @@ async def process_draft_pr_worker(
             except Exception as e:
                 logger.warning(f"Could not fetch story details from JIRA: {e}")
         
-        # Initialize pipeline
+        # Initialize pipeline (Draft PR uses OpenSandbox only, no host Docker/OpenCode)
         from src.draft_pr_pipeline import DraftPRPipeline
         from src.plan_generator import PlanGenerator
         from src.workspace_manager import WorkspaceManager
         from src.artifact_store import ArtifactStore, get_artifact_store
-        from src.opencode_runner import OpenCodeRunner
         from src.llm_client import LLMClient
         from src.bitbucket_client import BitbucketClient
         from ..utils import create_custom_llm_client
         
         artifact_store = get_artifact_store()
-        
-        # Get OpenCode runner
-        opencode_runner = None
         opencode_config = config.get_opencode_config()
-        if opencode_config.get('enabled'):
-            opencode_runner = OpenCodeRunner(
-                docker_image=opencode_config.get('docker_image'),
-                job_timeout_minutes=opencode_config.get('job_timeout_minutes', 20),
-                max_result_size_mb=opencode_config.get('max_result_size_mb', 10),
-                result_file=opencode_config.get('result_file', 'result.json'),
-                llm_config=config.get_llm_config() if hasattr(config, 'get_llm_config') else config._config.get('llm', {})
-            )
-            opencode_runner.set_concurrency_limit(opencode_config.get('max_concurrent', 2))
         
         # Get LLM client
         llm_client = create_custom_llm_client()
@@ -2710,10 +2369,10 @@ async def process_draft_pr_worker(
                 jira_server_url=config._config.get('jira', {}).get('server_url')
             )
         
-        # Get plan generator
+        # Get plan generator (no host OpenCode for Draft PR)
         plan_generator = PlanGenerator(
             llm_client=llm_client,
-            opencode_runner=opencode_runner,
+            opencode_runner=None,
             workspace_manager=workspace_manager
         )
         
@@ -2721,13 +2380,58 @@ async def process_draft_pr_worker(
         draft_pr_config = config._config.get('draft_pr', {})
         yolo_policy = draft_pr_config.get('yolo_policy')
         verification_config = draft_pr_config.get('verification', {})
-        
+
+        # OpenSandbox: build sandbox pipeline when enabled (required for code-aware plan and apply)
+        sandbox_pipeline = None
+        sandbox_runner = None
+        sandbox_config = config.get_sandbox_config()
+        if sandbox_config.get('enabled'):
+            try:
+                from ..dependencies import get_sandbox_client
+                from src.sandbox_code_runner import SandboxCodeRunner
+                from src.sandbox_verifier import SandboxVerifier
+                from src.sandbox_pipeline import SandboxPipelineRunner
+                from src.sandbox_client import network_policy_from_config
+                sb_client = get_sandbox_client()
+                if sb_client:
+                    llm_cfg = config.get_opencode_llm_config() if hasattr(config, 'get_opencode_llm_config') else config.get_llm_config()
+                    network_policy = network_policy_from_config(sandbox_config.get('network_policy'))
+                    sandbox_runner = SandboxCodeRunner(
+                        sandbox_client=sb_client,
+                        image=sandbox_config.get('image', 'opensandbox/code-interpreter:v1.0.1'),
+                        timeout_minutes=sandbox_config.get('timeout_minutes', 20),
+                        apply_timeout_minutes=sandbox_config.get('apply_timeout_minutes', 45),
+                        max_result_size_bytes=opencode_config.get('max_result_size_mb', 10) * 1024 * 1024,
+                        result_file=opencode_config.get('result_file', 'result.json'),
+                        llm_config=llm_cfg,
+                        git_username=sandbox_config.get('git_username'),
+                        git_password=sandbox_config.get('git_password'),
+                        network_policy=network_policy,
+                    )
+                    sandbox_verifier = SandboxVerifier(
+                        test_command=verification_config.get('test_command'),
+                        lint_command=verification_config.get('lint_command'),
+                        build_command=verification_config.get('build_command'),
+                        language=verification_config.get('language', 'python'),
+                    )
+                    apply_timeout_seconds = sandbox_config.get('apply_timeout_minutes', 45) * 60
+                    sandbox_pipeline = SandboxPipelineRunner(
+                        sandbox_runner=sandbox_runner,
+                        sandbox_verifier=sandbox_verifier,
+                        bitbucket_client=bitbucket_client,
+                        artifact_store=artifact_store,
+                        timeout_seconds=apply_timeout_seconds,
+                    )
+            except Exception as e:
+                logger.warning("OpenSandbox pipeline not available, using legacy path: %s", e)
+
         # Create pipeline
         pipeline = DraftPRPipeline(
             plan_generator=plan_generator,
             workspace_manager=workspace_manager,
             artifact_store=artifact_store,
-            opencode_runner=opencode_runner,
+            sandbox_pipeline=sandbox_pipeline,
+            sandbox_runner=sandbox_runner,
             llm_client=llm_client,
             bitbucket_client=bitbucket_client,
             yolo_policy=yolo_policy,
@@ -2766,6 +2470,13 @@ async def process_draft_pr_worker(
         # Start cancellation monitor
         monitor_task = asyncio.create_task(monitor_cancellation())
         
+        # Callbacks to store/clear sandbox_id in Redis (for pause/resume/status API and YOLO apply path)
+        from ..job_queue import set_sandbox_id, clear_sandbox_id
+        async def on_sandbox_created(jid: str, sid: str):
+            await set_sandbox_id(jid, sid)
+        async def on_sandbox_released(jid: str):
+            await clear_sandbox_id(jid)
+
         try:
             # Execute pipeline
             results = await pipeline.execute_pipeline(
@@ -2777,7 +2488,9 @@ async def process_draft_pr_worker(
                 scope=scope,
                 additional_context=additional_context,
                 mode=mode,
-                cancellation_event=cancellation_event
+                cancellation_event=cancellation_event,
+                on_sandbox_created=on_sandbox_created,
+                on_sandbox_released=on_sandbox_released,
             )
         finally:
             # Cancel monitor task
@@ -2846,11 +2559,8 @@ async def process_draft_pr_worker(
                 await workspace_manager.cleanup_workspace(job_id)
         except Exception as cleanup_error:
             logger.warning(f"Failed to cleanup workspace for job {job_id} after cancellation: {cleanup_error}")
-        
-        from ..dependencies import unregister_ticket_job
-        unregister_ticket_job(story_key)
         return
-        
+
     except Exception as e:
         logger.error(f"Job {job_id} failed: {e}", exc_info=True)
         if job_id in jobs:
@@ -2868,7 +2578,8 @@ async def process_draft_pr_worker(
                 await workspace_manager.cleanup_workspace(job_id)
         except Exception as cleanup_error:
             logger.warning(f"Failed to cleanup workspace for job {job_id} after exception: {cleanup_error}")
-        
-        from ..dependencies import unregister_ticket_job
-        unregister_ticket_job(story_key)
         raise
+
+    finally:
+        # Always unregister so the same story can be retried or re-run
+        unregister_ticket_job(story_key)
