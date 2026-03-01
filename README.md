@@ -936,6 +936,7 @@ A 1-2 sentence summary of why this task was necessary, based on PRD/RFC goals.
 - `POST /plan/tasks/generate` - Generate contextual tasks for stories
 - `POST /plan/tasks/team-based` - Generate team-separated tasks (Backend/Frontend/QA)
 - `POST /plan/tasks/bulk-create` - Create multiple JIRA tickets with dependencies
+- When `story_keys` is provided, `epic_key` is optional and is auto-derived from each story's parent in JIRA
 - All task generation endpoints return `task_id` (UUID) for stable dependency resolution
 
 **Bulk Creation:**

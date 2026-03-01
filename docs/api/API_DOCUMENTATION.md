@@ -31,6 +31,10 @@ This REST API provides programmatic access to Augment, allowing you to:
 - Choose between read-only mode (preview) or update mode (write to JIRA)
 - Monitor job progress for long-running batch operations
 
+### Request body conventions
+
+- **Epic vs parent_key**: In JIRA operation endpoints (`/jira/*`), the field `parent_key` in request bodies denotes the **epic** key (JIRA parent of the story or task). It is the same concept as `epic_key` used in planning, test generation, and sprint endpoints. When a request includes `story_key`, `parent_key` (or `epic_key`) is often optional and is auto-derived from the story's parent in JIRA if omitted.
+
 ### Key Features
 
 - **Enhanced Task Generation Response**: Comprehensive task details including descriptions, dependencies, and estimates

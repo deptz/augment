@@ -8,7 +8,7 @@ from typing import Optional, List, Dict, Any
 
 class TestGenerationRequest(BaseModel):
     """Request model for test case generation operations"""
-    epic_key: Optional[str] = Field(None, description="Epic key for comprehensive test generation")
+    epic_key: Optional[str] = Field(None, description="Epic key for comprehensive test generation. If omitted and story_key is provided, derived from story_key via JIRA (story's parent epic).")
     story_key: Optional[str] = Field(None, description="Story key for story-specific test generation") 
     task_key: Optional[str] = Field(None, description="Task key for task-specific test generation")
     coverage_level: str = Field(

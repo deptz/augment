@@ -19,11 +19,11 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-@router.post("/plan/tests/comprehensive", 
+@router.post("/plan/tests/comprehensive",
           tags=["Test Generation"],
           response_model=ComprehensiveTestSuiteResponse,
           summary="Generate comprehensive test suite for an epic",
-          description="Generate complete test suites for all stories and tasks in an epic. Coverage levels: minimal, basic, standard (default), comprehensive.")
+          description="Generate complete test suites for all stories and tasks in an epic. epic_key is optional—if omitted, provide story_key and epic is derived from the story's parent in JIRA. Coverage levels: minimal, basic, standard (default), comprehensive.")
 async def generate_comprehensive_test_suite(
     request: TestGenerationRequest,
     current_user: str = Depends(get_current_user)
@@ -38,10 +38,34 @@ async def generate_comprehensive_test_suite(
     generator = get_generator()
     
     try:
-        if not request.epic_key:
-            raise HTTPException(status_code=400, detail="epic_key is required for comprehensive test generation")
+        # Require epic_key or story_key; derive epic from story when only story_key provided
+        from ..utils import normalize_ticket_key
+        from ..constants import MSG_COULD_NOT_DERIVE_EPIC, MSG_STORY_HAS_NO_PARENT_EPIC
+        epic_key = request.epic_key
+        if not epic_key or not str(epic_key).strip():
+            if not request.story_key or not str(request.story_key).strip():
+                raise HTTPException(
+                    status_code=400,
+                    detail="epic_key or story_key is required for comprehensive test generation"
+                )
+            from ..dependencies import get_jira_client
+            jira_client = get_jira_client()
+            if not jira_client:
+                raise HTTPException(status_code=503, detail="JIRA client not available to derive epic from story")
+            normalized_story_key = normalize_ticket_key(request.story_key) or request.story_key.strip()
+            raw_epic = jira_client.get_epic_key_from_story(normalized_story_key)
+            if not raw_epic:
+                # Story not found or has no parent
+                story_data = jira_client.get_ticket(normalized_story_key)
+                if not story_data:
+                    raise HTTPException(status_code=404, detail=f"Story {normalized_story_key} not found")
+                raise HTTPException(status_code=400, detail=MSG_STORY_HAS_NO_PARENT_EPIC)
+            epic_key = normalize_ticket_key(raw_epic)
+            logger.info(f"Derived epic {epic_key} from story {normalized_story_key}")
+        else:
+            epic_key = normalize_ticket_key(epic_key)
         
-        logger.info(f"User {current_user} generating comprehensive test suite for epic {request.epic_key}")
+        logger.info(f"User {current_user} generating comprehensive test suite for epic {epic_key}")
         
         if not generator.planning_service:
             raise HTTPException(
@@ -57,7 +81,7 @@ async def generate_comprehensive_test_suite(
                 job_id=job_id,
                 job_type="test_generation",
                 status="started",
-                progress={"message": f"Queued for generating comprehensive test suite for epic {request.epic_key}"},
+                progress={"message": f"Queued for generating comprehensive test suite for epic {epic_key}"},
                 started_at=datetime.now(),
                 processed_tickets=0,
                 successful_tickets=0,
@@ -69,7 +93,7 @@ async def generate_comprehensive_test_suite(
                 'process_test_generation_worker',
                 job_id=job_id,
                 test_type="comprehensive",
-                epic_key=request.epic_key,
+                epic_key=epic_key,
                 coverage_level=request.coverage_level,
                 domain_context=request.domain_context,
                 technical_context=request.technical_context,
@@ -79,12 +103,12 @@ async def generate_comprehensive_test_suite(
                 _job_id=job_id
             )
             
-            logger.info(f"Enqueued comprehensive test generation job {job_id} for epic {request.epic_key}")
+            logger.info(f"Enqueued comprehensive test generation job {job_id} for epic {epic_key}")
             
             return BatchResponse(
                 job_id=job_id,
                 status="started",
-                message=f"Comprehensive test generation for epic {request.epic_key} queued",
+                message=f"Comprehensive test generation for epic {epic_key} queued",
                 status_url=f"/jobs/{job_id}",
                 jql="",  # Not applicable
                 max_results=0,
@@ -99,7 +123,7 @@ async def generate_comprehensive_test_suite(
         
         # Generate comprehensive test suite
         test_results = generator.planning_service.generate_comprehensive_test_suite(
-            epic_key=request.epic_key,
+            epic_key=epic_key,
             coverage_level=coverage_level
         )
         
@@ -122,11 +146,13 @@ async def generate_comprehensive_test_suite(
             execution_time_seconds=test_results["execution_time_seconds"]
         )
         
-        logger.info(f"Generated {response.total_test_cases} test cases for epic {request.epic_key}")
+        logger.info(f"Generated {response.total_test_cases} test cases for epic {epic_key}")
         return response
         
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error generating comprehensive test suite for {request.epic_key}: {str(e)}")
+        logger.error(f"Error generating comprehensive test suite: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to generate test suite: {str(e)}")
 
 

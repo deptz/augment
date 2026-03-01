@@ -250,7 +250,7 @@ async def update_jira_ticket(
          tags=["JIRA Operations"],
          response_model=CreateTicketResponse,
          summary="Create a new JIRA Task ticket",
-         description="Create a new JIRA Task ticket. Automatically links to parent epic and story. Supports test cases and blocking relationships. Preview mode by default. Set create_ticket=true to create.")
+         description="Create a new JIRA Task ticket. Automatically links to parent epic and story. parent_key (epic) is optional—if omitted, derived from story_key via JIRA. Supports test cases and blocking relationships. Preview mode by default. Set create_ticket=true to create.")
 async def create_jira_ticket(
     request: CreateTicketRequest,
     current_user: str = Depends(get_current_user)
@@ -271,10 +271,27 @@ async def create_jira_ticket(
         if confluence_client:
             confluence_server_url = confluence_client.server_url
 
+        # Resolve parent_key (epic) from story_key when not provided
+        from ..utils import normalize_ticket_key
+        from ..constants import MSG_COULD_NOT_DERIVE_EPIC
+        parent_key = request.parent_key
+        if not parent_key or not str(parent_key).strip():
+            normalized_story_key = normalize_ticket_key(request.story_key) or (request.story_key or "").strip()
+            if not normalized_story_key:
+                raise HTTPException(status_code=400, detail=MSG_COULD_NOT_DERIVE_EPIC)
+            parent_key = jira_client.get_epic_key_from_story(normalized_story_key)
+            if parent_key:
+                parent_key = normalize_ticket_key(parent_key)
+                logger.info(f"Derived epic {parent_key} from story {normalized_story_key}")
+            if not parent_key:
+                raise HTTPException(status_code=400, detail=MSG_COULD_NOT_DERIVE_EPIC)
+        else:
+            parent_key = normalize_ticket_key(parent_key)
+
         # Get project key from parent epic
-        project_key = jira_client.get_project_key_from_epic(request.parent_key)
+        project_key = jira_client.get_project_key_from_epic(parent_key)
         if not project_key:
-            raise HTTPException(status_code=400, detail=f"Could not determine project key from epic {request.parent_key}")
+            raise HTTPException(status_code=400, detail=f"Could not determine project key from epic {parent_key}")
 
         if not request.create_ticket:
             # Preview mode
@@ -285,7 +302,7 @@ async def create_jira_ticket(
                 created_in_jira=False,
                 links_created=[],
                 preview={
-                    "parent_key": request.parent_key,
+                    "parent_key": parent_key,
                     "story_key": request.story_key,
                     "summary": request.summary,
                     "description": request.description,
@@ -328,7 +345,7 @@ async def create_jira_ticket(
             expected_outcomes=["Task completed successfully"],
             test_cases=[],  # Empty - will update test_case_custom_field separately
             cycle_time_estimate=cycle_time_estimate,
-            epic_key=request.parent_key
+            epic_key=parent_key
         )
 
         # Create the task ticket with raw description to avoid duplication
@@ -1267,7 +1284,7 @@ async def bulk_update_stories(
          tags=["JIRA Operations"],
          response_model=Union[BulkCreateTasksResponse, BatchResponse],
          summary="Bulk create multiple task tickets",
-         description="Create multiple task tickets in a single request. All tickets are created first, then all links are created. Preview mode by default. Set create_tickets=true to create. Supports async_mode for background processing.")
+         description="Create multiple task tickets in a single request. parent_key (epic) per task is optional—if omitted, derived from each task's story_key via JIRA. All tickets are created first, then all links. Preview mode by default. Set create_tickets=true to create. Supports async_mode for background processing.")
 async def bulk_create_tasks(
     request: BulkCreateTasksRequest,
     current_user: str = Depends(get_current_user)
@@ -1308,6 +1325,29 @@ async def bulk_create_tasks(
                     headers={"X-Duplicate-Stories": ",".join(duplicate_stories)}
                 )
             
+            # When creating in JIRA, resolve missing parent_key (epic) from story_key so worker has epic
+            from ..utils import normalize_ticket_key
+            tasks_data = [task.dict() for task in request.tasks]
+            if request.create_tickets:
+                _story_key_to_epic = {}
+                for task_item in request.tasks:
+                    if (not task_item.parent_key or not str(task_item.parent_key).strip()) and task_item.story_key:
+                        sk = normalize_ticket_key(task_item.story_key) or task_item.story_key.strip()
+                        if sk and sk not in _story_key_to_epic:
+                            raw_epic = jira_client.get_epic_key_from_story(sk)
+                            _story_key_to_epic[sk] = normalize_ticket_key(raw_epic) if raw_epic else None
+                            if _story_key_to_epic[sk]:
+                                logger.info(f"Derived epic {_story_key_to_epic[sk]} from story {sk}")
+                for i, task_item in enumerate(request.tasks):
+                    if task_item.parent_key and str(task_item.parent_key).strip():
+                        resolved_epic = normalize_ticket_key(task_item.parent_key)
+                    elif task_item.story_key:
+                        sk = normalize_ticket_key(task_item.story_key) or task_item.story_key.strip()
+                        resolved_epic = _story_key_to_epic.get(sk)
+                    else:
+                        resolved_epic = None
+                    tasks_data[i] = {**tasks_data[i], "parent_key": resolved_epic}
+            
             job_id = str(uuid.uuid4())
             
             jobs[job_id] = JobStatus(
@@ -1330,7 +1370,7 @@ async def bulk_create_tasks(
             await redis_pool.enqueue_job(
                 'process_bulk_task_creation_worker',
                 job_id=job_id,
-                tasks_data=[task.dict() for task in request.tasks],
+                tasks_data=tasks_data,
                 create_tickets=request.create_tickets,
                 _job_id=job_id
             )
@@ -1376,10 +1416,33 @@ async def bulk_create_tasks(
         if confluence_client:
             confluence_server_url = confluence_client.server_url
 
-        # Get project key from first task's parent epic
-        project_key = jira_client.get_project_key_from_epic(request.tasks[0].parent_key)
+        # Resolve missing parent_key (epic) from story_key via JIRA
+        from ..utils import normalize_ticket_key
+        from ..constants import MSG_COULD_NOT_DERIVE_EPIC
+        _story_key_to_epic = {}
+        for task_item in request.tasks:
+            if (not task_item.parent_key or not str(task_item.parent_key).strip()) and task_item.story_key:
+                sk = normalize_ticket_key(task_item.story_key) or task_item.story_key.strip()
+                if sk and sk not in _story_key_to_epic:
+                    raw_epic = jira_client.get_epic_key_from_story(sk)
+                    _story_key_to_epic[sk] = normalize_ticket_key(raw_epic) if raw_epic else None
+                    if _story_key_to_epic[sk]:
+                        logger.info(f"Derived epic {_story_key_to_epic[sk]} from story {sk}")
+        resolved_parent_keys = []
+        for task_item in request.tasks:
+            if task_item.parent_key and str(task_item.parent_key).strip():
+                resolved_parent_keys.append(normalize_ticket_key(task_item.parent_key))
+            elif task_item.story_key:
+                sk = normalize_ticket_key(task_item.story_key) or task_item.story_key.strip()
+                resolved_parent_keys.append(_story_key_to_epic.get(sk))
+            else:
+                resolved_parent_keys.append(None)
+        epic_for_project = next((epic for epic in resolved_parent_keys if epic), None)
+        if not epic_for_project:
+            raise HTTPException(status_code=400, detail=MSG_COULD_NOT_DERIVE_EPIC)
+        project_key = jira_client.get_project_key_from_epic(epic_for_project)
         if not project_key:
-            raise HTTPException(status_code=400, detail=f"Could not determine project key from epic {request.tasks[0].parent_key}")
+            raise HTTPException(status_code=400, detail=f"Could not determine project key from epic {epic_for_project}")
 
         # Build issue data for all tasks
         from src.planning_models import TaskPlan, CycleTimeEstimate, TaskScope
@@ -1389,6 +1452,7 @@ async def bulk_create_tasks(
         pending_links = []  # Collect all links to create after tickets are created
         
         for i, task_item in enumerate(request.tasks):
+            resolved_epic = resolved_parent_keys[i] if i < len(resolved_parent_keys) else None
             # Create cycle time estimate if mandays provided
             cycle_time_estimate = None
             if task_item.mandays is not None:
@@ -1412,7 +1476,7 @@ async def bulk_create_tasks(
                 expected_outcomes=["Task completed successfully"],
                 test_cases=[],
                 cycle_time_estimate=cycle_time_estimate,
-                epic_key=task_item.parent_key
+                epic_key=resolved_epic
             )
 
             # Build issue data (similar to create_task_ticket)
@@ -1428,10 +1492,10 @@ async def bulk_create_tasks(
             }
 
             # Add parent epic
-            if task_item.parent_key:
-                epic_type = jira_client.get_ticket_type(task_item.parent_key)
+            if resolved_epic:
+                epic_type = jira_client.get_ticket_type(resolved_epic)
                 if epic_type and 'epic' in epic_type.lower():
-                    issue_data["fields"]["parent"] = {"key": task_item.parent_key}
+                    issue_data["fields"]["parent"] = {"key": resolved_epic}
 
             # Add mandays if available
             if cycle_time_estimate and jira_client.mandays_custom_field:
