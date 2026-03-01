@@ -39,6 +39,7 @@ Whether you're backfilling documentation for existing tickets or planning new fe
 - **Sprint Planning & Timeline Management**: Capacity-based sprint planning with automatic task assignment and timeline visualization
 - **Team Member Management**: Built-in SQLite database for managing team members, teams, and boards with flexible many-to-many relationships
 - **Draft PR Orchestrator**: Complete pipeline for generating, reviewing, and creating Draft PRs with plan versioning, approval workflows, and safety guards
+- **OpenSandbox Integration (Optional)**: Run plan generation and APPLY→VERIFY→PACKAGE→DRAFT_PR inside isolated OpenSandbox containers; pause/resume/status API and `sandbox_id` tracking in Redis for running jobs
 
 ### JIRA Integration
 - **Native JIRA Integration**: Creates real JIRA tickets with proper keys, hierarchies, and relationships
@@ -145,6 +146,7 @@ Before you begin, ensure you have:
 - **Redis** - Required for background job processing (can be local or external instance)
 - **(Optional) Bitbucket account** - For code analysis and PR context
 - **(Optional) Confluence account** - For PRD/RFC document access
+- **(Optional) OpenSandbox server** - For Draft PR pipeline in sandboxed execution (plan + apply/verify in one sandbox)
 
 ### Setup Steps
 
@@ -430,10 +432,7 @@ CORS_ALLOWED_ORIGINS=http://localhost:5173,http://localhost:3000
 
 **OpenCode Integration (Optional - for code-aware generation):**
 
-OpenCode enables code-aware LLM generation by analyzing actual repository contents. When the `repos` parameter is provided to API endpoints, the system will:
-1. Clone the specified repositories to a temporary workspace
-2. Run OpenCode in a Docker container with filesystem access
-3. Generate results based on actual code structure
+OpenCode enables code-aware LLM generation by analyzing actual repository contents. When the `repos` parameter is provided to API endpoints (single ticket generation, task generation, story coverage, Draft PR), the system runs OpenCode **inside OpenSandbox only**—there is no host Docker path. You must enable OpenSandbox for any code-aware flow.
 
 **IMPORTANT**: OpenCode requires **separate, OpenCode-specific LLM configuration**. It does NOT use the main LLM configuration.
 
@@ -504,6 +503,29 @@ GIT_PASSWORD=your-git-token-or-password  # Git password, personal access token, 
 - Git credentials (if cloning private repositories)
 - The OpenCode Docker image is automatically pulled on worker startup
 - **All OpenCode-specific LLM configuration must be set** (`OPENCODE_LLM_PROVIDER`, `OPENCODE_*_API_KEY`, `OPENCODE_*_MODEL`)
+
+**OpenSandbox Integration (Optional – all code-aware flows):**
+
+When enabled, **all** code-aware flows (single ticket generation, task generation, story coverage, and Draft PR) run OpenCode inside OpenSandbox—no host Docker is used. The Draft PR pipeline runs plan generation and the full APPLY→VERIFY→PACKAGE→DRAFT_PR flow in one sandbox. This provides isolated execution and optional pause/resume/status control for running jobs.
+
+```bash
+# Enable OpenSandbox for Draft PR pipeline
+OPENSANDBOX_ENABLED=true
+OPENSANDBOX_SERVER=localhost:8080   # OpenSandbox server (host:port)
+OPENSANDBOX_PROTOCOL=http
+OPENSANDBOX_API_KEY=                # Optional, if required by server
+
+# Feature flags (config.yaml or env)
+# features.use_sandbox: true
+# features.sandbox_runtime: docker   # or kubernetes
+```
+
+- **Plan generation**: Runs in a short-lived sandbox (clone → OpenCode → read result).
+- **Apply stage**: One long-lived sandbox runs apply, verify, package, and branch push; PR is created via Bitbucket API on the host.
+- **Sandbox tracking**: Active sandbox id is stored in Redis; `GET /draft-pr/jobs/{job_id}` returns `sandbox_id` and `sandbox_status`.
+- **Sandbox API**: `POST /sandbox/jobs/{job_id}/pause`, `POST /sandbox/jobs/{job_id}/resume`, `GET /sandbox/jobs/{job_id}/status` for running jobs.
+- **Config**: `config.yaml` supports `opensandbox` (server, defaults, languages, network_policy, git, cleanup) and `features.use_sandbox` / `features.sandbox_runtime`. See `.env.example` for `OPENSANDBOX_*` variables.
+- **Prerequisites**: OpenSandbox server running and reachable; optional custom image (e.g. `images/augment-sandbox/Dockerfile`) with OpenCode CLI, pytest, ruff pre-installed.
 
 **MCP Server Integration (Optional):**
 - MCP servers provide read-only access to Bitbucket, Jira, and Confluence for OpenCode containers
@@ -991,7 +1013,7 @@ A 1-2 sentence summary of why this task was necessary, based on PRD/RFC goals.
 
 **Draft PR Orchestrator:**
 - `POST /draft-pr/create` - Create a new draft PR job (PLAN stage)
-- `GET /draft-pr/jobs/{job_id}` - Get job status and current stage
+- `GET /draft-pr/jobs/{job_id}` - Get job status, current stage, and when using OpenSandbox: `sandbox_id`, `sandbox_status`
 - `GET /draft-pr/jobs/{job_id}/plan` - Get latest plan version
 - `GET /draft-pr/jobs/{job_id}/plans` - List all plan versions with metadata
 - `GET /draft-pr/jobs/{job_id}/plans/{version}` - Get specific plan version
@@ -1000,6 +1022,11 @@ A 1-2 sentence summary of why this task was necessary, based on PRD/RFC goals.
 - `POST /draft-pr/jobs/{job_id}/approve` - Approve plan to proceed to APPLY stage
 - `GET /draft-pr/jobs/{job_id}/artifacts` - List all artifacts (plans, diffs, logs, PR metadata)
 - `GET /draft-pr/jobs/{job_id}/artifacts/{artifact_type}` - Get specific artifact
+
+**Sandbox Management (when OpenSandbox is enabled):**
+- `POST /sandbox/jobs/{job_id}/pause` - Pause the sandbox for a running draft PR job
+- `POST /sandbox/jobs/{job_id}/resume` - Resume a paused sandbox
+- `GET /sandbox/jobs/{job_id}/status` - Get sandbox status for a job (requires active sandbox in Redis)
 
 **Utility & Configuration:**
 - `GET /health` - Service health check
@@ -1259,6 +1286,12 @@ For more details, see [Background Jobs Documentation](docs/api/API_DOCUMENTATION
     - Check network connectivity: `docker network inspect augment-mcp-network`
     - Ensure MCP servers are started before running OpenCode jobs
 
+17. **OpenSandbox not available or Draft PR not using sandbox**
+    - Ensure `OPENSANDBOX_ENABLED=true` and OpenSandbox server is reachable at `OPENSANDBOX_SERVER`
+    - Worker runs `is_available()` and `cleanup_orphaned_sandboxes()` on startup; check worker logs
+    - Config `features.use_sandbox` and `features.sandbox_runtime` control whether the Draft PR pipeline uses sandbox; ensure `config.yaml` or env is set as intended
+    - Sandbox pause/resume/status endpoints return 404 if no sandbox is associated with the job (e.g. job not in APPLY stage or not using OpenSandbox)
+
 ### Debug Mode
 
 Enable verbose logging for troubleshooting:
@@ -1296,12 +1329,19 @@ augment/
 │   ├── opencode_runner.py # OpenCode Docker container management
 │   ├── opencode_schemas.py # JSON schemas for OpenCode results
 │   ├── workspace_manager.py # Repository cloning and workspace management
+│   ├── sandbox_client.py  # OpenSandbox client (create/release/pause/resume/status)
+│   ├── sandbox_git_ops.py  # Git operations inside OpenSandbox
+│   ├── sandbox_code_runner.py # OpenCode plan/apply execution in sandbox
+│   ├── sandbox_verifier.py # Test/lint/build verification in sandbox
+│   ├── sandbox_pipeline.py # APPLY→VERIFY→PACKAGE→DRAFT_PR in one sandbox
+│   ├── retry.py           # Retry with backoff for transient failures
 │   └── prompts/           # Prompt templates
 │       └── opencode.py   # Code-aware prompt templates
 ├── api/                   # API server code
 │   ├── routes/           # API endpoints
 │   │   ├── sprint_planning.py # Sprint planning endpoints
-│   │   └── team_members.py # Team management endpoints
+│   │   ├── team_members.py # Team management endpoints
+│   │   └── sandbox.py    # Sandbox pause/resume/status endpoints
 │   ├── models/           # Request/response models
 │   │   ├── sprint_planning.py # Sprint planning models
 │   │   └── team_members.py # Team member models
@@ -1350,6 +1390,7 @@ pytest --cov=src --cov=api
 - Team member service tests
 - Dependency-aware task assignment tests
 - Topological sort algorithm tests
+- OpenSandbox: sandbox client, git ops, code runner, verifier, retry (unit tests); optional integration tests in `tests/integration/` when `OPENSANDBOX_ENABLED=true`
 
 ### Quick Contribution Steps
 
