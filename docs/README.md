@@ -28,6 +28,10 @@ Technical deep-dives and implementation details:
 - [MCP Setup Guide](technical/MCP_SETUP.md) - Complete guide for setting up MCP servers for OpenCode integration
 - [MCP Architecture](technical/MCP_ARCHITECTURE.md) - Visual architecture diagrams of MCP integration
 
+### [Deployment](deployment/)
+Production and Kubernetes deployment:
+- [Kubernetes / Production Deployment](deployment/KUBERNETES.md) - OpenSandbox (K8s runtime) and Augment API/workers on Kubernetes
+
 ## Quick Links
 
 ### Getting Started

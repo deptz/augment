@@ -14,6 +14,7 @@ Whether you're backfilling documentation for existing tickets or planning new fe
 - [Quick Start](#quick-start)
 - [Installation](#installation)
 - [Running with Docker (Docker Hub Image)](#running-with-docker-docker-hub-image)
+- [Kubernetes / Production Deployment](#kubernetes--production-deployment)
 - [Configuration](#configuration)
 - [Usage](#usage)
 - [API Documentation](#api-documentation)
@@ -269,6 +270,19 @@ docker run --rm \
 
 The worker container will connect to the same Redis instance and process background jobs created by the API.
 
+## Kubernetes / Production Deployment
+
+For production, you can run **OpenSandbox** with its Kubernetes runtime and **Augment** (API + workers) on Kubernetes. The SDK abstracts the runtime; **no application code changes** are required—only configuration.
+
+- **OpenSandbox server**: Deploy with Kubernetes runtime per [Alibaba OpenSandbox](https://github.com/alibaba/OpenSandbox) (see [kubernetes/](https://github.com/alibaba/OpenSandbox/tree/main/kubernetes) for the controller/operator and server K8s config).
+- **Augment**: Run API and workers as Deployments; set `OPENSANDBOX_DOMAIN`, Redis, and `SANDBOX_RUNTIME=kubernetes` (and `OPENSANDBOX_ENABLED=true`, `USE_SANDBOX=true` as needed).
+
+**Required env for K8s:** `OPENSANDBOX_DOMAIN`, `REDIS_HOST` (and optionally `REDIS_PORT`, `REDIS_PASSWORD`), `SANDBOX_RUNTIME=kubernetes`. In `config.yaml`, set `features.sandbox_runtime: kubernetes` (or use env `SANDBOX_RUNTIME=kubernetes`).
+
+Full instructions, OpenSandbox K8s references, and a minimal Augment worker Deployment example: **[Kubernetes Deployment](docs/deployment/KUBERNETES.md)**. A ready-to-customize manifest: [deployment/opensandbox-augment-worker-deployment.yaml](deployment/opensandbox-augment-worker-deployment.yaml).
+
+Docker and local development flows are unchanged; use `SANDBOX_RUNTIME=docker` (or disable OpenSandbox) for local dev.
+
 ## Configuration
 
 ### Required Configuration
@@ -511,21 +525,24 @@ When enabled, **all** code-aware flows (single ticket generation, task generatio
 ```bash
 # Enable OpenSandbox for Draft PR pipeline
 OPENSANDBOX_ENABLED=true
-OPENSANDBOX_SERVER=localhost:8080   # OpenSandbox server (host:port)
+OPENSANDBOX_DOMAIN=localhost:8080   # OpenSandbox server (host:port); config key is domain
 OPENSANDBOX_PROTOCOL=http
 OPENSANDBOX_API_KEY=                # Optional, if required by server
 
 # Feature flags (config.yaml or env)
-# features.use_sandbox: true
-# features.sandbox_runtime: docker   # or kubernetes
+# USE_SANDBOX=true   # default: use sandbox when OpenSandbox is enabled
+# SANDBOX_RUNTIME=docker   # or kubernetes for production
 ```
 
+- **Default**: `USE_SANDBOX` defaults to **true** when OpenSandbox is enabled; set to `false` only if you need to disable sandbox usage.
 - **Plan generation**: Runs in a short-lived sandbox (clone → OpenCode → read result).
 - **Apply stage**: One long-lived sandbox runs apply, verify, package, and branch push; PR is created via Bitbucket API on the host.
 - **Sandbox tracking**: Active sandbox id is stored in Redis; `GET /draft-pr/jobs/{job_id}` returns `sandbox_id` and `sandbox_status`.
 - **Sandbox API**: `POST /sandbox/jobs/{job_id}/pause`, `POST /sandbox/jobs/{job_id}/resume`, `GET /sandbox/jobs/{job_id}/status` for running jobs.
 - **Config**: `config.yaml` supports `opensandbox` (server, defaults, languages, network_policy, git, cleanup) and `features.use_sandbox` / `features.sandbox_runtime`. See `.env.example` for `OPENSANDBOX_*` variables.
 - **Prerequisites**: OpenSandbox server running and reachable; optional custom image (e.g. `images/augment-sandbox/Dockerfile`) with OpenCode CLI, pytest, ruff pre-installed.
+- **Performance**: See [Migration guide – Performance](docs/MIGRATION_OPENSANDBOX.md#performance) and `scripts/benchmark_sandbox.py` for sandbox lifecycle benchmarking.
+- **Migration**: Code-aware flows use OpenSandbox only (no host Docker). See [OpenSandbox Migration Guide](docs/MIGRATION_OPENSANDBOX.md) for required config, 503 behavior when sandbox is disabled, and WorkspaceManager usage.
 
 **MCP Server Integration (Optional):**
 - MCP servers provide read-only access to Bitbucket, Jira, and Confluence for OpenCode containers
@@ -1067,10 +1084,13 @@ Comprehensive documentation is available in the [`docs/`](docs/) directory:
 ### Quick Links
 - [Documentation Index](docs/README.md) - Complete documentation index
 - [API Documentation](docs/api/API_DOCUMENTATION.md) - Complete API reference
+- [OpenSandbox Migration Guide](docs/MIGRATION_OPENSANDBOX.md) - OpenSandbox-only flows, config, and migration from legacy
+- [Kubernetes Deployment](docs/deployment/KUBERNETES.md) - Deploy OpenSandbox and Augment on Kubernetes
 - [Contributing Guide](CONTRIBUTING.md) - How to contribute to the project
 
 ### Documentation Categories
 - **[API Documentation](docs/api/)** - API setup, authentication, and reference
+- **[Deployment](docs/deployment/)** - Kubernetes and production deployment (OpenSandbox, Augment workers)
 - **[Features](docs/features/)** - Feature documentation and enhancements
   - [Draft PR Orchestrator](docs/features/DRAFT_PR_ORCHESTRATOR.md) - Complete guide to Draft PR pipeline
 - **[Guides](docs/guides/)** - Step-by-step guides and how-tos
@@ -1287,7 +1307,7 @@ For more details, see [Background Jobs Documentation](docs/api/API_DOCUMENTATION
     - Ensure MCP servers are started before running OpenCode jobs
 
 17. **OpenSandbox not available or Draft PR not using sandbox**
-    - Ensure `OPENSANDBOX_ENABLED=true` and OpenSandbox server is reachable at `OPENSANDBOX_SERVER`
+    - Ensure `OPENSANDBOX_ENABLED=true` and OpenSandbox server is reachable (configure `OPENSANDBOX_DOMAIN`, e.g. localhost:8080)
     - Worker runs `is_available()` and `cleanup_orphaned_sandboxes()` on startup; check worker logs
     - Config `features.use_sandbox` and `features.sandbox_runtime` control whether the Draft PR pipeline uses sandbox; ensure `config.yaml` or env is set as intended
     - Sandbox pause/resume/status endpoints return 404 if no sandbox is associated with the job (e.g. job not in APPLY stage or not using OpenSandbox)

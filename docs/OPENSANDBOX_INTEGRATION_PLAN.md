@@ -1643,9 +1643,18 @@ features:
 
 **Goals:** Deploy OpenSandbox and Augment workers on Kubernetes. The SDK abstracts the runtime; no application code changes needed beyond configuration.
 
+**Done:** Kubernetes / production deployment is documented in [docs/deployment/KUBERNETES.md](deployment/KUBERNETES.md). It covers: running the OpenSandbox server with Kubernetes runtime (per [Alibaba OpenSandbox kubernetes/](https://github.com/alibaba/OpenSandbox/tree/main/kubernetes)); running Augment API and workers on K8s (Deployment); required env (`OPENSANDBOX_DOMAIN`, `REDIS_*`, `SANDBOX_RUNTIME=kubernetes`) and `config.yaml` `features.sandbox_runtime: kubernetes`; and a minimal worker manifest in [opensandbox-augment-worker-deployment.yaml](../deployment/opensandbox-augment-worker-deployment.yaml). `config.yaml` and `.env.example` document `SANDBOX_RUNTIME` (docker vs kubernetes); no app code changes—only config.
+
 ### Phase 6: Migration & Cleanup (Week 7-8)
 
-**Tasks:**
+**Done:**
+- **6.1** Deprecation warnings added in `OpenCodeRunner`, `Verifier`, `CodeApplier`, `DraftPRCreator` (see `src/opencode_runner.py`, `src/verifier.py`, `src/code_applier.py`, `src/draft_pr_creator.py`).
+- **6.2** Migration guide: [docs/MIGRATION_OPENSANDBOX.md](MIGRATION_OPENSANDBOX.md).
+- **6.3** Performance: `scripts/benchmark_sandbox.py` for sandbox lifecycle timing; see migration guide § Performance.
+- **6.4** `USE_SANDBOX` default set to `true` in `config.yaml` and `.env.example`.
+- **6.5** WorkspaceManager usage when sandbox disabled documented in migration guide and AGENTS.md.
+
+**Original task list:**
 
 | Task | Description |
 |------|-------------|
