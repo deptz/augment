@@ -29,6 +29,7 @@ class Verifier:
         test_command: Optional[str] = None,
         lint_command: Optional[str] = None,
         build_command: Optional[str] = None,
+        security_scan_command: Optional[str] = None,
         timeout_seconds: int = 600
     ):
         """
@@ -38,6 +39,7 @@ class Verifier:
             test_command: Command to run tests (e.g., "pytest")
             lint_command: Command to run linter (e.g., "ruff check")
             build_command: Command to run build (e.g., "npm run build")
+            security_scan_command: Optional security scan (e.g., "semgrep scan --config auto")
             timeout_seconds: Timeout for each command
         """
         warnings.warn(
@@ -48,6 +50,7 @@ class Verifier:
         self.test_command = test_command
         self.lint_command = lint_command
         self.build_command = build_command
+        self.security_scan_command = security_scan_command
         self.timeout_seconds = timeout_seconds
     
     async def verify(
@@ -70,6 +73,7 @@ class Verifier:
                 - test_results: Dict with stdout, stderr, exit_code
                 - lint_results: Dict with stdout, stderr, exit_code
                 - build_results: Dict with stdout, stderr, exit_code
+                - security_scan_results: Dict with stdout, stderr, exit_code (optional)
                 - summary: str - Human-readable summary
         """
         results = {
@@ -77,6 +81,7 @@ class Verifier:
             "test_results": None,
             "lint_results": None,
             "build_results": None,
+            "security_scan_results": None,
             "summary": ""
         }
         
@@ -111,6 +116,17 @@ class Verifier:
             )
             results["build_results"] = build_results
             if build_results["exit_code"] != 0:
+                results["passed"] = False
+        
+        # Run security scan
+        if self.security_scan_command:
+            security_scan_results = await self._run_command(
+                workspace_path,
+                self.security_scan_command,
+                "security_scan"
+            )
+            results["security_scan_results"] = security_scan_results
+            if security_scan_results["exit_code"] != 0:
                 results["passed"] = False
         
         # Generate summary
@@ -272,6 +288,18 @@ class Verifier:
                 if br.get("error_message"):
                     error_info += f": {br['error_message'][:100]}"
                 parts.append(f"Build: FAILED (exit code {br['exit_code']}{error_info})")
+        
+        if results.get("security_scan_results"):
+            sr = results["security_scan_results"]
+            if sr["exit_code"] == 0:
+                parts.append("Security scan: PASSED")
+            else:
+                error_info = ""
+                if sr.get("error_type"):
+                    error_info = f" ({sr['error_type']})"
+                if sr.get("error_message"):
+                    error_info += f": {sr['error_message'][:100]}"
+                parts.append(f"Security scan: FAILED (exit code {sr['exit_code']}{error_info})")
         
         if not parts:
             return "No verification commands configured - verification skipped (all checks passed by default)"

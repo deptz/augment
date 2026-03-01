@@ -7,11 +7,12 @@ from src.sandbox_verifier import SandboxVerifier
 
 
 def test_verify_no_commands_returns_passed():
-    """When no test/lint/build commands are set, verify returns passed=True."""
+    """When no test/lint/build/security_scan commands are set, verify returns passed=True."""
     verifier = SandboxVerifier(
         test_command=None,
         lint_command=None,
         build_command=None,
+        security_scan_command=None,
     )
     sandbox = MagicMock()
     result = asyncio.run(verifier.verify(sandbox))
@@ -19,6 +20,7 @@ def test_verify_no_commands_returns_passed():
     assert result["test_results"] is None
     assert result["lint_results"] is None
     assert result["build_results"] is None
+    assert result.get("security_scan_results") is None
     assert "No verification" in result["summary"]
     sandbox.commands.run.assert_not_called()
 
@@ -43,10 +45,12 @@ def test_verify_with_commands_calls_run(mock_sandbox_all_exit_zero):
         test_command="pytest",
         lint_command=None,
         build_command=None,
+        security_scan_command=None,
         setup_commands=["pip install -r requirements.txt 2>/dev/null || true"],
     )
     result = asyncio.run(verifier.verify(mock_sandbox_all_exit_zero))
     assert result["passed"] is True
     assert result["test_results"] is not None
     assert result["test_results"]["exit_code"] == 0
+    assert result.get("security_scan_results") is None
     assert mock_sandbox_all_exit_zero.commands.run.call_count >= 2  # setup + test

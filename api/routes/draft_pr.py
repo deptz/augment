@@ -170,6 +170,7 @@ def _get_draft_pr_pipeline() -> DraftPRPipeline:
                     test_command=verification_config.get('test_command'),
                     lint_command=verification_config.get('lint_command'),
                     build_command=verification_config.get('build_command'),
+                    security_scan_command=verification_config.get('security_scan_command'),
                     language=verification_config.get('language', 'python'),
                 )
                 apply_timeout_seconds = sandbox_config.get('apply_timeout_minutes', 45) * 60

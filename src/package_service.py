@@ -157,6 +157,12 @@ class PackageService:
                     description_parts.append("✅ Tests passed\n\n")
                 else:
                     description_parts.append(f"❌ Tests failed (exit code {tr['exit_code']})\n\n")
+            if verification_results.get('security_scan_results'):
+                sr = verification_results['security_scan_results']
+                if sr.get('exit_code') == 0:
+                    description_parts.append("✅ Security scan passed\n\n")
+                else:
+                    description_parts.append(f"❌ Security scan failed (exit code {sr.get('exit_code', -1)})\n\n")
         
         # Add implementation details
         if plan_spec.happy_paths:

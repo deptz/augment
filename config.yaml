@@ -206,6 +206,8 @@ draft_pr:
     test_command: ${DRAFT_PR_TEST_COMMAND:pytest}  # Command to run tests
     lint_command: ${DRAFT_PR_LINT_COMMAND:ruff check}  # Command to run linter
     build_command: ${DRAFT_PR_BUILD_COMMAND:}  # Command to run build (optional)
+    # Optional security scan (e.g. semgrep scan --config auto). Empty = disabled; when set, non-zero exit fails verification.
+    security_scan_command: ${DRAFT_PR_SECURITY_SCAN_COMMAND:}
   
   # Protected Paths - Require explicit team approval
   # Format: path_pattern: { require: team_name }

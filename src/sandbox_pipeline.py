@@ -303,6 +303,10 @@ Make the changes and ensure the code compiles and follows best practices.
             if tr:
                 emoji = "✅" if tr.get("exit_code") == 0 else "❌"
                 parts.append(f"{emoji} Tests {'passed' if tr.get('exit_code') == 0 else 'failed'}\n\n")
+            sr = verification_results.get("security_scan_results")
+            if sr:
+                emoji = "✅" if sr.get("exit_code") == 0 else "❌"
+                parts.append(f"{emoji} Security scan {'passed' if sr.get('exit_code') == 0 else 'failed'}\n\n")
         return {
             "title": title,
             "description": "".join(parts),

@@ -19,16 +19,18 @@ class SandboxVerifier:
         test_command: Optional[str] = None,
         lint_command: Optional[str] = None,
         build_command: Optional[str] = None,
+        security_scan_command: Optional[str] = None,
         setup_commands: Optional[List[str]] = None,
         language: str = "python",
     ):
         self.test_command = test_command
         self.lint_command = lint_command
         self.build_command = build_command
+        self.security_scan_command = security_scan_command
         self.setup_commands = setup_commands or self._default_setup(language)
 
     def _default_setup(self, language: str) -> List[str]:
-        return {
+        base = {
             "python": [
                 "pip install -r requirements.txt 2>/dev/null || true",
                 "pip install pytest ruff 2>/dev/null || true",
@@ -36,10 +38,23 @@ class SandboxVerifier:
             "node": ["npm install 2>/dev/null || true"],
             "java": ["mvn dependency:resolve 2>/dev/null || true"],
             "go": ["go mod download 2>/dev/null || true"],
+            "ruby": ["bundle install 2>/dev/null || true"],
         }.get(language, [
             "pip install -r requirements.txt 2>/dev/null || true",
             "pip install pytest ruff 2>/dev/null || true",
         ])
+        # Option B: when security_scan is enabled, ensure semgrep is available (python, node, ruby, go; java not added)
+        if self.security_scan_command:
+            base = list(base)
+            if language == "python":
+                base.append("pip install semgrep 2>/dev/null || true")
+            elif language == "node":
+                base.append("npm install -g semgrep 2>/dev/null || true")
+            elif language == "ruby":
+                base.append("pip install semgrep 2>/dev/null || true")  # many Ruby images have Python
+            elif language == "go":
+                base.append("pip install semgrep 2>/dev/null || true")  # many Go images have Python
+        return base
 
     async def verify(
         self,
@@ -59,16 +74,17 @@ class SandboxVerifier:
             repos: Reserved for future use.
 
         Returns:
-            Dict with "passed" (bool), "test_results", "lint_results", "build_results"
-            (each None or {stdout, stderr, exit_code}), and "summary" (str).
+            Dict with "passed" (bool), "test_results", "lint_results", "build_results",
+            "security_scan_results" (each None or {stdout, stderr, exit_code}), and "summary" (str).
             Does not raise; failures are reflected in passed=False and exit_code.
         """
-        if not any([self.test_command, self.lint_command, self.build_command]):
+        if not any([self.test_command, self.lint_command, self.build_command, self.security_scan_command]):
             return {
                 "passed": True,
                 "test_results": None,
                 "lint_results": None,
                 "build_results": None,
+                "security_scan_results": None,
                 "summary": "No verification commands configured",
             }
         for cmd in self.setup_commands:
@@ -78,10 +94,11 @@ class SandboxVerifier:
             ("test_results", self.test_command, "test"),
             ("lint_results", self.lint_command, "lint"),
             ("build_results", self.build_command, "build"),
+            ("security_scan_results", self.security_scan_command, "security_scan"),
         ]:
             if command:
                 tasks[key] = self._run_command(sandbox, repo_path, command, label)
-        results = {"test_results": None, "lint_results": None, "build_results": None}
+        results = {"test_results": None, "lint_results": None, "build_results": None, "security_scan_results": None}
         if tasks:
             gathered = await asyncio.gather(*tasks.values(), return_exceptions=True)
             for key, result in zip(tasks.keys(), gathered):
@@ -91,7 +108,12 @@ class SandboxVerifier:
                     results[key] = result
         results["passed"] = all(
             r is None or r.get("exit_code") == 0
-            for r in [results["test_results"], results["lint_results"], results["build_results"]]
+            for r in [
+                results["test_results"],
+                results["lint_results"],
+                results["build_results"],
+                results["security_scan_results"],
+            ]
         )
         results["summary"] = self._generate_summary(results)
         return results
@@ -117,6 +139,7 @@ class SandboxVerifier:
             ("test_results", "Tests"),
             ("lint_results", "Lint"),
             ("build_results", "Build"),
+            ("security_scan_results", "Security scan"),
         ]:
             r = results.get(key)
             if r is None:
