@@ -54,10 +54,10 @@ async def generate_single_description(
                 repos_urls = [r.url for r in repos_normalized] if repos_normalized else None
                 
                 # Check if OpenCode is enabled when repos are provided
-                if repos_normalized and not config.is_opencode_enabled():
+                if repos_normalized and not config.get_sandbox_config().get("enabled"):
                     raise HTTPException(
                         status_code=503,
-                        detail="OpenCode is not enabled. Remove repos parameter to use direct LLM, or enable OpenCode in configuration."
+                        detail="OpenSandbox is required when repos are provided. Enable OPENSANDBOX_ENABLED and ensure the worker has sandbox configured. Remove repos to use direct LLM."
                     )
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e))
