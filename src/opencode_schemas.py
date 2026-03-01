@@ -245,11 +245,33 @@ COVERAGE_CHECK_SCHEMA = {
 }
 
 
+# Plan generation result (OpenCode draft PR planning): plan spec or wrapped in "plan"
+PLAN_GENERATION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "scope": {"type": "object"},
+        "plan": {"type": "object"},
+        "happy_paths": {"type": "array", "items": {"type": "string"}},
+        "edge_cases": {"type": "array", "items": {"type": "string"}},
+        "tests": {"type": "array"},
+    },
+    "additionalProperties": True,
+}
+
+# Code application result (OpenCode apply): optional success/changes info
+CODE_APPLICATION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": True,
+}
+
 # Map job types to their schemas
 JOB_TYPE_SCHEMAS = {
     "ticket_description": TICKET_DESCRIPTION_SCHEMA,
     "task_breakdown": TASK_BREAKDOWN_SCHEMA,
     "coverage_check": COVERAGE_CHECK_SCHEMA,
+    "plan_generation": PLAN_GENERATION_SCHEMA,
+    "code_application": CODE_APPLICATION_SCHEMA,
 }
 
 
@@ -327,5 +349,11 @@ def validate_result_content(result: Dict[str, Any], job_type: str) -> bool:
         if coverage is None or not isinstance(coverage, (int, float)):
             return False
         return True
-    
+
+    elif job_type == "plan_generation":
+        return bool(result.get("plan") or (result.get("summary") and result.get("scope")))
+
+    elif job_type == "code_application":
+        return True
+
     return True
