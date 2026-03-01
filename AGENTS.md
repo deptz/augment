@@ -73,7 +73,7 @@ pytest --cov=src --cov=api          # With coverage
 - `plan_comparator.py` - Compares plan versions and highlights differences
 - `yolo_policy.py` - YOLO mode auto-approval policy evaluator
 - `code_applier.py` - Applies code changes with git transaction safety and plan-apply guards
-- `verifier.py` - Runs tests, lint, and build commands for verification
+- `verifier.py` - Runs tests, lint, build, and optional security scan for verification
 - `package_service.py` - Generates git diff and PR metadata
 - `draft_pr_creator.py` - Creates branches and draft PRs in Bitbucket
 - `draft_pr_models.py` - Pydantic models for plans, approvals, feedback, fingerprints

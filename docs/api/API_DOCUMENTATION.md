@@ -1254,6 +1254,7 @@ draft_pr:
     test_command: "pytest"
     lint_command: "ruff check"
     build_command: ""  # Optional
+    security_scan_command: ""  # Optional (e.g. semgrep scan --config auto). Empty = disabled.
   
   # Protected Paths (require team approval)
   protected_paths:

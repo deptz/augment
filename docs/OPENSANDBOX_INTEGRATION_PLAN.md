@@ -904,14 +904,16 @@ class SandboxVerifier:
         test_command: Optional[str] = None,
         lint_command: Optional[str] = None,
         build_command: Optional[str] = None,
+        security_scan_command: Optional[str] = None,
         setup_commands: Optional[List[str]] = None,
         language: str = "python",
     ):
         self.test_command = test_command
         self.lint_command = lint_command
         self.build_command = build_command
+        self.security_scan_command = security_scan_command
         self.setup_commands = setup_commands or self._default_setup(language)
-    
+
     def _default_setup(self, language: str) -> List[str]:
         return {
             "python": [
@@ -939,12 +941,13 @@ class SandboxVerifier:
             plan_spec: Unused (reserved for future plan-aware verification)
             repos: Unused (repo already cloned in sandbox)
         """
-        if not any([self.test_command, self.lint_command, self.build_command]):
+        if not any([self.test_command, self.lint_command, self.build_command, self.security_scan_command]):
             return {
                 "passed": True,
                 "test_results": None,
                 "lint_results": None,
                 "build_results": None,
+                "security_scan_results": None,
                 "summary": "No verification commands configured",
             }
         
@@ -953,17 +956,18 @@ class SandboxVerifier:
             await sandbox.commands.run(f"cd {repo_path} && {cmd}")
         
         # Run verification commands in PARALLEL
-        # Test, lint, and build don't conflict — safe to run concurrently
+        # Test, lint, build, and security_scan don't conflict — safe to run concurrently
         tasks = {}
         for key, command, label in [
             ("test_results", self.test_command, "test"),
             ("lint_results", self.lint_command, "lint"),
             ("build_results", self.build_command, "build"),
+            ("security_scan_results", self.security_scan_command, "security_scan"),
         ]:
             if command:
                 tasks[key] = self._run_command(sandbox, repo_path, command, label)
         
-        results = {"test_results": None, "lint_results": None, "build_results": None}
+        results = {"test_results": None, "lint_results": None, "build_results": None, "security_scan_results": None}
         
         if tasks:
             gathered = await asyncio.gather(*tasks.values(), return_exceptions=True)
@@ -975,7 +979,7 @@ class SandboxVerifier:
         
         results["passed"] = all(
             r is None or r["exit_code"] == 0
-            for r in [results["test_results"], results["lint_results"], results["build_results"]]
+            for r in [results["test_results"], results["lint_results"], results["build_results"], results["security_scan_results"]]
         )
         results["summary"] = self._generate_summary(results)
         return results
@@ -997,6 +1001,7 @@ class SandboxVerifier:
             ("test_results", "Tests"),
             ("lint_results", "Lint"),
             ("build_results", "Build"),
+            ("security_scan_results", "Security scan"),
         ]:
             r = results.get(key)
             if r is None:
@@ -1489,6 +1494,7 @@ draft_pr:
     test_command: ${DRAFT_PR_TEST_COMMAND:pytest}
     lint_command: ${DRAFT_PR_LINT_COMMAND:ruff check}
     build_command: ${DRAFT_PR_BUILD_COMMAND:}
+    security_scan_command: ${DRAFT_PR_SECURITY_SCAN_COMMAND:}  # Optional (e.g. semgrep scan --config auto). Empty = disabled.
     timeout_seconds: ${DRAFT_PR_VERIFY_TIMEOUT:600}
     language: ${DRAFT_PR_LANGUAGE:python}
     setup_commands: []
@@ -1832,6 +1838,7 @@ async def verify(self, sandbox, repo_path="/workspace/repo", ...):
         ("test_results", self.test_command, "test"),
         ("lint_results", self.lint_command, "lint"),
         ("build_results", self.build_command, "build"),
+        ("security_scan_results", self.security_scan_command, "security_scan"),
     ]:
         if command:
             tasks[key] = self._run_command(sandbox, repo_path, command, label)
@@ -1847,13 +1854,13 @@ async def verify(self, sandbox, repo_path="/workspace/repo", ...):
         results = {}
     
     # Fill missing keys
-    for key in ["test_results", "lint_results", "build_results"]:
+    for key in ["test_results", "lint_results", "build_results", "security_scan_results"]:
         if key not in results:
             results[key] = None
     
     results["passed"] = all(
         r is None or r["exit_code"] == 0
-        for r in [results["test_results"], results["lint_results"], results["build_results"]]
+        for r in [results["test_results"], results["lint_results"], results["build_results"], results["security_scan_results"]]
     )
     results["summary"] = self._generate_summary(results)
     return results

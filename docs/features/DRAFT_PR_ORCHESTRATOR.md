@@ -257,6 +257,7 @@ draft_pr:
     test_command: "pytest"           # Test command
     lint_command: "ruff check"       # Lint command
     build_command: ""                 # Build command (optional)
+    security_scan_command: ""        # Optional security scan (e.g. semgrep scan --config auto). Empty = disabled.
 ```
 
 ### Protected Paths
