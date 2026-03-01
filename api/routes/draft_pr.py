@@ -217,6 +217,13 @@ async def create_draft_pr(
     current_user: str = Depends(get_current_user)
 ):
     """Create a new draft PR job"""
+    # Draft PR always uses repos; require OpenSandbox (no host Docker path)
+    config = get_config()
+    if not config.get_sandbox_config().get("enabled"):
+        raise HTTPException(
+            status_code=503,
+            detail="OpenSandbox is required for Draft PR. Enable OPENSANDBOX_ENABLED and ensure the worker has sandbox configured.",
+        )
     # Check for duplicate active job (same story key)
     from ..dependencies import get_active_job_for_ticket, register_ticket_job
     active_job_id = get_active_job_for_ticket(request.story_key)

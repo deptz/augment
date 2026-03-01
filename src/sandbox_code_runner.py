@@ -253,15 +253,20 @@ class SandboxCodeRunner:
             network_policy=self.network_policy,
             entrypoint=["/opt/opensandbox/code-interpreter.sh"],
         )
-        git_ops = SandboxGitOps(sandbox)
-        await git_ops.clone(
-            url=repo_url,
-            branch=branch,
-            shallow=False,
-            git_username=self.git_username,
-            git_password=self.git_password,
-        )
-        return sandbox
+        try:
+            git_ops = SandboxGitOps(sandbox)
+            await git_ops.clone(
+                url=repo_url,
+                branch=branch,
+                shallow=False,
+                git_username=self.git_username,
+                git_password=self.git_password,
+            )
+            return sandbox
+        except Exception:
+            await self._safe_kill(sandbox)
+            self.sandbox_client.release_sandbox(f"apply-{job_id}")
+            raise
 
     async def run_code_application(
         self,
